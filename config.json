@@ -1,0 +1,54 @@
+{
+  "token": "",
+  "target_group": [""],
+  "prefix": [""],
+  "prefix_mode": "mixed",
+  "worker_num": 4,
+
+  "time_slots": [
+    {"start": "00:00", "end": "23:59"}
+  ],
+
+  "rate_limit": {
+    "messages_per_minute": 5,
+    "global_messages_per_minute": 20
+  },
+
+  "send_delay": {
+    "enabled": true,
+    "min_seconds": 1,
+    "max_seconds": 5
+  },
+
+  "llm": {
+    "enabled": true,
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "api_key": "",
+    "max_history": 100,
+    "history_expire_ms": 600000,
+    "group_message_limit": 20,
+    "intercept_auto_plugins": ["picture"],
+    "emoji_dir": "data/emoji",
+    "assistant_nickname": "LLM",
+    "identity": {
+      "name": "",
+      "role": "",
+      "style": "",
+      "rules": [
+        ""
+      ]
+    }
+  },
+
+  "mc": {
+    "host": "",
+    "fake_name": "Anonymous Player"
+  },
+
+  "rcon": {
+    "host": "",
+    "port": 25575,
+    "password": ""
+  }
+}
