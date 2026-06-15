@@ -6,12 +6,14 @@ import threading
 from core.project_reloader import start as start_project_reloader
 from core.sender import configure as configure_sender
 from core.weflow_media import configure as configure_weflow_media
+from core.windows_awake import start as start_windows_awake
 from core.queue import task_queue
 from core.weflow_client import WeFlowClient
 from core.router import Router
 from core.dispatcher import Dispatcher
 from core.worker import Worker
 from utils.dedup import Dedup
+from utils.sqlite_store import migrate_legacy_storage
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +22,8 @@ sys.path.append(BASE_DIR)
 
 def main():
     config = json.load(open("config.json", encoding="utf-8"))
+    migrate_legacy_storage()
+    start_windows_awake()
     configure_sender(config)
     configure_weflow_media(config)
     start_project_reloader()

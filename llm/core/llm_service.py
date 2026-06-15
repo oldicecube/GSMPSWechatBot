@@ -1,5 +1,9 @@
 from llm.config import get_llm_config
-from llm.core.response_parser import FALLBACK_RESPONSE, parse_llm_response
+from llm.core.response_parser import (
+    FALLBACK_RESPONSE,
+    build_error_response,
+    parse_llm_response,
+)
 from llm.memory import MemoryManager
 from llm.prompt import build_system_prompt, build_user_prompt
 from llm.provider import DeepSeekProvider
@@ -28,18 +32,22 @@ class LLMService:
         except Exception:
             self.emoji_list = []
 
-    def handle_message(self, group_id, nickname, content):
+    def handle_message(self, group_id, nickname, content, wxid=""):
         result_to_return = dict(FALLBACK_RESPONSE)
 
         try:
             if not self.config.get("enabled"):
-                return result_to_return
+                return build_error_response("LLM转发失败：LLM 功能未启用")
 
             if self.memory_manager is None:
-                return result_to_return
+                return build_error_response("LLM转发失败：记忆模块不可用")
 
+            # 初始化或重新初始化 provider（如果失败过）
             if self.provider is None:
-                self.provider = DeepSeekProvider()
+                try:
+                    self.provider = DeepSeekProvider()
+                except Exception as init_err:
+                    return build_error_response(f"LLM转发失败：LLM 客户端初始化失败 - {init_err}")
 
             self.memory_manager.add_llm_message(group_id, nickname, content)
 
@@ -52,7 +60,9 @@ class LLMService:
                 "chat_history": chat_history,
                 "group_messages": group_messages,
                 "emoji_list": emoji_list,
-                "identity": self.config.get("identity") or {}
+                "identity": self.config.get("identity") or {},
+                "llm_config": self.config or {},
+                "sender_wxid": wxid
             })
 
             messages = [
@@ -63,8 +73,8 @@ class LLMService:
             response_text = self.provider.send(messages)
             parsed = parse_llm_response(response_text, emoji_list)
             result_to_return = parsed
-        except Exception:
-            result_to_return = dict(FALLBACK_RESPONSE)
+        except Exception as e:
+            result_to_return = build_error_response(f"LLM转发失败：{e}")
 
         self._store_assistant_messages(group_id, result_to_return)
         return result_to_return

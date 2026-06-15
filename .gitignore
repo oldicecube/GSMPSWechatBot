@@ -1,45 +1,75 @@
+# ============================
+# 运行时数据（数据库、用户数据、日志）
+# ============================
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+data/blacklist.json
+data/echo.json
+data/groups/
+data/pics/
+
+# ============================
+# 输出文件
+# ============================
+output/
+
+# ============================
 # Python
+# ============================
 __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
 dist/
 build/
-*.egg
 .eggs/
+*.egg
 
-# Virtual environment
+# ============================
+# 虚拟环境
+# ============================
 venv/
 .venv/
 env/
-.env/
+.env
+*.venv
 
+# ============================
 # IDE
-.idea/
+# ============================
 .vscode/
+.idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ============================
+# 系统文件
+# ============================
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Environment & Config (contains sensitive tokens)
+# ============================
+# ComfyUI 测试输出
+# ============================
+comfyuiTest/image/
+
+# ============================
+# 环境变量文件
+# ============================
 .env
-config.json
+.env.local
+.env.*.local
 
-# Logs
+# ============================
+# 二进制文件
+# ============================
+*.exe
+
+# ============================
+# 日志
+# ============================
 *.log
-
-# Data (runtime generated)
-data/*.png
-data/*.jpg
-data/*.json
-
-# Coverage
-.coverage
-htmlcov/
-.pytest_cache/
-/.codebuddy/
+logs/

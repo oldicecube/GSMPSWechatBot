@@ -9,11 +9,11 @@ cd /d %~dp0
 
 :loop
 echo.
-echo [INFO] Starting main.py...
-python main.py
+echo [INFO] Starting launcher...
+python launcher.py
 
 echo.
-echo [WARN] Bot crashed or exited, restarting in 3 seconds...
+echo [WARN] Launcher exited, restarting in 3 seconds...
 timeout /t 3 >nul
 
 goto loop

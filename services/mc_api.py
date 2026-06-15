@@ -1,9 +1,40 @@
 from mcstatus import JavaServer
 import threading
 
-GAME_HOST = "game.sie.gdutmc.com"
+DEFAULT_GAME_HOST = "your-minecraft-server.com"
+_game_host = DEFAULT_GAME_HOST
+_game_port = None
 
 FAKE_NAME = "Anonymous Player"
+
+
+def configure(config=None):
+    global _game_host, _game_port
+
+    mc_config = {}
+    if isinstance(config, dict):
+        mc_config = (
+            config.get("mc")
+            or config.get("minecraft")
+            or config.get("mc_server")
+            or {}
+        )
+
+    host = mc_config.get("host") or mc_config.get("server") or DEFAULT_GAME_HOST
+    port = mc_config.get("port")
+
+    _game_host = str(host).strip() or DEFAULT_GAME_HOST
+
+    try:
+        _game_port = int(port) if port not in (None, "") else None
+    except (TypeError, ValueError):
+        _game_port = None
+
+
+def _create_server():
+    if _game_port is None:
+        return JavaServer.lookup(_game_host)
+    return JavaServer(_game_host, _game_port)
 
 
 # =========================
@@ -15,7 +46,7 @@ def get_status(timeout=3):
 
     def worker():
         try:
-            server = JavaServer.lookup(GAME_HOST)
+            server = _create_server()
             status = server.status()
 
             # =========================

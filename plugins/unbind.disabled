@@ -1,0 +1,54 @@
+import os
+
+from utils.sqlite_store import player_stats_all, player_stats_update
+
+COMMAND = "/unbind"
+
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+
+
+def handle(content, context):
+
+    # =========================
+    # ✔ 显示用户名（提示文本用）
+    # =========================
+    username = (
+        context.get("user")
+        or context.get("raw", {}).get("user")
+        or context.get("raw", {}).get("sourceName")
+        or context.get("raw", {}).get("from")
+        or "unknown"
+    )
+
+    # =========================
+    # ✔ 实际解绑依据：wxid
+    # =========================
+    wxid = (
+        context.get("wxid")
+        or context.get("raw", {}).get("wxid")
+    )
+
+    if not wxid:
+        return "无法获取用户信息"
+
+    data = player_stats_all()
+
+    changed = False
+
+    # =========================
+    # ✔ 基于 wxid 清除绑定
+    # =========================
+    for p, info in data.items():
+        if isinstance(info, dict):
+            if info.get("bind_user") == wxid:
+                try:
+                    player_stats_update(p, bind_user=None)
+                    changed = True
+                except Exception:
+                    return "写入失败"
+
+    if not changed:
+        return "未绑定任何玩家"
+
+    # 提示保持不变
+    return f"解绑成功：{username}"

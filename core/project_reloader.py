@@ -6,6 +6,7 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 _RESTARTING = False
+_RESTART_LOCK = threading.Lock()
 
 
 def _scan_py_mtimes():
@@ -31,14 +32,17 @@ def _scan_py_mtimes():
 def _restart_process(changed_path):
     global _RESTARTING
 
-    if _RESTARTING:
-        return
+    with _RESTART_LOCK:
+        if _RESTARTING:
+            return
+        _RESTARTING = True
 
-    _RESTARTING = True
-    print(f"[HOT-RELOAD] 检测到变更，准备重启主程序: {changed_path}")
+    print(f"[HOT-RELOAD] 检测到变更，退出码 100 → launcher 接管重启: {changed_path}")
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # 硬退出，不执行 atexit/finally。launcher.py 检测到 100 后立即重启 main.py
+    os._exit(100)
 
 
 def _watch_loop(interval):

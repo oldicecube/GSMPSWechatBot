@@ -1,5 +1,5 @@
-import re
 import json
+import re
 import os
 import time
 import threading
@@ -32,6 +32,14 @@ class Router:
         self.rate_limit_tracking = {}
         # 全局速率限制计数器：[timestamp, ...]
         self.global_rate_limit_tracking = []
+        self.rate_limit_violation_tracking = {}
+        self.auto_blacklist_enabled = bool(
+            self.rate_limit_cfg.get("auto_blacklist_enabled", False)
+        )
+        self.auto_blacklist_threshold = self._safe_int(
+            self.rate_limit_cfg.get("auto_blacklist_threshold"),
+            default=0
+        )
         self.rate_limit_lock = threading.Lock()
 
     # =========================================================
@@ -215,21 +223,63 @@ class Router:
     # }
     # =========================================================
     def _is_blacklisted(self, wxid):
-
         if not wxid:
             return False
-
-        if not os.path.exists(self.blacklist_file):
-            return False
-
         try:
             with open(self.blacklist_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             return wxid in data
-
-        except:
+        except Exception:
             return False
+
+    def _add_to_blacklist(self, wxid):
+        if not wxid:
+            return False
+        try:
+            with open(self.blacklist_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+        if wxid in data:
+            return True
+
+        data[wxid] = True
+        try:
+            with open(self.blacklist_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return False
+
+        print(f"[ROUTER] auto blacklisted wxid: {wxid}")
+        return True
+
+    def _record_rate_limit_violation(self, wxid):
+
+        if not wxid:
+            return
+
+        if not self.auto_blacklist_enabled or self.auto_blacklist_threshold <= 0:
+            return
+
+        violations = self.rate_limit_violation_tracking.get(wxid, 0) + 1
+        self.rate_limit_violation_tracking[wxid] = violations
+
+        if violations < self.auto_blacklist_threshold:
+            print(
+                f"[ROUTER] rate limit violation {wxid}: "
+                f"{violations}/{self.auto_blacklist_threshold}"
+            )
+            return
+
+        if self._add_to_blacklist(wxid):
+            self.rate_limit_violation_tracking.pop(wxid, None)
+
+    def _safe_int(self, value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     # =========================================================
     # 🧼 文本清洗
@@ -378,6 +428,7 @@ class Router:
             # 检查是否超过个人限制
             if len(self.rate_limit_tracking[wxid]) >= per_user_limit:
                 print(f"[ROUTER] {wxid} 超过速率限制 ({per_user_limit}/min)")
+                self._record_rate_limit_violation(wxid)
                 return False
 
             # 同时记录个人消息和全局消息

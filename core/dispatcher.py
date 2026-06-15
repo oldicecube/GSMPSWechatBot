@@ -29,6 +29,7 @@ class Dispatcher:
         self.config = {}
         self.llm_service = None
         self.llm_intercept_auto_plugins = set()
+        self.llm_prefix_bypass_wxids = set()
         self.auto_modules = {}
 
     # =========================================================
@@ -152,6 +153,8 @@ class Dispatcher:
         auto_target = context.get("auto_target")
 
         for name, module in self.modules.items():
+            if getattr(module, "FALLBACK_ONLY", False):
+                continue
             if auto_target:
                 if isinstance(auto_target, (list, tuple, set)):
                     if name not in auto_target:
@@ -179,7 +182,7 @@ class Dispatcher:
             if self._can_forward_to_llm(context):
                 return self._dispatch_llm(context)
 
-            return None
+            return self._dispatch_fallback_auto(context)
 
         # =====================================================
         # 3. command debug
@@ -218,9 +221,18 @@ class Dispatcher:
             if isinstance(intercept_list, str):
                 intercept_list = [intercept_list]
 
+            prefix_bypass_wxids = llm_config.get("prefix_bypass_wxids", []) or []
+            if isinstance(prefix_bypass_wxids, str):
+                prefix_bypass_wxids = [prefix_bypass_wxids]
+
             self.llm_intercept_auto_plugins = {
                 str(item).strip()
                 for item in intercept_list
+                if str(item).strip()
+            }
+            self.llm_prefix_bypass_wxids = {
+                str(item).strip()
+                for item in prefix_bypass_wxids
                 if str(item).strip()
             }
 
@@ -232,12 +244,16 @@ class Dispatcher:
             print("[LLM INIT ERROR]", e)
             self.llm_service = None
             self.llm_intercept_auto_plugins = set()
+            self.llm_prefix_bypass_wxids = set()
 
     def _can_forward_to_llm(self, context):
         if not self.llm_service:
             return False
 
-        if not context.get("prefix_used"):
+        wxid = str(context.get("wxid") or "").strip()
+        bypass_prefix_required = wxid in self.llm_prefix_bypass_wxids
+
+        if not context.get("prefix_used") and not bypass_prefix_required:
             return False
 
         content = str(context.get("content") or "").strip()
@@ -283,7 +299,8 @@ class Dispatcher:
             result = self.llm_service.handle_message(
                 group_id=context.get("group") or context.get("sessionId") or "unknown",
                 nickname=context.get("user", "未知用户"),
-                content=context.get("content", "")
+                content=context.get("content", ""),
+                wxid=context.get("wxid", "")
             )
         except Exception as e:
             print("[LLM ERROR]", e)
@@ -299,6 +316,27 @@ class Dispatcher:
             "mode": "wechat_text",
             "delay_seconds": context.get("planned_send_delay_seconds")
         }
+
+    def _dispatch_fallback_auto(self, context):
+        for name, module in self.auto_modules.items():
+            if not getattr(module, "FALLBACK_ONLY", False):
+                continue
+
+            try:
+                result = module.handle_auto(context)
+            except Exception as e:
+                print("[AUTO FALLBACK ERROR]", name, e)
+                continue
+
+            if result is None:
+                continue
+
+            if isinstance(result, dict) and result.get("forward_to_llm"):
+                return self._dispatch_llm(context)
+
+            return result
+
+        return None
 
     # =========================================================
     # debug

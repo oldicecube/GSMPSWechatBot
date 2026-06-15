@@ -2,3 +2,5 @@ Pillow>=9.0.0
 requests>=2.25.0
 openai>=2.33.0
 mcstatus>=13.0.1
+mcrcon>=0.7.0
+httpx>=0.24.0

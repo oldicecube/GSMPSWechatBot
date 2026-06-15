@@ -51,6 +51,28 @@ def get_llm_config():
         if str(item).strip()
     ]
 
+    prefix_bypass_wxids = llm_config.get("prefix_bypass_wxids", [])
+    if isinstance(prefix_bypass_wxids, str):
+        prefix_bypass_wxids = [prefix_bypass_wxids]
+    if not isinstance(prefix_bypass_wxids, list):
+        prefix_bypass_wxids = []
+    result["prefix_bypass_wxids"] = [
+        str(item).strip()
+        for item in prefix_bypass_wxids
+        if str(item).strip()
+    ]
+
+    admin_wxids = llm_config.get("admin_wxids", [])
+    if isinstance(admin_wxids, str):
+        admin_wxids = [admin_wxids]
+    if not isinstance(admin_wxids, list):
+        admin_wxids = []
+    result["admin_wxids"] = [
+        str(item).strip()
+        for item in admin_wxids
+        if str(item).strip()
+    ]
+
     emoji_dir = str(
         llm_config.get("emoji_dir")
         or ""

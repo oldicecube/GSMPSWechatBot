@@ -21,8 +21,6 @@ class MemoryManager:
         history_path = os.path.join(group_dir, "llm_history.json")
 
         history = self._load_json(history_path, default=[])
-        history = self._normalize_llm_history(history)
-        history = self._clear_expired_history(history)
 
         history.append({
             "nickname": str(nickname or ""),
@@ -40,9 +38,11 @@ class MemoryManager:
         history_path = os.path.join(group_dir, "llm_history.json")
 
         history = self._load_json(history_path, default=[])
-        history = self._normalize_llm_history(history)
         history = self._clear_expired_history(history)
-        self._write_json(history_path, history)
+
+        if self.max_history > 0:
+            history = history[-self.max_history:]
+
         return history
 
     def add_group_message(self, group_id, nickname, content):
@@ -50,7 +50,6 @@ class MemoryManager:
         messages_path = os.path.join(group_dir, "group_messages.json")
 
         messages = self._load_json(messages_path, default=[])
-        messages = self._normalize_group_messages(messages)
         messages.append({
             "nickname": str(nickname or ""),
             "timestamp": int(time.time()),
@@ -67,11 +66,9 @@ class MemoryManager:
         messages_path = os.path.join(group_dir, "group_messages.json")
 
         messages = self._load_json(messages_path, default=[])
-        messages = self._normalize_group_messages(messages)
 
         if self.group_message_limit > 0:
             messages = messages[-self.group_message_limit:]
-            self._write_json(messages_path, messages)
 
         return messages
 
@@ -83,80 +80,21 @@ class MemoryManager:
 
     def _load_json(self, path, default):
         try:
-            if not os.path.exists(path):
-                return self._clone_default(default)
-
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return self._clone_default(default)
+            return list(default) if isinstance(default, list) else dict(default)
 
     def _write_json(self, path, data):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
-            return
-
-    def _normalize_llm_history(self, history):
-        if not isinstance(history, list):
-            return []
-
-        normalized = []
-        for item in history:
-            if not isinstance(item, dict):
-                continue
-
-            try:
-                timestamp = int(item.get("timestamp", 0))
-            except Exception:
-                timestamp = 0
-
-            normalized.append({
-                "nickname": str(item.get("nickname") or ""),
-                "timestamp": timestamp,
-                "content": str(item.get("content") or "")
-            })
-
-        if self.max_history > 0:
-            normalized = normalized[-self.max_history:]
-
-        return normalized
-
-    def _normalize_group_messages(self, messages):
-        if not isinstance(messages, list):
-            return []
-
-        normalized = []
-        for item in messages:
-            if isinstance(item, dict):
-                try:
-                    timestamp = int(item.get("timestamp", 0))
-                except Exception:
-                    timestamp = 0
-
-                normalized.append({
-                    "nickname": str(item.get("nickname") or ""),
-                    "timestamp": timestamp,
-                    "content": str(item.get("content") or "")
-                })
-                continue
-
-            # 兼容旧版纯字符串数组
-            normalized.append({
-                "nickname": "",
-                "timestamp": 0,
-                "content": str(item or "")
-            })
-
-        if self.group_message_limit > 0:
-            normalized = normalized[-self.group_message_limit:]
-        return normalized
+            pass
 
     def _clear_expired_history(self, history):
         if not history:
             return []
-
         if self.history_expire_ms <= 0:
             return history
 
@@ -168,10 +106,3 @@ class MemoryManager:
             return []
 
         return history
-
-    def _clone_default(self, default):
-        if isinstance(default, list):
-            return list(default)
-        if isinstance(default, dict):
-            return dict(default)
-        return default
