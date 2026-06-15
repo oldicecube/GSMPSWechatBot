@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment & Config (contains sensitive tokens)
+.env
+config.json
+
+# Logs
+*.log
+
+# Data (runtime generated)
+data/*.png
+data/*.jpg
+data/*.json
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+/.codebuddy/
