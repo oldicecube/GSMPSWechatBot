@@ -32,6 +32,24 @@ function ensureDataDir(basePath: string) {
   }
 }
 
+// ==================== 通用工具 ====================
+
+/** 等待用户按回车（仅在 TTY 环境下生效，防止窗口闪退） */
+async function waitForEnter(): Promise<void> {
+  if (!process.stdin.isTTY) return;
+  console.log('\n按回车键退出...');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question('', () => { rl.close(); resolve(); });
+  });
+}
+
+/** 暂停后以指定退出码退出（防止窗口闪退） */
+async function exitWithPause(code: number): Promise<never> {
+  await waitForEnter();
+  process.exit(code);
+}
+
 // ==================== 交互式配置引导 ====================
 
 async function guidedSetup(configPath: string): Promise<boolean> {
@@ -116,6 +134,7 @@ async function guidedSetup(configPath: string): Promise<boolean> {
     console.log('║                                              ║');
     console.log('║  填完后重新运行即可。                        ║');
     console.log('╚══════════════════════════════════════════════╝\n');
+    await waitForEnter();
     return false;
   }
 
@@ -130,6 +149,7 @@ async function guidedSetup(configPath: string): Promise<boolean> {
   const ask = (q: string): Promise<string> =>
     new Promise((resolve) => rl.question(q, resolve));
 
+  let success = false;
   try {
     // --- Step 1: dbPath ---
     const defaultPath = dbPathService ? dbPathService.getDefaultPath() : '';
@@ -339,9 +359,13 @@ async function guidedSetup(configPath: string): Promise<boolean> {
     console.log('║   ✅ 配置完成！正在启动服务...   ║');
     console.log('╚══════════════════════════════════╝\n');
 
+    success = true;
     return true;
   } finally {
     rl.close();
+    if (!success && process.stdin.isTTY) {
+      await waitForEnter();
+    }
   }
 }
 
@@ -417,8 +441,8 @@ async function main() {
   // 1. 交互式配置引导（如需要）
   const setupOk = await guidedSetup(CONFIG_PATH);
   if (!setupOk) {
-    console.error('[weflow-core] 配置失败，退出');
-    process.exit(1);
+    console.error('[weflow-core] 配置未完成，退出');
+    await exitWithPause(1);
   }
 
   // 2. 重新加载完整配置（使用传入的配置路径）
@@ -437,7 +461,7 @@ async function main() {
 
   if (!dbPath || !myWxid || !decryptKey) {
     console.error('[weflow-core] 配置不完整: dbPath/wxid/decryptKey 缺失');
-    process.exit(1);
+    await exitWithPause(1);
   }
 
   // 3. 设置资源路径（强制转为绝对路径）
@@ -453,7 +477,7 @@ async function main() {
   const accountDir = config.getAccountDir(dbPath, myWxid);
   if (!accountDir) {
     console.error('[weflow-core] 未找到账号目录');
-    process.exit(1);
+    await exitWithPause(1);
   }
   console.log(`[weflow-core] 账号目录: ${accountDir}`);
 
@@ -462,7 +486,7 @@ async function main() {
     console.error('[weflow-core] 数据库打开失败');
     const lastErr = await wcdbService.getLastInitError();
     if (lastErr) console.error(`  错误详情: ${lastErr}`);
-    process.exit(1);
+    await exitWithPause(1);
   }
   console.log('[weflow-core] ✅ 数据库已连接');
 
@@ -499,7 +523,7 @@ async function main() {
   const httpResult = await httpService.start(apiPort, apiHost);
   if (!httpResult.success) {
     console.error(`[weflow-core] HTTP API 启动失败: ${httpResult.error}`);
-    process.exit(1);
+    await exitWithPause(1);
   }
   console.log(`[weflow-core] ✅ HTTP API 已启动: http://${apiHost}:${apiPort}`);
 
@@ -538,7 +562,7 @@ async function main() {
   });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[weflow-core] 启动失败:', err);
-  process.exit(1);
+  await exitWithPause(1);
 });
