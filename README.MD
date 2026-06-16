@@ -24,6 +24,7 @@ pip install -r requirements.txt
 ### 2. 创建配置文件
 
 ```bash
+cd 你的工作目录
 copy sample_config.json config.json
 ```
 
@@ -33,34 +34,31 @@ copy sample_config.json config.json
 
 | 字段 | 说明 |
 |------|------|
-| `token` | WeFlow API Token（见下方 WeFlow 配置章节） |
-| `target_group` | 目标群聊名称列表 |
-| `prefix` | 触发前缀列表，如 `["@bot"]` |
-| `weflow.dbPath` | 微信 xwechat_files 目录路径 |
-| `weflow.decryptKey` | 数据库解密密钥 |
-| `weflow.myWxid` | 机器人自身 wxid |
-| `weflow.wxidConfigs` | 对应 wxid 的解密/媒体密钥配置 |
+| `target_group` | 能够触发机器人回复的群聊名称列表 |
+| `prefix` | 触发前缀列表，如 `["@bot"]` ，一般是“@<群聊中自己的昵称>”|
 | `mc.host` | Minecraft 服务器地址（不用 MC 可留空） |
 | `rcon` | RCON 配置（不用可留空） |
+
+> 其他字段请根据需要补全
 
 ### 4. 启动
 
 ```bash
 python main.py
-# 或双击 start.bat
+# 建议直接双击 start.bat
 ```
 
 看到 `[WORKER] 线程启动` 即表示成功。
 
 ### 5. 验证
 
-在目标群发送 `@bot /ping`，应回复 `pong`。
+在目标群发送 `@bot /ping`，应回复 `砰！(处理消息用时x.xxx秒，延迟x.xxx秒回复)`。
 
 ---
 
 ## 三、WeFlow 配置（重要）
 
-WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集成在本项目的 `weflow-core/` 目录下，启动时自动拉起。**
+WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集成在本项目的 `weflow-core/` 目录下，检测到缺失配置时自动拉起。**
 
 ### 获取 wxid 与 decryptKey
 
@@ -71,7 +69,7 @@ WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集
 ```json
 {
   "weflow": {
-    "dbPath": "D:\\Documents\\xwechat_files",
+    "dbPath": "微信的数据库地址",
     "decryptKey": "从工具获取的 64 位 hex",
     "myWxid": "wxid_xxxxxxxx",
     "wxidConfigs": {
@@ -89,6 +87,16 @@ WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集
   }
 }
 ```
+
+微信的数据库地址可以打开 `微信设置 -> 账号与存储 -> 存储位置` 来获取
+
+自动获取密钥时，请先彻底退出微信，然后重新打开微信并在向导提醒：
+
+```
+Hook成功，现在登陆微信
+```
+
+后，开始扫码登录
 
 > `apiPort` 默认为 5031，请勿与其他服务冲突。`resourcesPath` 指向 `weflow-core/resources` 即可。
 
@@ -217,9 +225,6 @@ WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集
 
 - **WeFlow** — 微信消息拦截/解密/注入框架
 - **WechatRobot** — 微信自动化发送框架
-- **ComfyUI** — AI 图像生成引擎
-- **mcstatus** — Minecraft 服务器查询库
-- **DeepSeek** — LLM API 服务
 
 ---
 
