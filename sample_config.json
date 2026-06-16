@@ -1,5 +1,5 @@
 {
-  "_说明": "复制本文件为 config.json 并填入真实值。config.json 已被 .gitignore 忽略，不会提交到 Git。",
+  "_说明": "复制本文件为 config.json 并填入真实值。填完后删除",
 
   "token": "your-token-here",
   "target_group": ["Your Target Group Name"],
@@ -8,16 +8,15 @@
   "worker_num": 4,
 
   "weflow": {
-    "_说明": "WeFlow 微信解密/注入相关配置，必填",
-    "dbPath": "D:\\Documents\\xwechat_files",
-    "decryptKey": "your-decrypt-key-here",
-    "myWxid": "your-wxid-here",
+    "dbPath": "",
+    "decryptKey": "",
+    "myWxid": "",
     "wxidConfigs": {
       "your-wxid-here": {
-        "decryptKey": "your-decrypt-key-here",
-        "imageXorKey": 53,
-        "imageAesKey": "your-image-aes-key-here",
-        "updatedAt": 1750000000000
+        "decryptKey": "",
+        "imageXorKey": ,
+        "imageAesKey": "",
+        "updatedAt": 
       }
     },
     "apiPort": 5031,
