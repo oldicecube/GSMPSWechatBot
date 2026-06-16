@@ -399,7 +399,7 @@ class WeChatSenderV3(MessageSenderInterface):
                 return False
 
             # 将文件复制到剪贴板
-            from file_copy import copy_file_to_clipboard
+            from core.wechat_sender.file_copy import copy_file_to_clipboard
             copy_file_to_clipboard(file_path)
             time.sleep(0.3)
 
