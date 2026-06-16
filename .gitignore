@@ -4,7 +4,6 @@
 data/*.sqlite3
 data/*.sqlite3-shm
 data/*.sqlite3-wal
-data/blacklist.json
 data/echo.json
 data/groups/
 data/pics/
@@ -17,6 +16,7 @@ output/
 # ============================
 # Python
 # ============================
+__init__.py
 __pycache__/
 *.py[cod]
 *.pyo
@@ -80,3 +80,10 @@ weflow-core/dist/
 # ============================
 *.log
 logs/
+
+# ============================
+# 其他
+# ============================
+serverStatus.png
+/data/emoji/*
+/config.json
