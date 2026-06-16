@@ -57,9 +57,10 @@ def _launch_weflow_setup_wizard():
 
     if sys.platform == "win32":
         # Windows: 使用 start 打开新终端窗口，/wait 等待用户完成
+        # 使用 & 而非 && 连接 pause，确保即使 node 异常退出也能等待用户按键
         cmd = (
             f'start "WeFlow 配置向导" /wait cmd /c '
-            f'"cd /d {weflow_dir} && node dist/index.js {config_path} && echo. && echo 配置完成，按任意键继续... && pause >nul"'
+            f'"cd /d {weflow_dir} && node dist/index.js {config_path} & echo. & echo 按任意键退出... & pause >nul"'
         )
     else:
         # macOS / Linux: 尝试打开新终端
