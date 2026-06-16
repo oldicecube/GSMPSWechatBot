@@ -38,33 +38,84 @@ async function guidedSetup(configPath: string): Promise<boolean> {
   const { ConfigService } = require('./services/config');
   const { DbPathService, dbPathService } = require('./services/dbPathService');
 
-  const config = ConfigService.getInstance();
+  // ── 使用传入的 configPath，确保保存到正确的 config.json ──
+  const config = ConfigService.getInstance(configPath);
   config.init();
 
-  // 检查是否已有配置
+  // ── 检查是否已完成新人引导 ──
+  // 不仅检查 onboardingDone 标记，还要检查所有关键字段是否实际有效
+  const onboardingDone = config.get('onboardingDone');
   const existingDbPath = config.get('dbPath');
-  if (existingDbPath && existsSync(existingDbPath)) {
-    console.log('[weflow-core] 使用已有配置');
+  const existingDecryptKey = config.get('decryptKey');
+  const existingMyWxid = config.get('myWxid');
+  const wxidConfigs = config.get('wxidConfigs') || {};
+
+  const hasValidDbPath = existingDbPath && existsSync(existingDbPath);
+  const hasValidKey = existingDecryptKey && existingDecryptKey.length === 64;
+  const hasValidWxid = existingMyWxid && existingMyWxid.startsWith('wxid_');
+
+  if (onboardingDone && hasValidDbPath && hasValidKey && hasValidWxid) {
+    console.log('[weflow-core] 使用已有配置 (onboardingDone=true)');
     return true;
   }
 
-  // 非 TTY 环境（如被 Python 子进程启动时 stdin 是 PIPE）
-  // 跳过交互式引导，直接报错，让用户手动编辑 config.json
+  // ── 即使 onboardingDone 未设置，如果所有关键字段都已有效，也跳过引导 ──
+  if (!onboardingDone && hasValidDbPath && hasValidKey && hasValidWxid) {
+    console.log('[weflow-core] 检测到完整配置，自动标记为已完成');
+    config.set('onboardingDone', true);
+    return true;
+  }
+
+  // ── 自动生成 API Token（内部鉴权用，无需用户手动填写）──
+  const existingToken = config.get('httpApiToken') || '';
+  if (!existingToken || existingToken === 'your-token-here') {
+    const crypto = require('crypto');
+    const newToken = crypto.randomBytes(32).toString('hex');
+    config.set('httpApiToken', newToken);
+    console.log(`[weflow-core] 已自动生成 API Token: ${newToken.slice(0, 8)}...`);
+  }
+
+  // ── 收集所有缺失/无效的配置项 ──
+  const missingFields: string[] = [];
+  if (!hasValidDbPath) {
+    missingFields.push('weflow.dbPath');
+  }
+  if (!hasValidKey) {
+    missingFields.push('weflow.decryptKey');
+  }
+  if (!hasValidWxid) {
+    missingFields.push('weflow.myWxid');
+  }
+
+  // ── 非 TTY 环境（如被 Python 子进程启动时 stdin 是 PIPE）──
+  // 跳过交互式引导，列出所有缺失字段，让用户手动编辑 config.json
   if (!process.stdin.isTTY) {
-    console.log('\n╔══════════════════════════════════════════╗');
-    console.log('║  ⚠️  weflow-core 首次运行 — 需要配置      ║');
-    console.log('╠══════════════════════════════════════════╣');
-    console.log('║                                          ║');
-    console.log('║  请在 config.json 中设置 weflow.dbPath:  ║');
-    console.log('║                                          ║');
-    console.log('║  {                                       ║');
-    console.log('║    "weflow": {                           ║');
-    console.log('║      "dbPath": "C:\\\\Users\\\\...\\\\WeChat Files" ║');
-    console.log('║    }                                     ║');
-    console.log('║  }                                       ║');
-    console.log('║                                          ║');
-    console.log('║  然后重新运行即可。                      ║');
-    console.log('╚══════════════════════════════════════════╝\n');
+    console.log('\n╔══════════════════════════════════════════════╗');
+    console.log('║  ⚠️  weflow-core 首次运行 — 需要完成配置     ║');
+    console.log('╠══════════════════════════════════════════════╣');
+    console.log('║                                              ║');
+    console.log('║  当前配置缺失以下字段:                       ║');
+    for (const field of missingFields) {
+      const pad = field.padEnd(28);
+      console.log(`║    ✗ ${pad} ║`);
+    }
+    console.log('║                                              ║');
+    console.log('║  请在 config.json 的 weflow 段中填写:        ║');
+    console.log('║                                              ║');
+    console.log('║  {                                           ║');
+    console.log('║    "weflow": {                               ║');
+    console.log('║      "dbPath": "D:\\\\Documents\\\\xwechat_files", ║');
+    console.log('║      "decryptKey": "<64位十六进制密钥>",     ║');
+    console.log('║      "myWxid": "wxid_xxxxxxxxxxxxx"         ║');
+    console.log('║    }                                         ║');
+    console.log('║  }                                           ║');
+    console.log('║                                              ║');
+    console.log('║  💡 解密密钥获取方式:                        ║');
+    console.log('║   1. 安装 WeFlow GUI 版自动提取              ║');
+    console.log('║   2. 运行 weflow-core 在交互终端中自动获取   ║');
+    console.log('║                                              ║');
+    console.log('║  填完后重新运行即可。                        ║');
+    console.log('╚══════════════════════════════════════════════╝\n');
     return false;
   }
 
@@ -206,7 +257,62 @@ async function guidedSetup(configPath: string): Promise<boolean> {
     config.set('decryptKey', hexKey);
     config.set('wxidConfigs', wxidConfigs);
 
-    // --- Step 3: 测试连接 ---
+    // ── 增量保存：在尝试图片密钥之前先保存核心配置 ──
+    // 防止图片密钥 DLL 调用崩溃导致已获取的密钥丢失
+    config.set('onboardingDone', true);
+    console.log('   💾 核心配置已保存 (dbPath + decryptKey + wxid)');
+
+    // --- Step 3: 获取图片密钥 (XOR + AES) ---
+    console.log('\n🖼️  获取图片解密密钥 (可选，可跳过)...');
+    console.log('   图片密钥用于解密微信聊天中的图片');
+
+    const imgKeyChoice = await ask('\n   是否自动获取图片密钥？[Y/n] ');
+    if (imgKeyChoice.toLowerCase() !== 'n') {
+      try {
+        const platform = process.platform;
+        let keyService: any;
+
+        if (platform === 'darwin') {
+          const { KeyServiceMac } = require('./services/keyServiceMac');
+          keyService = new KeyServiceMac();
+        } else if (platform === 'linux') {
+          const { KeyServiceLinux } = require('./services/keyServiceLinux');
+          keyService = new KeyServiceLinux();
+        } else {
+          const { KeyService } = require('./services/keyService');
+          keyService = new KeyService();
+        }
+
+        const accountDir = config.getAccountDir(dbPath, wxid) || path.join(dbPath, wxid);
+        console.log('   正在提取图片密钥...');
+        const imgResult = await keyService.autoGetImageKey(
+          accountDir,
+          (msg: string) => { console.log(`   ${msg}`); },
+          wxid
+        );
+
+        if (imgResult.success) {
+          const wxidConfigs = config.get('wxidConfigs') || {};
+          wxidConfigs[wxid] = {
+            ...(wxidConfigs[wxid] || {}),
+            imageXorKey: imgResult.xorKey,
+            imageAesKey: imgResult.aesKey,
+            updatedAt: Date.now(),
+            decryptKey: hexKey,
+          };
+          config.set('wxidConfigs', wxidConfigs);
+          console.log(`✅ 图片密钥获取成功 (XOR=0x${imgResult.xorKey?.toString(16)}, AES=${imgResult.aesKey})`);
+        } else {
+          console.log(`⚠️  图片密钥获取失败: ${imgResult.error}`);
+          console.log('   💡 可稍后在 WeFlow GUI 中设置，或手动填入 config.json');
+        }
+      } catch (e: any) {
+        console.log(`⚠️  图片密钥提取异常: ${e.message}`);
+        console.log('   💡 可稍后在 WeFlow GUI 中设置，或手动填入 config.json');
+      }
+    }
+
+    // --- Step 4: 测试连接 ---
     console.log('\n🔗 测试数据库连接...');
     const accountDir = config.getAccountDir(dbPath, wxid);
     if (!accountDir) {
@@ -315,13 +421,13 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. 重新加载完整配置
+  // 2. 重新加载完整配置（使用传入的配置路径）
   const { ConfigService } = require('./services/config');
   const { wcdbService } = require('./services/wcdbService');
 
   // 重置实例以重新加载
   ConfigService.resetInstance();
-  const config = ConfigService.getInstance();
+  const config = ConfigService.getInstance(CONFIG_PATH);
   config.init();
 
   const dbPath = config.get('dbPath');

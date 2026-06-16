@@ -8,15 +8,16 @@
   "worker_num": 4,
 
   "weflow": {
+    "_说明": "WeFlow 微信解密/注入相关配置，必填。dbPath 填微信文件目录如 D:\\Documents\\xwechat_files",
     "dbPath": "",
     "decryptKey": "",
     "myWxid": "",
     "wxidConfigs": {
       "your-wxid-here": {
         "decryptKey": "",
-        "imageXorKey": ,
+        "imageXorKey": 0,
         "imageAesKey": "",
-        "updatedAt": 
+        "updatedAt": 0
       }
     },
     "apiPort": 5031,

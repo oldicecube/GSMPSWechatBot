@@ -9,37 +9,49 @@ echo.
 
 cd /d %~dp0
 
-:: 检查 weflow-core 是否已构建
+:: Check if weflow-core has been built
 if not exist "weflow-core\dist\index.js" (
-    echo [SETUP] 首次运行，正在构建 weflow-core...
-    cd weflow-core
+    echo [SETUP] First run, building weflow-core...
+    if not exist "weflow-core\package.json" (
+        echo [ERROR] weflow-core\package.json not found, skipping build.
+        goto skip_weflow_build
+    )
+    pushd weflow-core
     call npm install
+    if %errorlevel% neq 0 (
+        echo [WARN] npm install failed, continuing anyway...
+    )
     node esbuild.config.mjs
-    cd ..
-    echo [SETUP] 构建完成
+    popd
+    echo [SETUP] Build complete
     echo.
 )
+:skip_weflow_build
 
-:: 创建 WeFlow.exe（node.exe 重命名，绕过 DLL 进程校验）
+:: Create WeFlow.exe (rename node.exe to bypass DLL process check)
 if not exist "weflow-core\WeFlow.exe" (
-    echo [SETUP] 正在创建 WeFlow.exe...
-    for /f "tokens=*" %%i in ('where node') do (
+    echo [SETUP] Creating WeFlow.exe...
+    for /f "tokens=*" %%i in ('where node 2^>nul') do (
         copy /y "%%i" "weflow-core\WeFlow.exe" >nul
     )
-    echo [SETUP] WeFlow.exe 已创建
+    if exist "weflow-core\WeFlow.exe" (
+        echo [SETUP] WeFlow.exe created
+    ) else (
+        echo [WARN] WeFlow.exe not created, node.exe may not be in PATH
+    )
     echo.
 )
 
-:: 安装 Python 依赖（如需要）
+:: Install Python dependencies (if needed)
 pip install -r requirements.txt -q 2>nul
 echo.
 
 :loop
-echo [INFO] 启动...
+echo [INFO] Starting...
 python main.py
 
 echo.
-echo [WARN] 已退出，3 秒后重启...
+echo [WARN] Exited, restarting in 3 seconds...
 timeout /t 3 >nul
 
 goto loop

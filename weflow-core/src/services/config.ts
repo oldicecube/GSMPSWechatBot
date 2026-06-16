@@ -105,9 +105,9 @@ export class ConfigService {
       || join(process.cwd(), 'config.json')
   }
 
-  static getInstance(): ConfigService {
+  static getInstance(configPath?: string): ConfigService {
     if (!ConfigService.instance) {
-      ConfigService.instance = new ConfigService()
+      ConfigService.instance = new ConfigService(configPath)
     }
     return ConfigService.instance
   }
@@ -143,7 +143,58 @@ export class ConfigService {
     try {
       const dir = dirname(this.configPath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      writeFileSync(this.configPath, JSON.stringify(this.data, null, 2), 'utf8')
+
+      // ── 保留原始 JSON 结构：读取现有文件，更新 weflow 段 ──
+      let raw: any = {}
+      try {
+        if (existsSync(this.configPath)) {
+          raw = JSON.parse(readFileSync(this.configPath, 'utf8'))
+        }
+      } catch { /* 文件不存在或损坏，使用空对象 */ }
+
+      if (!raw || typeof raw !== 'object') raw = {}
+
+      // 确保 weflow 子对象存在
+      if (!raw.weflow || typeof raw.weflow !== 'object') {
+        raw.weflow = {}
+      }
+
+      // 将 weflow 相关字段写回 weflow 子对象
+      const wf = raw.weflow
+      wf.dbPath = this.data.dbPath
+      wf.decryptKey = this.data.decryptKey
+      wf.myWxid = this.data.myWxid
+      wf.wxidConfigs = this.data.wxidConfigs
+      wf.apiPort = this.data.apiPort
+      wf.apiHost = this.data.apiHost
+      wf.apiToken = this.data.apiToken
+      wf.resourcesPath = this.data.resourcesPath
+      wf.messagePushEnabled = this.data.messagePushEnabled
+      wf.messagePushFilterMode = this.data.messagePushFilterMode
+      wf.messagePushFilterList = this.data.messagePushFilterList
+
+      // ── 清理旧占位 wxid（your-wxid-here），保留真实账号 ──
+      if (wf.wxidConfigs && typeof wf.wxidConfigs === 'object') {
+        const realWxid = this.data.myWxid
+        for (const key of Object.keys(wf.wxidConfigs)) {
+          if (key === 'your-wxid-here' && realWxid && wf.wxidConfigs[realWxid]) {
+            delete wf.wxidConfigs[key]
+          }
+        }
+      }
+
+      // 仅同步 token 到顶层（Python 端读取 config.token）
+      raw.token = this.data.apiToken
+      raw.onboardingDone = this.data.onboardingDone
+
+      // 删除可能残留的冗余顶层字段（已合并到 weflow 中）
+      delete raw.dbPath
+      delete raw.decryptKey
+      delete raw.myWxid
+      delete raw.imageXorKey
+      delete raw.imageAesKey
+
+      writeFileSync(this.configPath, JSON.stringify(raw, null, 2), 'utf8')
     } catch (e) {
       console.error('[ConfigService] Save failed:', e)
     }
@@ -173,9 +224,9 @@ export class ConfigService {
       cachePath: String(raw.cachePath || ''),
       lastOpenedDb: String(raw.lastOpenedDb || ''),
       lastSession: String(raw.lastSession || ''),
-      onboardingDone: Boolean(raw.onboardingDone),
-      imageXorKey: Number(raw.imageXorKey) || 0,
-      imageAesKey: String(raw.imageAesKey || ''),
+      onboardingDone: Boolean(raw.onboardingDone || wf.onboardingDone),
+      imageXorKey: Number(raw.imageXorKey || wf.imageXorKey) || 0,
+      imageAesKey: String(raw.imageAesKey || wf.imageAesKey || ''),
       authEnabled: Boolean(raw.authEnabled),
       authPassword: String(raw.authPassword || ''),
       notificationEnabled: raw.notificationEnabled !== false,
