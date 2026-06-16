@@ -1,0 +1,11 @@
+{
+  "weflow": {
+    "dbPath": "C:\\Users\\Public\\Documents\\WeChat Files",
+    "apiPort": 5031,
+    "apiHost": "127.0.0.1",
+    "resourcesPath": "./resources",
+    "messagePushEnabled": true
+  },
+  "token": "test-token-12345",
+  "target_group": ["test-group"]
+}

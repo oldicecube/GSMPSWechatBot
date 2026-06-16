@@ -54,21 +54,30 @@ def handle_auto(context):
         return None
 
     # =========================
-    # 匹配规则
+    # 匹配规则：拍了拍 + prefix 即触发
+    # WeChat 拍一拍消息可能吞掉 prefix 开头的 @，做兼容
     # =========================
-    pattern = r"拍了拍.*服务器状态@?我"
+    prefixes = CONFIG.get("prefix", []) if CONFIG else []
 
-    if not re.search(pattern, content):
-        return None
+    def _match_prefix(text, pfx):
+        escaped = re.escape(pfx)
+        if re.search(r'拍了拍.*' + escaped, text):
+            return True
+        # 兼容 WeChat 吃掉开头 @ 的情况
+        if pfx.startswith('@'):
+            escaped_no_at = re.escape(pfx[1:])
+            if re.search(r'拍了拍.*' + escaped_no_at, text):
+                return True
+        return False
 
-    target = group or user
-    if not target:
-        return None
+    for prefix in prefixes:
+        if _match_prefix(content, prefix):
+            target = group or user
+            if not target:
+                return None
+            return "拍你吗"
 
-    # =========================
-    # 命中输出
-    # =========================
-    return f"拍你吗"
+    return None
 
 
 def allow_llm(context):
@@ -76,5 +85,15 @@ def allow_llm(context):
     if not content:
         return True
 
-    pattern = r"拍了拍.*服务器状态@?我"
-    return re.search(pattern, content) is None
+    prefixes = CONFIG.get("prefix", []) if CONFIG else []
+
+    for prefix in prefixes:
+        escaped = re.escape(prefix)
+        if re.search(r'拍了拍.*' + escaped, content):
+            return False
+        # 兼容 WeChat 吃掉开头 @ 的情况
+        if prefix.startswith('@'):
+            escaped_no_at = re.escape(prefix[1:])
+            if re.search(r'拍了拍.*' + escaped_no_at, content):
+                return False
+    return True

@@ -64,6 +64,13 @@ comfyuiTest/image/
 .env.*.local
 
 # ============================
+# weflow-core
+# ============================
+weflow-core/config.json
+weflow-core/node_modules/
+weflow-core/dist/
+
+# ============================
 # 二进制文件
 # ============================
 *.exe

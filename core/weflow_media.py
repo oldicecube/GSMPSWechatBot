@@ -74,6 +74,12 @@ def list_messages(session_id, limit=20, media=True, image=True, timeout=8):
 def find_image_url_by_timestamp(session_id, target_ts, limit=20):
     msgs = list_messages(session_id=session_id, limit=limit, media=True, image=True)
 
+    # 调试：打印收到的消息
+    image_msgs = [m for m in msgs if m.get("localType") == 3]
+    print(f"[symmetry-diag] API返回 {len(msgs)} 条消息, 其中图片 {len(image_msgs)} 条")
+    for m in image_msgs[:3]:
+        print(f"[symmetry-diag]   图片消息 localId={m.get('localId')} mediaType={m.get('mediaType')} mediaUrl={m.get('mediaUrl','(无)')[:60] if m.get('mediaUrl') else '(无)'}")
+
     best_url = None
     best_diff = None
 

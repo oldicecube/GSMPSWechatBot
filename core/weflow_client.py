@@ -17,23 +17,18 @@ class WeFlowClient:
     # 2. messageKey 倒数第二段
     # =========================
     def get_wxid(self, msg: dict):
-        content = msg.get("content", "")
+        # SSE 推送直接包含 senderWxid
+        sender_wxid = msg.get("senderWxid", "")
+        if sender_wxid and sender_wxid.strip():
+            return sender_wxid.strip()
 
-        # ① content 第一行提取
+        # 兜底：从 content 第一行提取
+        content = msg.get("content", "")
         if content:
             first_line = content.split("\n")[0].strip()
             m = re.match(r"^(wxid_[^:]+):?$", first_line)
             if m:
                 return m.group(1)
-
-        # ② messageKey 提取
-        mk = msg.get("messageKey", "")
-        if mk:
-            parts = mk.split(":")
-            if len(parts) >= 2:
-                maybe = parts[-2]
-                if maybe.startswith("wxid_"):
-                    return maybe
 
         return None
 
@@ -131,13 +126,14 @@ class WeFlowClient:
                         except:
                             continue
 
-                        if not msg.get("messageKey"):
+                        # 使用 rawid 去重（SSE 推送事件不含 messageKey）
+                        rawid = msg.get("rawid") or msg.get("messageKey")
+                        if not rawid:
                             continue
 
-                        key = msg["messageKey"]
-                        if self.dedup.exists(key):
+                        if self.dedup.exists(rawid):
                             continue
-                        self.dedup.add(key)
+                        self.dedup.add(rawid)
 
                         # =========================
                         # 🧠 统一结构

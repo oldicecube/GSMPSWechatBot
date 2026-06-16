@@ -1,7 +1,7 @@
 from mcstatus import JavaServer
 import threading
 
-DEFAULT_GAME_HOST = "your-minecraft-server.com"
+DEFAULT_GAME_HOST = "game.sie.gdutmc.com"
 _game_host = DEFAULT_GAME_HOST
 _game_port = None
 

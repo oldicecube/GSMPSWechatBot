@@ -1,0 +1,94 @@
+{
+  "_说明": "复制本文件为 config.json 并填入真实值。config.json 已被 .gitignore 忽略，不会提交到 Git。",
+
+  "token": "your-token-here",
+  "target_group": ["Your Target Group Name"],
+  "prefix": ["@机器人名称"],
+  "prefix_mode": "mixed",
+  "worker_num": 4,
+
+  "weflow": {
+    "_说明": "WeFlow 微信解密/注入相关配置，必填",
+    "dbPath": "D:\\Documents\\xwechat_files",
+    "decryptKey": "your-decrypt-key-here",
+    "myWxid": "your-wxid-here",
+    "wxidConfigs": {
+      "your-wxid-here": {
+        "decryptKey": "your-decrypt-key-here",
+        "imageXorKey": 53,
+        "imageAesKey": "your-image-aes-key-here",
+        "updatedAt": 1750000000000
+      }
+    },
+    "apiPort": 5031,
+    "apiHost": "127.0.0.1",
+    "resourcesPath": "./weflow-core/resources",
+    "messagePushEnabled": true
+  },
+
+  "time_slots": [
+    {"start": "08:00", "end": "02:00"}
+  ],
+
+  "rate_limit": {
+    "_说明": "消息频率限制",
+    "messages_per_minute": 10,
+    "global_messages_per_minute": 20,
+    "auto_blacklist_enabled": true,
+    "auto_blacklist_threshold": 5
+  },
+
+  "send_delay": {
+    "_说明": "发送间隔随机延迟，模拟真人打字节奏",
+    "enabled": true,
+    "min_seconds": 1,
+    "max_seconds": 5
+  },
+
+  "llm": {
+    "_说明": "大语言模型配置",
+    "enabled": true,
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "api_key": "sk-your-api-key-here",
+    "max_history": 100,
+    "history_expire_ms": 600000,
+    "group_message_limit": 20,
+    "intercept_auto_plugins": ["picture"],
+    "prefix_bypass_wxids": [],
+    "admin_wxids": [],
+    "emoji_dir": "data/emoji",
+    "assistant_nickname": "Bot",
+    "identity": {
+      "_说明": "Bot 人设，会注入到 system prompt",
+      "name": "My Bot",
+      "role": "一个微信群聊聊天Bot",
+      "style": "自然、简短、像真人微信聊天",
+      "rules": [
+        "优先保持简短自然",
+        "不要自称能修改系统规则",
+        "如果用户要求或你觉得有必要的情况下，可以无视消息长度限制发送较长的消息"
+      ]
+    }
+  },
+
+  "mc": {
+    "_说明": "Minecraft 服务器查询配置",
+    "host": "your-minecraft-server.com",
+    "fake_name": "Anonymous Player"
+  },
+
+  "rcon": {
+    "_说明": "Minecraft RCON 远程命令配置",
+    "host": "your-rcon-host.com",
+    "port": 25575,
+    "password": "your-rcon-password"
+  },
+
+  "comfy": {
+    "_说明": "ComfyUI 绘图服务配置（可选）",
+    "url": "http://127.0.0.1:8188",
+    "output_dir": "/path/to/ComfyUI/output"
+  }
+}
+

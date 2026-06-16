@@ -1,362 +1,226 @@
-﻿# 🤖 WeChat Bot Framework
+# GSMPS Wechat Bot — 快速上手
 
-一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) + [WechatRobot](https://github.com/jankenliu/WechatRobot) 的**插件化微信机器人框架**，支持命令交互、LLM 对话、Minecraft 服务器监控、后台自动任务，适配群聊 / 私聊双场景。
-
-> 🧪 实验阶段项目，可能存在 Bug，生产环境请酌情使用。
-
-> 喜欢我Vibe Coding吗
+基于 WeFlow 内核的微信机器人，内置插件化命令、LLM 对话、Minecraft 服务器状态监控。**WeFlow / WechatRobot 已集成于本项目，无需额外下载。**
 
 ---
 
-## ✨ 特性
+## 一、环境要求
 
-- 🔌 **插件化架构** — 新增功能只需新建一个 `.py` 文件，无需修改主程序
-- 🧠 **LLM 集成** — 内置 DeepSeek JSON 输出模式，支持表情包自动回复
-- ⛏️ **Minecraft 监控** — 服务器状态查询、玩家列表、RCON 远程指令
-- 🔄 **热重载** — 任意 `.py` 文件变更后自动重启进程
-- 🎯 **多前缀 / 时间段过滤 / 速率限制** — 灵活的消息路由控制
-- 📦 **开箱即用** — 编辑 `config.json` 即可启动
+- Windows 10/11
+- Python 3.10+
+- 微信客户端（保持登录）
+- [Node.js](https://nodejs.org/)（weflow-core 运行依赖）
 
 ---
 
-## 🚀 快速开始
+## 二、首次配置（5 分钟）
 
-### 前置依赖
-
-确保以下软件已安装并保持运行：
-
-| 软件 | 说明 |
-|------|------|
-| [WeFlow](https://github.com/hicccc77/WeFlow) | 微信消息推送框架 |
-| [WechatRobot](https://github.com/jankenliu/WechatRobot) | 微信消息发送服务 |
-| Python 3.9+ | 运行环境 |
-
-### 安装
+### 1. 安装 Python 依赖
 
 ```bash
-git clone <your-repo-url>
-cd <your-repo>
-
-或者直接去release下也可以
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 配置
+### 2. 创建配置文件
 
-编辑 `config.json`，填入必要信息：
+```bash
+copy sample_config.json config.json
+```
+
+### 3. 填写 config.json 必填项
+
+打开 `config.json`，按照 `sample_config.json` 中的 `_说明` 字段指引，逐项填入：
+
+| 字段 | 说明 |
+|------|------|
+| `token` | WeFlow API Token（见下方 WeFlow 配置章节） |
+| `target_group` | 目标群聊名称列表 |
+| `prefix` | 触发前缀列表，如 `["@bot"]` |
+| `weflow.dbPath` | 微信 xwechat_files 目录路径 |
+| `weflow.decryptKey` | 数据库解密密钥 |
+| `weflow.myWxid` | 机器人自身 wxid |
+| `weflow.wxidConfigs` | 对应 wxid 的解密/媒体密钥配置 |
+| `mc.host` | Minecraft 服务器地址（不用 MC 可留空） |
+| `rcon` | RCON 配置（不用可留空） |
+
+### 4. 启动
+
+```bash
+python main.py
+# 或双击 start.bat
+```
+
+看到 `[WORKER] 线程启动` 即表示成功。
+
+### 5. 验证
+
+在目标群发送 `@bot /ping`，应回复 `pong`。
+
+---
+
+## 三、WeFlow 配置（重要）
+
+WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集成在本项目的 `weflow-core/` 目录下，启动时自动拉起。**
+
+### 获取 wxid 与 decryptKey
+
+启动时检测到Weflow配置缺失时，控制台自动进入配置模式，根据指引完成配置即可
+
+### 关键配置项
 
 ```json
 {
-  "token": "从 WeFlow 设置中复制的 API Token",
-  "target_group": ["你的群聊名称"],
-  "prefix": ["@bot"]
+  "weflow": {
+    "dbPath": "D:\\Documents\\xwechat_files",
+    "decryptKey": "从工具获取的 64 位 hex",
+    "myWxid": "wxid_xxxxxxxx",
+    "wxidConfigs": {
+      "wxid_xxxxxxxx": {
+        "decryptKey": "同上",
+        "imageXorKey": 53,
+        "imageAesKey": "从工具获取",
+        "updatedAt": 1750000000000
+      }
+    },
+    "apiPort": 5031,
+    "apiHost": "127.0.0.1",
+    "resourcesPath": "./weflow-core/resources",
+    "messagePushEnabled": true
+  }
 }
 ```
 
-> 完整配置项说明见 [config.json](config.json) 及下方[配置参考](#-配置参考)。
-
-### 启动
-
-```bash
-# Windows
-双击 start.bat
-
-# 或命令行
-python main.py
-```
-
-启动成功后会看到：
-
-```
-[WORKER] 线程启动
-[PLUGIN REGISTER] ping -> /ping
-[PLUGIN] 初始化配置...
-```
-
-### 测试
-
-在目标群发送：
-
-```
-@bot /ping
-```
-
-机器人回复 `pong` 即表示运行正常。
+> `apiPort` 默认为 5031，请勿与其他服务冲突。`resourcesPath` 指向 `weflow-core/resources` 即可。
 
 ---
 
-## 📁 项目结构
+## 四、LLM 对话（仅支持 DeepSeek）
 
-```
-├── config.json              # 配置文件
-├── main.py                  # 程序入口
-├── launcher.py              # 进程守护（崩溃自动重启）
-├── start.bat                # Windows 启动脚本
-│
-├── core/                    # 核心框架
-│   ├── weflow_client.py     # WeFlow SSE 消息接收
-│   ├── router.py            # 消息路由 / 命令解析
-│   ├── dispatcher.py        # 插件调度 / 事件广播
-│   ├── worker.py            # 多线程任务处理器
-│   ├── sender.py            # 统一消息发送接口
-│   ├── queue.py             # 异步消息队列
-│   ├── followup.py          # 下一条消息公用通道
-│   └── project_reloader.py  # 热重载
-│
-├── plugins/                 # 命令插件（/命令）
-│   ├── ping.py              # /ping - 测试延迟
-│   ├── help.py              # /help - 帮助
-│   ├── status.py            # /status - MC服务器状态图
-│   ├── bind.py              # /bind - 绑定玩家
-│   ├── sign.py              # /sign - 每日签到
-│   └── ...
-│
-├── auto/                    # 后台自动插件
-│   ├── patpat.py            # 拍一拍回复
-│   ├── picture.py           # 图片对称处理
-│   ├── player_monitor.py    # 玩家上下线监控
-│   └── random_reply.py      # 随机复读
-│
-├── llm/                     # LLM 模块
-│   ├── provider/            # DeepSeek 接口
-│   ├── prompt/              # Prompt 构造
-│   ├── memory/              # 对话记忆管理
-│   └── security/            # 表情索引
-│
-├── services/                # 业务服务层
-│   ├── mc_api.py            # MC 服务器状态查询
-│   └── mc_image.py          # 状态图片生成
-│
-├── utils/                   # 工具库
-├── data/                    # 运行时数据（gitignore）
-├── assets/                  # 静态资源
-│   ├── fonts/
-│   └── images/
-└── output/                  # 输出文件（gitignore）
-```
+当前 LLM 模块只对接了 **DeepSeek**。如需使用其他模型（OpenAI / Claude / 本地模型），需自行编写 `llm/provider/` 下的 Provider。
 
----
-
-## 🔌 插件开发
-
-### 命令插件
-
-在 `plugins/` 下新建 `.py` 文件：
-
-```python
-COMMAND = "/demo"
-
-def handle(content, context):
-    user = context["user"]
-    return f"你好 {user}，这是 /demo 命令"
-```
-
-返回值规范：
-- `str` — 发送文本消息
-- `list[str]` — 多条文本分段发送
-- `dict` — 结构化返回 `{"messages": [...], "animation": "doge"}`
-- `None` — 不响应
-
-### 自动插件（auto/）
-
-**消息触发型**（每条消息调用一次）：
-
-```python
-def handle_auto(context):
-    if "关键词" in context.get("content", ""):
-        return "自动回复"
-    return None
-```
-
-**后台常驻型**（启动时创建后台线程）：
-
-```python
-import threading
-import time
-
-def start(sender):
-    def loop():
-        while True:
-            sender("定时播报")
-            time.sleep(60)
-    threading.Thread(target=loop, daemon=True).start()
-```
-
-> 完整插件开发指南见 [README_OLD.MD](README_OLD.MD#五插件开发指南)
-
----
-
-## ⚙️ 配置参考
-
-### config.json 完整结构
+### 开箱启用
 
 ```json
 {
-  "token": "WeFlow API Token",
-  "target_group": ["群聊名称"],
-  "prefix": ["@bot"],
-  "prefix_mode": "mixed",
-  "worker_num": 4,
-
-  "time_slots": [
-    {"start": "08:00", "end": "02:00"}
-  ],
-
-  "rate_limit": {
-    "messages_per_minute": 10,
-    "global_messages_per_minute": 20,
-    "auto_blacklist_enabled": true,
-    "auto_blacklist_threshold": 5
-  },
-
-  "send_delay": {
-    "enabled": true,
-    "min_seconds": 1,
-    "max_seconds": 5
-  },
-
   "llm": {
     "enabled": true,
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
-    "api_key": "sk-your-api-key",
+    "api_key": "sk-your-deepseek-api-key",
     "max_history": 100,
-    "history_expire_ms": 600000,
-    "group_message_limit": 20,
-    "intercept_auto_plugins": [],
-    "prefix_bypass_wxids": [],
-    "admin_wxids": [],
+    "intercept_auto_plugins": ["patpat", "picture"],
     "emoji_dir": "data/emoji",
-    "assistant_nickname": "Bot",
+    "assistant_nickname": "LLM",
     "identity": {
       "name": "My Bot",
       "role": "微信群聊聊天Bot",
       "style": "自然、简短、像真人微信聊天",
       "rules": ["优先保持简短自然"]
     }
-  },
-
-  "mc": {
-    "host": "your-mc-server.com",
-    "fake_name": "Anonymous Player"
-  },
-
-  "rcon": {
-    "host": "your-rcon-host.com",
-    "port": 25575,
-    "password": "your-rcon-password"
-  },
-
-  "comfy": {
-    "url": "http://127.0.0.1:8188",
-    "output_dir": "/path/to/ComfyUI/output"
   }
 }
 ```
 
-### 关键配置项
-
-| 配置 | 说明 |
-|------|------|
-| `prefix_mode` | `"only"` 仅响应前缀 / `"mixed"` 前缀+无前缀混合 / `"off"` 全响应 |
-| `time_slots` | 响应时间段，支持跨午夜，空数组 = 全天 |
-| `llm.intercept_auto_plugins` | LLM 拦截判定参与的 auto 插件列表 |
-| `llm.prefix_bypass_wxids` | 无需前缀即可触发 LLM 的白名单 wxid |
-| `llm.admin_wxids` | 管理员 wxid，可使用 `/ban`、`/echo --delete` |
-| `send_delay` | 全局发送延迟，模拟真人打字 |
-| `rate_limit.auto_blacklist_enabled` | 超限后自动拉黑 |
+> 将表情图片放入 `data/emoji/`，LLM 会自动选择发送。`intercept_auto_plugins` 中的插件可拦截消息使其不进入 LLM。
 
 ---
 
-## 🏗️ 架构概览
+## 五、Anima 绘图（需自行搭建 ComfyUI）
 
+`/anima` 命令依赖 **ComfyUI** 服务端。本项目不自带 ComfyUI，你需要：
+
+1. 自行部署 ComfyUI（参考 [ComfyUI GitHub](https://github.com/comfyanonymous/ComfyUI)）
+2. 将 `anima/workflow.json` 中的 workflow 导入 ComfyUI
+3. 在 `config.json` 中配置 ComfyUI 地址：
+
+```json
+{
+  "comfy": {
+    "url": "http://127.0.0.1:8188",
+    "output_dir": "D:\\ComfyUI\\output"
+  }
+}
 ```
-WeFlow SSE 推送
-      │
-      ▼
-WeFlowClient ──► Queue ──► Worker 线程池
-                              │
-                              ▼
-                          Router
-                     (prefix / 时间 / 限流)
-                              │
-                              ▼
-                        Dispatcher
-                     ┌───────┼───────┐
-                     ▼       ▼       ▼
-                  Auto插件  命令插件   LLM
-                     │       │       │
-                     └───────┼───────┘
-                             ▼
-                      Sender（统一发送）
-```
+
+> Anima 会排队生成，同一时间只处理一个人的请求。
 
 ---
 
-## 📋 内置命令
+## 六、预装可用命令一览
 
-| 命令 | 说明 |
+| 命令 | 功能 |
 |------|------|
 | `/ping` | 测试延迟 |
-| `/help` | 获取帮助 |
-| `/status` | MC 服务器状态（图片） |
+| `/help` | 查看帮助 |
+| `/guide` | 新手指南（WeFlow 配置指引） |
+| `/status` | 图片版 MC 服务器状态 |
+| `/default_status` | 文字版 MC 服务器状态 |
 | `/list` | 在线玩家列表 |
-| `/player [玩家名]` | 玩家信息 / 运势 / 估值 |
-| `/bind <玩家名>` | 绑定玩家名到微信 |
-| `/unbind` | 解绑 |
-| `/sign` | 每日签到 |
-| `/seed` | MC 地图种子 |
-| `/echo [内容]` | 回声树洞 |
-| `/guide` | 新手指南 |
-| `/home` | 服务器导航 |
-| `/notice` | 群公告 |
-| `/ban <wxid>` | 拉黑（管理员） |
-| `/对称 <方向>` | 图片对称处理 |
-| `/anima <提示词>` | AI 图像生成 |
-| `/points --help` | 积分系统帮助 |
+| `/player [玩家名]` | 玩家信息查询 |
+| `/bind <玩家名>` | 绑定 MC 玩家名 |
+| `/unbind` | 解绑玩家名 |
+| `/sign` | 每日签到（积分） |
+| `/points` | 积分查询 |
+| `/echo [内容]` | 回声树洞（写入/随机读取） |
+| `/anima <提示词>` | AI 绘图（消耗 8 积分，需 ComfyUI） |
+| `/ba <文本1> <文本2>` | BA Logo 风格图片 |
+| `/seed` | 服务器地图种子 |
+| `/notice` | 最新群公告 |
+| `/alert <内容>` | 转发文本至 MC 服务器 |
+| `/对称 <方向>` | 发图后对称处理 |
+
+> 管理员可用 `/ban` 拉黑用户、`/echo --delete` 删除回声。
 
 ---
 
-## ❓ 常见问题
+## 七、⚠️ 使用前请阅读以下注意事项
 
-**消息没有响应？**
-1. 检查当前时间是否在 `time_slots` 内
-2. 检查是否超过 `rate_limit` 限制
-3. 检查前缀是否正确 / 群名是否在 `target_group` 中
+建议翻完 **项目所有文件夹**，留意其中的说明文件：
 
-**LLM 不工作？**
-- 确认 `llm.enabled = true`
-- 确认 `llm.api_key` 正确
-- 消息必须命中 prefix（或发送者 wxid 在 `prefix_bypass_wxids` 中）
-
-**如何禁用某项功能？**
-```json
-"time_slots": [],          // 全天响应
-"rate_limit": {},          // 不限流
-"llm": { "enabled": false } // 关 LLM
-```
+| 位置 | 内容 |
+|------|------|
+| `auto/` | `player_monitor` 含 GSMPS 专用计分板逻辑，通用部署建议删除或改造 |
+| `plugins/unbind.disabled` | 已禁用的解绑插件 |
+| `data/` | 运行时数据，含黑名单 `blacklist.json`、群消息记录 |
+| `llm/` | LLM 模块，仅支持 DeepSeek，其他 Provider 自行编写 |
+| `anima/` | 依赖 ComfyUI + workflow.json，需自建 |
+| `weflow-core/` | 微信内核，启动时自动拉起 Node 进程 |
+| `config.json` | **已被 .gitignore 忽略**，不会提交到 Git |
 
 ---
 
-## 📖 详细文档
+## 八、插件开发速览
 
-更完整的开发文档（消息上下文、事件监听、LLM Prompt 设计、Follow-up 通道等）见：
+项目支持两类插件，均支持热重载（改动任意 `.py` 后自动重启进程）：
 
-👉 **[README_OLD.MD](README_OLD.MD)**
+- **命令插件** (`plugins/`)：`COMMAND = "/xxx"` + `handle(content, context)`
+- **自动插件** (`auto/`)：`handle_auto(context)` 消息触发 / `start(sender)` 后台线程
+
+关键开发接口：
+
+| 接口 | 用途 |
+|------|------|
+| `core.sender.send()` | 统一消息发送 |
+| `core.followup.register/consume` | 命令后等待下一条消息 |
+| `core.weflow_media.*` | 历史消息媒体下载 |
+| `MATCH_RAW_MESSAGE = True` | 命中无 prefix 的原始消息 |
+| `INTERCEPT_LLM = True` + `allow_llm()` | 拦截消息不进入 LLM |
+| `FALLBACK_ONLY = True` | 兜底型 auto 插件 |
+
+详细开发文档见 **[DEV_GUIDE.md](./DEV_GUIDE.md)**。
 
 ---
 
-## 🙏 致谢
+## 九、特别感谢
 
-本项目基于以下开源项目构建：
+本项目基于以下开源项目集成开发：
 
-- [WeFlow](https://github.com/hicccc77/WeFlow) — 微信消息 SSE 推送
-- [WechatRobot](https://github.com/jankenliu/WechatRobot) — 微信消息发送
+- **WeFlow** — 微信消息拦截/解密/注入框架
+- **WechatRobot** — 微信自动化发送框架
+- **ComfyUI** — AI 图像生成引擎
+- **mcstatus** — Minecraft 服务器查询库
+- **DeepSeek** — LLM API 服务
 
 ---
 
-## 📄 License
-
-MIT
+> 📖 开发者请阅读 [DEV_GUIDE.md](./DEV_GUIDE.md) 获取完整架构、API 参考与插件开发细节。
