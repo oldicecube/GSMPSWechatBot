@@ -1,231 +1,137 @@
-# GSMPS Wechat Bot — 快速上手
+# GSMPS WeChat Bot
 
-基于 WeFlow 内核的微信机器人，内置插件化命令、LLM 对话、Minecraft 服务器状态监控。**WeFlow / WechatRobot 已集成于本项目，无需额外下载。**
+一个基于 WeFlow 的 Windows 微信群机器人框架。项目提供消息路由、命令分发、插件加载、LLM 接入、媒体处理、定时/事件任务和本地 SQLite 存储等基础能力，方便按自己的群聊或服务器需求扩展。
 
----
+> **重要：仓库内的所有插件均为预置/示例实现。** 它们包含 GSMPS、Minecraft、特定群规则、特定第三方服务和本地路径等上下文；请在实际部署前自行阅读、修改、启用或删除，不应假设任何示例插件可直接用于你的环境。
 
-## 一、环境要求
+## 环境要求
 
 - Windows 10/11
 - Python 3.10+
-- 微信客户端（保持登录）
-- [Node.js](https://nodejs.org/)（weflow-core 运行依赖）
+- Node.js（`weflow-core/` 运行依赖）
+- 已登录的微信客户端
 
----
+## 快速开始
 
-## 二、首次配置（5 分钟）
+1. 安装 Python 依赖：
 
-### 1. 安装 Python 依赖
+   ```powershell
+   pip install -r requirements.txt
+   ```
 
-```bash
-pip install -r requirements.txt
+2. 创建本地配置：
+
+   ```powershell
+   Copy-Item sample_config.json config.json
+   ```
+
+3. 编辑 `config.json`，至少填写：
+
+   | 字段 | 作用 |
+   | --- | --- |
+   | `target_group` | 允许处理的群聊名称 |
+   | `prefix` | 命令或 LLM 的触发前缀 |
+   | `weflow` | 微信数据库、密钥与账号信息 |
+
+4. 启动：
+
+   ```powershell
+   python main.py
+   ```
+
+   也可以使用 `start.bat`。缺少 WeFlow 配置时，程序会启动内置配置向导。
+
+5. 在目标群用配置的前缀发送 `/ping`，确认路由和发送链路正常。
+
+`config.json`、本地数据库、运行日志与生成内容均应仅保留在本机，默认不提交到 Git。
+
+## 项目结构
+
+```text
+core/          消息路由、调度、队列、发送与 WeFlow 客户端
+plugins/       命令插件示例
+auto/          自动任务/事件插件示例
+services/      可复用业务服务示例
+utils/         SQLite 与通用工具
+llm/           LLM 配置、上下文、Provider 与安全辅助逻辑
+anima/         ComfyUI 绘图示例资源
+data/          运行时数据目录
+weflow-core/   已集成的 WeFlow Node.js 内核
 ```
 
-### 2. 创建配置文件
+## 插件机制
 
-```bash
-cd 你的工作目录
-copy sample_config.json config.json
+插件是本项目的主要扩展点。所有仓库内插件均以示例形式提供；复制、改造或移除它们前，请先检查其依赖的配置、外部服务和数据格式。
+
+### 命令插件
+
+位于 `plugins/`，最小形式：
+
+```python
+COMMAND = "/example"
+
+def handle(content, context):
+    return "hello"
 ```
 
-### 3. 填写 config.json 必填项
+可选实现 `init(config)` 读取配置。`context` 中包含用户、群聊、wxid、原始消息、是否使用前缀等信息。
 
-打开 `config.json`，按照 `sample_config.json` 中的 `_说明` 字段指引，逐项填入：
+### 自动插件
 
-| 字段 | 说明 |
-|------|------|
-| `target_group` | 能够触发机器人回复的群聊名称列表 |
-| `prefix` | 触发前缀列表，如 `["@bot"]` ，一般是“@<群聊中自己的昵称>”|
-| `mc.host` | Minecraft 服务器地址（不用 MC 可留空） |
-| `rcon` | RCON 配置（不用可留空） |
+位于 `auto/`，可按需要实现：
 
-> 其他字段请根据需要补全
+- `init(config)`：读取配置和初始化资源
+- `start(sender)`：启动后台任务
+- `handle_auto(context)`：处理自动事件
 
-### 4. 启动
+详见 [DEV_GUIDE.md](DEV_GUIDE.md)。
 
-```bash
-python main.py
-# 建议直接双击 start.bat
-```
+## 预置示例插件
 
-看到 `[WORKER] 线程启动` 即表示成功。
+以下内容仅用于展示可扩展能力，并非通用产品功能：
 
-### 5. 验证
+| 类别 | 示例 | 部署前需要做的事 |
+| --- | --- | --- |
+| 基础命令 | `ping`、`help`、`echo`、`sign`、`points` | 按群规则修改文案、积分与数据策略 |
+| LLM | `llm/`、`plugins/player.py` 的部分功能 | 配置 API Key、模型、提示词与 Provider |
+| Minecraft | `status`、`list`、`player_monitor`、`theroom` | 配置服务器地址/RCON；删除 GSMPS 专用逻辑或按自己的服务器改造 |
+| The Room 锦标赛 | `services/tournament/`、`plugins/theroom.py` | 需要匹配的 Minecraft 数据包 Storage、RCON 与 `usercache.json` 映射 |
+| 图像 | `anima`、`ba`、`picture`、`patpat` | 准备 ComfyUI、模型、工作流与输出路径 |
 
-在目标群发送 `@bot /ping`，应回复 `砰！(处理消息用时x.xxx秒，延迟x.xxx秒回复)`。
+建议首次部署时先仅保留 `/ping` 等最简单的插件，确认基础链路后逐个启用和改造其他示例。
 
----
+## 可选服务配置
 
-## 三、WeFlow 配置（重要）
+### WeFlow
 
-WeFlow 是微信消息拦截/解密/注入的核心组件。**weflow-core 已集成在本项目的 `weflow-core/` 目录下，检测到缺失配置时自动拉起。**
+`weflow-core/` 已随仓库提供。`weflow` 配置缺失时会进入向导；微信数据库路径可在微信的“设置 → 账号与存储 → 存储位置”中获取。
 
-### 获取 wxid 与 decryptKey
+### LLM
 
-启动时检测到Weflow配置缺失时，控制台自动进入配置模式，根据指引完成配置即可
+默认示例使用 DeepSeek。其他模型需在 `llm/provider/` 中自行实现 Provider。不要将 API Key 提交到仓库。
 
-### 关键配置项
+### Minecraft / RCON
 
-```json
-{
-  "weflow": {
-    "dbPath": "微信的数据库地址",
-    "decryptKey": "从工具获取的 64 位 hex",
-    "myWxid": "wxid_xxxxxxxx",
-    "wxidConfigs": {
-      "wxid_xxxxxxxx": {
-        "decryptKey": "同上",
-        "imageXorKey": 53,
-        "imageAesKey": "从工具获取",
-        "updatedAt": 1750000000000
-      }
-    },
-    "apiPort": 5031,
-    "apiHost": "127.0.0.1",
-    "resourcesPath": "./weflow-core/resources",
-    "messagePushEnabled": true
-  }
-}
-```
+`mc` 和 `rcon` 均为可选配置。仓库中的 Minecraft 状态、玩家监控和 The Room 功能都是服务器特化示例；不使用时应在配置中留空，或移除相关插件。
 
-微信的数据库地址可以打开 `微信设置 -> 账号与存储 -> 存储位置` 来获取
+### ComfyUI
 
-自动获取密钥时，请先彻底退出微信，然后重新打开微信并在向导提醒：
+`anima/` 不包含 ComfyUI 本体。若要使用绘图示例，请自行部署 ComfyUI，并配置服务 URL、工作流与输出目录。
 
-```
-Hook成功，现在登陆微信
-```
+## 配置与安全
 
-后，开始扫码登录
+- 从 `sample_config.json` 创建 `config.json`，不要提交真实配置。
+- `sample_config.json` 中的 RCON、ComfyUI、Tournament 路径均为示例值，必须按自己的环境修改或移除。
+- `data/` 下的数据库、用户数据、群消息、黑名单等为运行时数据，不应作为公共仓库的配置来源。
+- 管理员 wxid 配置在 `llm.admin_wxids`；预置管理员命令说明见 [admin_commands.txt](admin_commands.txt)。
+- 发布前请检查所有示例插件中是否有服务器地址、群名称、账号标识、密钥或本地路径。
 
-> `apiPort` 默认为 5031，请勿与其他服务冲突。`resourcesPath` 指向 `weflow-core/resources` 即可。
+## 开发文档
 
----
+- [DEV_GUIDE.md](DEV_GUIDE.md)：架构、上下文格式、插件接口与开发建议
+- [sample_config.json](sample_config.json)：配置字段示例
+- [admin_commands.txt](admin_commands.txt)：预置示例管理员命令
 
-## 四、LLM 对话（仅支持 DeepSeek）
+## 致谢
 
-当前 LLM 模块只对接了 **DeepSeek**。如需使用其他模型（OpenAI / Claude / 本地模型），需自行编写 `llm/provider/` 下的 Provider。
-
-### 开箱启用
-
-```json
-{
-  "llm": {
-    "enabled": true,
-    "provider": "deepseek",
-    "model": "deepseek-v4-flash",
-    "api_key": "sk-your-deepseek-api-key",
-    "max_history": 100,
-    "intercept_auto_plugins": ["patpat", "picture"],
-    "emoji_dir": "data/emoji",
-    "assistant_nickname": "LLM",
-    "identity": {
-      "name": "My Bot",
-      "role": "微信群聊聊天Bot",
-      "style": "自然、简短、像真人微信聊天",
-      "rules": ["优先保持简短自然"]
-    }
-  }
-}
-```
-
-> 将表情图片放入 `data/emoji/`，LLM 会自动选择发送。`intercept_auto_plugins` 中的插件可拦截消息使其不进入 LLM。
-
----
-
-## 五、Anima 绘图（需自行搭建 ComfyUI）
-
-`/anima` 命令依赖 **ComfyUI** 服务端。本项目不自带 ComfyUI，你需要：
-
-1. 自行部署 ComfyUI（参考 [ComfyUI GitHub](https://github.com/comfyanonymous/ComfyUI)）
-2. 将 `anima/workflow.json` 中的 workflow 导入 ComfyUI
-3. 在 `config.json` 中配置 ComfyUI 地址：
-
-```json
-{
-  "comfy": {
-    "url": "http://127.0.0.1:8188",
-    "output_dir": "D:\\ComfyUI\\output"
-  }
-}
-```
-
-> Anima 会排队生成，同一时间只处理一个人的请求。
-
----
-
-## 六、预装可用命令一览
-
-| 命令 | 功能 |
-|------|------|
-| `/ping` | 测试延迟 |
-| `/help` | 查看帮助 |
-| `/guide` | 新手指南（WeFlow 配置指引） |
-| `/status` | 图片版 MC 服务器状态 |
-| `/default_status` | 文字版 MC 服务器状态 |
-| `/list` | 在线玩家列表 |
-| `/player [玩家名]` | 玩家信息查询 |
-| `/bind <玩家名>` | 绑定 MC 玩家名 |
-| `/unbind` | 解绑玩家名 |
-| `/sign` | 每日签到（积分） |
-| `/points` | 积分查询 |
-| `/echo [内容]` | 回声树洞（写入/随机读取） |
-| `/anima <提示词>` | AI 绘图（消耗 8 积分，需 ComfyUI） |
-| `/ba <文本1> <文本2>` | BA Logo 风格图片 |
-| `/seed` | 服务器地图种子 |
-| `/notice` | 最新群公告 |
-| `/alert <内容>` | 转发文本至 MC 服务器 |
-| `/对称 <方向>` | 发图后对称处理 |
-
-> 管理员可用 `/ban` 拉黑用户、`/echo --delete` 删除回声。
-
----
-
-## 七、⚠️ 使用前请阅读以下注意事项
-
-建议翻完 **项目所有文件夹**，留意其中的说明文件：
-
-| 位置 | 内容 |
-|------|------|
-| `auto/` | `player_monitor` 含 GSMPS 专用计分板逻辑，通用部署建议删除或改造 |
-| `plugins/unbind.disabled` | 已禁用的解绑插件 |
-| `data/` | 运行时数据，含黑名单 `blacklist.json`、群消息记录 |
-| `llm/` | LLM 模块，仅支持 DeepSeek，其他 Provider 自行编写 |
-| `anima/` | 依赖 ComfyUI + workflow.json，需自建 |
-| `weflow-core/` | 微信内核，启动时自动拉起 Node 进程 |
-| `config.json` | **已被 .gitignore 忽略**，不会提交到 Git |
-
----
-
-## 八、插件开发速览
-
-项目支持两类插件，均支持热重载（改动任意 `.py` 后自动重启进程）：
-
-- **命令插件** (`plugins/`)：`COMMAND = "/xxx"` + `handle(content, context)`
-- **自动插件** (`auto/`)：`handle_auto(context)` 消息触发 / `start(sender)` 后台线程
-
-关键开发接口：
-
-| 接口 | 用途 |
-|------|------|
-| `core.sender.send()` | 统一消息发送 |
-| `core.followup.register/consume` | 命令后等待下一条消息 |
-| `core.weflow_media.*` | 历史消息媒体下载 |
-| `MATCH_RAW_MESSAGE = True` | 命中无 prefix 的原始消息 |
-| `INTERCEPT_LLM = True` + `allow_llm()` | 拦截消息不进入 LLM |
-| `FALLBACK_ONLY = True` | 兜底型 auto 插件 |
-
-详细开发文档见 **[DEV_GUIDE.md](./DEV_GUIDE.md)**。
-
----
-
-## 九、特别感谢
-
-本项目基于以下开源项目集成开发：
-
-- **WeFlow** — 微信消息拦截/解密/注入框架
-- **WechatRobot** — 微信自动化发送框架
-
----
-
-> 📖 开发者请阅读 [DEV_GUIDE.md](./DEV_GUIDE.md) 获取完整架构、API 参考与插件开发细节。
+本项目集成并依赖 WeFlow / WechatRobot 等开源组件。请在分发和部署时遵守各依赖项目的许可证与使用要求。

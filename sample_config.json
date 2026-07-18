@@ -89,6 +89,19 @@
     "_说明": "ComfyUI 绘图服务配置（可选）",
     "url": "http://127.0.0.1:8188",
     "output_dir": "/path/to/ComfyUI/output"
+  },
+
+  "tournament": {
+    "_说明": "Minecraft 锦标赛系统配置（自动读取比赛并计算积分）",
+    "enabled": true,
+    "min_matches_for_ranking": 5,
+    "leaderboard_top": 10,
+    "rcon_timeout": 10,
+    "usercache_path": "C:\\path\\to\\usercache.json",
+    "games": {
+      "Lucky Pillar": {"storage": "luckypillar:games", "enabled": true},
+      "Miner Chaos": {"storage": "miner_chaos:games", "enabled": true}
+    }
   }
 }
 

@@ -1,0 +1,101 @@
+WeChat Bot 示例管理员命令清单
+================================
+
+本文件列出仓库预置示例插件中需要管理员权限的命令。
+这些命令可能依赖 GSMPS、Minecraft、RCON、The Room 数据包或本地数据结构；
+实际部署前请自行审查、修改、启用或移除相关插件。
+
+管理员身份识别：
+  通过 config.json 中 "llm.admin_wxids" 列表中的 wxid 判定。
+  非管理员执行管理员命令时静默忽略或提示无权限。
+
+本文件仅列出示例中的管理员命令，普通示例命令请参阅 plugins/help.txt。
+
+
+======================================
+一、黑名单管理 (/ban)
+======================================
+插件：plugins/ban.py
+
+/ban <wxid>
+  将指定微信用户加入黑名单。
+  加入黑名单后，该用户的消息将被机器人完全拦截（不响应）。
+  wxid 需以 "wxid_" 开头。
+  示例：/ban wxid_abc123
+
+  注意：当前仅支持加入黑名单，移除需手动编辑 data/blacklist.json。
+
+
+======================================
+二、回声树洞管理 (/echo)
+======================================
+插件：plugins/echo.py
+
+/echo --delete
+  删除最后一条回声树洞内容。
+  普通用户输入此命令不做任何处理，仅管理员可删除。
+
+
+======================================
+三、积分管理 (/points)
+======================================
+插件：plugins/points.py
+以下子命令仅管理员可用，非管理员执行无任何返回。
+
+/points --modify <数值> <wxid>
+  直接将指定用户的积分设置为给定数值。
+  示例：/points --modify 100 wxid_abc123
+
+/points +<数值> <wxid>
+  为指定用户增加积分。
+  示例：/points +50 wxid_abc123
+
+/points -<数值> <wxid>
+  为指定用户减少积分。
+  示例：/points -50 wxid_abc123
+
+/points +<数值>
+  为所有用户增加积分。
+  示例：/points +10
+
+/points -<数值>
+  为所有用户减少积分。
+  示例：/points -10
+
+
+======================================
+四、The Room 锦标赛管理 (/theroom)(专用于GSMPS服务器，可根据实际修改)
+======================================
+插件：plugins/theroom.py
+以下子命令仅管理员可用。
+
+/theroom --refresh
+  手动触发拉取 Minecraft 服务器上的最新对局数据并入库。
+  别名：/theroom --poll
+
+/theroom --recompute
+  全量重算所有玩家的积分与排名（基于已入库的原始对局数据）。
+  重算会自动清除拉取熔断状态，重新尝试之前跳过的对局 id。
+  别名：/theroom --rebuild
+
+/theroom --syncnames
+  从 config.json 中 tournament.usercache_path 指定的 usercache.json
+  导入 UUID↔玩家名映射到数据库（支持改名更新）。
+  别名：/theroom --sync
+
+/theroom --reset
+  清空所有锦标赛数据（players/matches/match_players/game_scores/season_scores）。
+  表结构保留，仅清空数据。同时清除拉取熔断状态。
+  别名：/theroom --wipe
+
+
+======================================
+附：管理员配置方法
+======================================
+在 config.json 的 llm 段中配置 admin_wxids：
+
+  "llm": {
+    "admin_wxids": ["wxid_你的微信ID"]
+  }
+
+可配置多个管理员，每个 wxid 用引号包裹，以逗号分隔。

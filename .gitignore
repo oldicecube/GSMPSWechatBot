@@ -86,3 +86,8 @@ logs/
 serverStatus.png
 /data/emoji/*
 /config.json
+uuid_sync_result.txt
+*_test_*.py
+*_test_*.out
+*_verify_*.py
+*_verify_*.out

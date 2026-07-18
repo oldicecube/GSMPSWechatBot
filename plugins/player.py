@@ -11,6 +11,18 @@ from utils.sqlite_store import (
     player_stats_top, player_stats_update,
 )
 
+try:
+    from services.tournament import leaderboard as theroom_lb
+    from services.tournament import db as theroom_db
+    from services.tournament.config import get_usercache_path
+    from services.tournament.ingest import import_usercache
+    _THEROOM_AVAILABLE = True
+except Exception as _e:
+    theroom_lb = None
+    theroom_db = None
+    _THEROOM_AVAILABLE = False
+    print(f"[PLAYER] The Room 模块未加载: {_e}")
+
 COMMAND = "/player"
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -44,6 +56,34 @@ def calc_average_days(stats):
     return max(1, (today - first_day).days + 1)
 
 
+def find_bound_player(wxid, data):
+    """根据 wxid 查找已绑定的玩家名，未绑定返回 None。"""
+    if not data:
+        return None
+    for player, stats in data.items():
+        if not isinstance(stats, dict):
+            continue
+        bind_user = stats.get("bind_user")
+        if isinstance(bind_user, str) and bind_user.strip() == wxid:
+            return player
+    return None
+
+
+def ensure_theroom_player_mapping(player_name):
+    """确保绑定玩家有 The Room UUID 映射；缺失时按需同步 usercache。"""
+    if not _THEROOM_AVAILABLE:
+        return None
+    player = theroom_db.get_player_by_name(player_name)
+    if player:
+        return player
+    try:
+        import_usercache(get_usercache_path())
+    except Exception as e:
+        print(f"[PLAYER THEROOM] usercache 自动同步失败: {e}")
+        return None
+    return theroom_db.get_player_by_name(player_name)
+
+
 def build_player_text(player, stats):
     total = stats.get("total_time", 0)
     if not isinstance(total, (int, float)):
@@ -74,6 +114,40 @@ def build_bound_player_text(player, stats, wxid=None):
         f"累计在线: {total_h:.2f} 小时\n"
         f"日均在线: {daily_h:.2f} 小时"
     )
+
+    # 今日 The Room（当日已入库的 Storage 对局统计）
+    if stats.get("theroom_stats_date") == str(datetime.now().date()):
+        total_matches = stats.get("theroom_match_count_today", 0) or 0
+        lucky_matches = stats.get("theroom_luckypillar_today", 0) or 0
+        miner_matches = stats.get("theroom_miner_chaos_today", 0) or 0
+        text += (
+            f"\n今日 The Room: {total_matches} 局"
+            f"（Lucky Pillar {lucky_matches} / Miner Chaos {miner_matches}）"
+        )
+
+    # The Room 总览（跨所有小游戏的累计对局次数与存活时长）
+    mapped_player = ensure_theroom_player_mapping(player)
+    try:
+        theroom_total = theroom_db.get_player_total_stats_by_name(player)
+    except Exception:
+        theroom_total = None
+    if mapped_player is None:
+        text += "\nThe Room: 无 UUID 信息，请找管理员绑定或同步玩家信息"
+    elif theroom_total["match_count"] > 0:
+        secs = theroom_total["total_survive_seconds"]
+        if secs < 60:
+            time_str = f"{secs}s"
+        elif secs < 3600:
+            time_str = f"{secs // 60}m{secs % 60}s"
+        else:
+            h = secs // 3600; m = (secs // 60) % 60
+            time_str = f"{h}h{m}m"
+        text += (
+            f"\nThe Room 总计: {theroom_total['match_count']} 局"
+            f" | 存活 {time_str}"
+        )
+    else:
+        text += "\nThe Room: 暂无游玩记录"
     
     # 添加积分显示（如果有wxid）
     if wxid:
@@ -409,6 +483,20 @@ def handle(content, context):
         result = template.replace("{comment}", comment)
 
         return result
+
+    # --theroom / --tr 子命令：我的 The Room 锦标赛详情
+    if content_str in ("--theroom", "--tr"):
+        if not _THEROOM_AVAILABLE:
+            return "The Room 模块未加载"
+        player_name = find_bound_player(wxid, data)
+        return theroom_lb.format_my_theroom(player_name)
+
+    # --rank / --ranking 子命令：我的 The Room 排名概览
+    if content_str in ("--rank", "--ranking"):
+        if not _THEROOM_AVAILABLE:
+            return "The Room 模块未加载"
+        player_name = find_bound_player(wxid, data)
+        return theroom_lb.format_my_rank(player_name)
 
     player = content_str
     stats = player_stats_get(player)

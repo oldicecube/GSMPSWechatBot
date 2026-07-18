@@ -42,10 +42,15 @@ def _connect():
             luckypillar_times INTEGER NOT NULL DEFAULT 0,
             battlepaint_times INTEGER NOT NULL DEFAULT 0,
             collapse_times INTEGER NOT NULL DEFAULT 0,
+            theroom_stats_date TEXT,
+            theroom_match_count_today INTEGER NOT NULL DEFAULT 0,
+            theroom_luckypillar_today INTEGER NOT NULL DEFAULT 0,
+            theroom_miner_chaos_today INTEGER NOT NULL DEFAULT 0,
             last_fortune_at TEXT
         )
         """
     )
+    _ensure_player_stats_columns(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS user_points (
@@ -58,6 +63,22 @@ def _connect():
         """
     )
     return conn
+
+
+def _ensure_player_stats_columns(conn):
+    """为既有 player_stats 表补齐 The Room 当日统计字段。"""
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(player_stats)").fetchall()
+    }
+    migrations = {
+        "theroom_stats_date": "TEXT",
+        "theroom_match_count_today": "INTEGER NOT NULL DEFAULT 0",
+        "theroom_luckypillar_today": "INTEGER NOT NULL DEFAULT 0",
+        "theroom_miner_chaos_today": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, definition in migrations.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE player_stats ADD COLUMN {name} {definition}")
 
 
 def _clone_default(default):
@@ -184,8 +205,10 @@ PLAYER_STATS_COLUMNS = [
     "player_name", "total_time", "bind_user", "first_join_at",
     "last_login_date", "login_points_today", "online_time_points_today",
     "daily_theroom_points", "luckypillar_times", "battlepaint_times",
-    "collapse_times", "last_fortune_at",
+    "collapse_times", "theroom_stats_date", "theroom_match_count_today",
+    "theroom_luckypillar_today", "theroom_miner_chaos_today", "last_fortune_at",
 ]
+PLAYER_STATS_SELECT = ", ".join(PLAYER_STATS_COLUMNS)
 
 
 def _row_to_dict(row):
@@ -200,7 +223,7 @@ def player_stats_get(player_name):
     with _LOCK:
         with _connect() as conn:
             row = conn.execute(
-                "SELECT * FROM player_stats WHERE player_name = ?",
+                f"SELECT {PLAYER_STATS_SELECT} FROM player_stats WHERE player_name = ?",
                 (player_name,),
             ).fetchone()
     return _row_to_dict(row)
@@ -210,7 +233,7 @@ def player_stats_all():
     """获取所有玩家统计数据，返回 {player_name: {...}, ...} 字典"""
     with _LOCK:
         with _connect() as conn:
-            rows = conn.execute("SELECT * FROM player_stats").fetchall()
+            rows = conn.execute(f"SELECT {PLAYER_STATS_SELECT} FROM player_stats").fetchall()
     result = {}
     for row in rows:
         d = _row_to_dict(row)
@@ -224,7 +247,7 @@ def player_stats_top(limit=5):
     with _LOCK:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM player_stats ORDER BY total_time DESC LIMIT ?",
+                f"SELECT {PLAYER_STATS_SELECT} FROM player_stats ORDER BY total_time DESC LIMIT ?",
                 (limit,),
             ).fetchall()
     result = []
@@ -282,7 +305,7 @@ def player_stats_ensure(player_name, first_join_at=None):
                     (first_join_at, player_name),
                 )
             row = conn.execute(
-                "SELECT * FROM player_stats WHERE player_name = ?",
+                f"SELECT {PLAYER_STATS_SELECT} FROM player_stats WHERE player_name = ?",
                 (player_name,),
             ).fetchone()
     return _row_to_dict(row)
@@ -352,7 +375,8 @@ def player_stats_migrate_from_json():
             val = stats.get(col, 0 if col in (
                 "total_time", "login_points_today", "online_time_points_today",
                 "daily_theroom_points", "luckypillar_times", "battlepaint_times",
-                "collapse_times",
+                "collapse_times", "theroom_match_count_today",
+                "theroom_luckypillar_today", "theroom_miner_chaos_today",
             ) else None)
             col_values[col] = val
 

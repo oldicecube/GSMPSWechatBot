@@ -1,12 +1,11 @@
 import os
 import threading
 import time
-import re
-from datetime import date
-
-from mcrcon import MCRcon
+from datetime import date, datetime, timedelta
 
 import services.mc_api as mc_api
+from auto import tournament_monitor
+from services.tournament import db as tournament_db
 from utils.points_manager import add_points
 from utils.sqlite_store import (
     player_stats_get, player_stats_all, player_stats_ensure,
@@ -16,7 +15,6 @@ from utils.sqlite_store import (
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 login_times = {}
-_rcon_config = None  # 全局RCON配置
 
 
 def format_time(seconds):
@@ -32,124 +30,66 @@ def current_time_iso(timestamp=None):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(timestamp))
 
 
-def add_scoreboard_counts_to_stats(player, scoreboard_data):
-    """将计分板数据原子累加到 player_stats 表"""
-    for key, value in scoreboard_data.items():
-        if isinstance(value, (int, float)) and int(value) > 0:
-            player_stats_increment(player, key, int(value))
-
-
-def update_daily_theroom_points(player, scoreboard_data):
-    """
-    计算 The Room 每日积分变化，返回 delta。
-    读取当前值，计算新值，写回。
-    """
-    today_str = str(date.today())
-    stats = player_stats_get(player)
-    if not stats:
-        return 0
-
-    last_login = stats.get("last_login_date")
-    current = stats.get("daily_theroom_points", 0)
-    if not isinstance(current, (int, float)):
-        current = 0
-
-    if last_login != today_str:
-        current = 0
-
-    increment = 0
-    for key in ["luckypillar_times", "battlepaint_times", "collapse_times"]:
-        value = scoreboard_data.get(key, 0)
-        if isinstance(value, (int, float)):
-            increment += int(value)
-
-    new_total = min(10, current + increment)
-    delta = new_total - int(current)
-
-    if delta != 0 or last_login != today_str:
-        player_stats_update(player, daily_theroom_points=new_total)
-
-    return delta
-
-
 def init(config):
-    """初始化player_monitor，获取rcon配置"""
-    global _rcon_config
-    _rcon_config = config.get("rcon", {})
-    print("[MC] player monitor initialized with rcon config")
+    """初始化玩家监控与基于 Storage 的 The Room 对局同步。"""
+    tournament_monitor.init(config or {})
+    print("[MC] player monitor initialized with The Room Storage sync")
 
 
-def execute_rcon_command(command):
-    """执行RCON命令并返回结果"""
-    if not _rcon_config:
-        print("[MC RCON ERROR] RCON config not initialized")
-        return None
-    
-    host = _rcon_config.get("host")
-    port = _rcon_config.get("port")
-    password = _rcon_config.get("password")
-    
-    if not all([host, port, password]):
-        print("[MC RCON ERROR] Invalid rcon config")
-        return None
-    
+def update_daily_theroom_from_matches(player_name):
+    """依据已入库的当日有效对局更新玩家统计并返回奖励差额。
+
+    单局只会在 matches 表中出现一次；按 UUID 查询使改名不影响统计。
+    daily_theroom_points 记录当天已发放的参与奖励，最高 10 分，避免同一
+    玩家多次离服时重复发奖。
+    """
+    player_stats_ensure(player_name)
+    stats = player_stats_get(player_name) or {}
+    player = tournament_db.get_player_by_name(player_name)
+    if not player:
+        print(
+            f"[MC THEROOM WARN] 未找到 {player_name} 的 UUID 映射，"
+            "请确认 usercache 已更新后执行 /theroom --syncnames"
+        )
+        return {"total": 0, "luckypillar": 0, "miner_chaos": 0, "reward_delta": 0}
+
+    day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    counts = tournament_db.get_daily_match_counts_by_uuid(
+        player["uuid"],
+        day_start.isoformat(timespec="seconds"),
+        day_end.isoformat(timespec="seconds"),
+    )
+    lucky_count = counts.get("Lucky Pillar", 0)
+    miner_count = counts.get("Miner Chaos", 0)
+    total_count = sum(counts.values())
+
+    today_str = str(date.today())
+    already_awarded = stats.get("daily_theroom_points", 0)
+    if stats.get("theroom_stats_date") != today_str:
+        # 新的一天必须从 0 开始；旧版仅有 daily_theroom_points 的记录也不会跨日继承。
+        already_awarded = 0
     try:
-        with MCRcon(host, password, port) as mcr:
-            result = mcr.command(command)
-            return result
-    except Exception as e:
-        print(f"[MC RCON ERROR] Failed to execute command: {e}")
-        return None
+        already_awarded = max(0, int(already_awarded))
+    except (TypeError, ValueError):
+        already_awarded = 0
 
-
-def parse_scoreboard_response(response):
-    """
-    解析计分板返回值
-    标准格式：player_name has 1 [scoreboard_name]
-    返回分数，如果解析失败返回None
-    """
-    if not response:
-        return None
-    
-    # 匹配 "player_name has N [scoreboard_name]" 的格式
-    match = re.search(r'has\s+(\d+)\s+\[', response)
-    if match:
-        return int(match.group(1))
-    
-    return None
-
-
-def get_player_scoreboard_data(player_name):
-    """
-    获取玩家的三个计分板数据
-    返回字典：{"luckypillar_times": score, "battlepaint_times": score, "collapse_times": score}
-    """
-    scoreboards = ["luckypillar_times", "battlepaint_times", "collapse_times"]
-    data = {}
-    
-    for scoreboard in scoreboards:
-        command = f"scoreboard players get {player_name} {scoreboard}"
-        response = execute_rcon_command(command)
-        
-        if response:
-            print(f"[MC RCON] {command} -> {response}")
-            score = parse_scoreboard_response(response)
-            data[scoreboard] = score if score is not None else 0
-        else:
-            data[scoreboard] = 0
-    
-    return data
-
-
-def reset_player_scoreboard(player_name):
-    """重置玩家的三个计分板"""
-    scoreboards = ["luckypillar_times", "battlepaint_times", "collapse_times"]
-    
-    for scoreboard in scoreboards:
-        command = f"scoreboard players reset {player_name} {scoreboard}"
-        response = execute_rcon_command(command)
-        if response:
-            print(f"[MC RCON] {command} -> {response}")
+    target_award = min(10, total_count)
+    reward_delta = max(0, target_award - already_awarded)
+    player_stats_update(
+        player_name,
+        theroom_stats_date=today_str,
+        theroom_match_count_today=total_count,
+        theroom_luckypillar_today=lucky_count,
+        theroom_miner_chaos_today=miner_count,
+        daily_theroom_points=max(already_awarded, target_award),
+    )
+    return {
+        "total": total_count,
+        "luckypillar": lucky_count,
+        "miner_chaos": miner_count,
+        "reward_delta": reward_delta,
+    }
 
 
 def start(sender):
@@ -250,6 +190,16 @@ def start(sender):
                     msgs.append("# 玩家进服: " + " ".join(joined_msgs))
 
                 if left:
+                    # 本批离服玩家共享一次 Storage 同步，避免重复 RCON 拉取。
+                    try:
+                        sync_result = tournament_monitor.sync_new_matches()
+                        if not sync_result.get("ok"):
+                            print(f"[MC THEROOM WARN] 对局同步失败: {sync_result.get('message')}")
+                        else:
+                            print(f"[MC THEROOM] {sync_result.get('message')}")
+                    except Exception as e:
+                        print(f"[MC THEROOM ERROR] 同步对局失败: {e}")
+
                     for player in left:
                         start_time = login_times.pop(player, None)
 
@@ -263,23 +213,23 @@ def start(sender):
 
                         print(f"[MC TIME] {player} session {duration}s")
 
-                        # 查询RCON计分板数据并累加到player_stats
-                        scoreboard_data = get_player_scoreboard_data(player)
-                        add_scoreboard_counts_to_stats(player, scoreboard_data)
-                        reset_player_scoreboard(player)
-
-                        # 计算The Room每日积分变化
+                        # 基于已入库 Storage 对局计算今日 The Room 次数与积分差额。
                         today_str = str(date.today())
                         pstats = player_stats_get(player)
                         last_login_date = pstats.get("last_login_date") if pstats else None
-                        ther_room_delta = update_daily_theroom_points(player, scoreboard_data)
+                        theroom_stats = update_daily_theroom_from_matches(player)
+                        ther_room_delta = theroom_stats["reward_delta"]
                         ther_room_points_awarded = 0
                         user_wxid = pstats.get("bind_user") if pstats else None
                         if ther_room_delta > 0 and user_wxid:
                             try:
                                 add_points(user_wxid, ther_room_delta)
                                 ther_room_points_awarded = ther_room_delta
-                                print(f"[MC POINTS] {player} ({user_wxid}) The Room 今日参与次数奖励 +{ther_room_delta}")
+                                print(
+                                    f"[MC POINTS] {player} ({user_wxid}) The Room 今日参与奖励 "
+                                    f"+{ther_room_delta}（总 {theroom_stats['total']} 局："
+                                    f"LP {theroom_stats['luckypillar']} / MC {theroom_stats['miner_chaos']}）"
+                                )
                             except Exception as e:
                                 print(f"[MC POINTS ERROR] {player} The Room 积分增加失败: {e}")
 
@@ -310,7 +260,11 @@ def start(sender):
                         if ther_room_points_awarded > 0:
                             if points_earned > 0:
                                 leave_msg += " "
-                            leave_msg += f"\n获得 The Room 参与次数奖励积分 💎+{ther_room_points_awarded}"
+                            leave_msg += (
+                                f"\nThe Room 今日 {theroom_stats['total']} 局"
+                                f"（LP {theroom_stats['luckypillar']} / MC {theroom_stats['miner_chaos']}），"
+                                f"获得参与奖励 💎+{ther_room_points_awarded}"
+                            )
 
                         leave_msg += ")"
                         msgs.append(leave_msg)
