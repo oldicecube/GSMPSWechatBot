@@ -20,7 +20,7 @@
 - `target_group` 是精确匹配的群聊白名单；空数组或未匹配群名会被路由器直接忽略。
 - `prefix_mode` 默认为 `only`：只有带配置前缀的消息才进入路由；`mixed` 和 `off` 允许无前缀内容继续参与命令/自动插件处理。
 - 插件和自动插件优先于 LLM。未命令命中、且满足前缀/随机回复等条件的消息才会转发到 LLM。
-- 当前 LLM 实现是 `llm/core/llm_service.py` 调用 DeepSeek API，历史记录保存在 `data/groups/<群名>/` 下的 JSON 文件；仓库中的 `weclone_reference/` 不是运行时依赖。
+- 当前 LLM 实现是 `llm/core/llm_service.py` 调用 DeepSeek API，历史记录保存在 `data/groups/<群名>/` 下的 JSON 文件。
 
 ## 环境要求
 
@@ -200,7 +200,6 @@ data/                   运行时数据和本地群聊历史
 assets/                 字体与图片资源
 anima/                  ComfyUI 工作流示例
 weflow-core/            随仓库提供的 WeFlow Node.js 内核源码
-weclone_reference/      离线参考项目，不参与主程序运行
 ```
 
 ## 开发文档
