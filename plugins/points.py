@@ -35,12 +35,12 @@ def handle(content, context):
     content_str = str(content).strip() if content else ""
     
     if not content_str:
-        return "请使用：\n/points <wxid> - 查询积分\n/points +<数值> <wxid> - 增加积分\n/points -<数值> <wxid> - 减少积分\n/points --modify <数值> <wxid> - 直接修改积分\n/points --help - 查看积分获得途径"
+        return "请使用：\n/points <wxid> - 查询积分\n/points +<数值> <wxid> - 增加积分\n/points -<数值> <wxid> - 减少积分\n/points modify <数值> <wxid> - 直接修改积分\n/points help - 查看积分获得途径"
     
     # ===================================================
-    # 情况0: /points --help - 显示积分获得途径
+    # 情况0: /points help - 显示积分获得途径
     # ===================================================
-    if content_str == "--help":
+    if content_str == "help":
         return """💎 积分获得途径：
 
    每日签到 (+5-10积分)
@@ -48,7 +48,7 @@ def handle(content, context):
    每日仅可签到一次
 
    今日运势 (+5-10积分)
-   使用命令: /player --fortune
+    使用命令: /player fortune
    每日仅可抽取一次
 
    每日首次进服 (+5积分)
@@ -77,9 +77,9 @@ def handle(content, context):
     parts = content_str.split()
     
     # ===================================================
-    # 情况2: /points --modify <数值> <wxid> - 直接修改积分（仅管理员）
+    # 情况2: /points modify <数值> <wxid> - 直接修改积分（仅管理员）
     # ===================================================
-    if len(parts) >= 3 and parts[0] == "--modify":
+    if len(parts) >= 3 and parts[0] == "modify":
         if not _is_admin(wxid):
             return  # 无任何返回
         
@@ -93,7 +93,7 @@ def handle(content, context):
             new_points = set_points(target_wxid, amount)
             return f"✅ 已将用户 {target_wxid} 的积分修改为 {amount}\n当前积分: {new_points:.1f}"
         except (ValueError, IndexError):
-            return "错误：参数格式不正确。应使用：/points --modify <数值> <wxid>"
+            return "错误：参数格式不正确。应使用：/points modify <数值> <wxid>"
     
         # ===================================================
     # 情况3: /points +<数值> <wxid> 或 /points -<数值> <wxid> - 增加/减少积分（仅管理员）
@@ -135,4 +135,4 @@ def handle(content, context):
         except ValueError:
             return "错误：参数格式不正确。应使用：/points +<数值> <wxid> 或 /points -<数值> <wxid>"
     
-    return "无法识别命令。请使用：\n/points <wxid> - 查询积分\n/points +<数值> <wxid> - 增加积分\n/points -<数值> <wxid> - 减少积分\n/points --modify <数值> <wxid> - 直接修改积分"
+    return "无法识别命令。请使用：\n/points <wxid> - 查询积分\n/points +<数值> <wxid> - 增加积分\n/points -<数值> <wxid> - 减少积分\n/points modify <数值> <wxid> - 直接修改积分"

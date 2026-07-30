@@ -7,10 +7,10 @@
     /theroom mc               Miner Chaos 排行榜
     /theroom lp #<编号>       Lucky Pillar 对局详情
     /theroom mc #<编号>       Miner Chaos 对局详情
-    /theroom --player <名称>  指定玩家详情
-    /theroom --refresh        手动拉取新对局（管理员）
-    /theroom --recompute      全量重算积分（管理员）
-    /theroom --syncnames      从 usercache 同步玩家名（管理员）
+    /theroom player <名称>    指定玩家详情
+    /theroom refresh          手动拉取新对局（管理员）
+    /theroom recompute        全量重算积分（管理员）
+    /theroom syncnames        从 usercache 同步玩家名（管理员）
 """
 
 from __future__ import annotations
@@ -67,16 +67,16 @@ def _help_text():
     return (
         "The Room 锦标赛命令:\n"
         "  /theroom            积分榜+参与榜+总览(无参数)\n"
-        "  /theroom --rules    积分计算规则\n"
+        "  /theroom rules       积分计算规则\n"
         "  /theroom lp         Lucky Pillar 榜\n"
         "  /theroom mc         Miner Chaos 榜\n"
         "  /theroom lp #<编号>  Lucky Pillar 对局详情\n"
         "  /theroom mc #<编号>  Miner Chaos 对局详情\n"
-        "  /theroom --player <名称>  玩家详情\n"
-        "  /theroom --refresh  手动拉取(管理员)\n"
-        "  /theroom --recompute 重算积分(管理员)\n"
-        "  /theroom --syncnames 同步玩家名(管理员)\n"
-        "  /theroom --reset    清空对局数据(管理员)"
+        "  /theroom player <名称>  玩家详情\n"
+        "  /theroom refresh       手动拉取(管理员)\n"
+        "  /theroom recompute     重算积分(管理员)\n"
+        "  /theroom syncnames     同步玩家名(管理员)\n"
+        "  /theroom reset         清空对局数据(管理员)"
     )
 
 
@@ -111,7 +111,7 @@ def handle(content, context):
     rest = parts[1].strip() if len(parts) > 1 else ""
 
     # ---------- 积分规则 ----------
-    if sub in ("--rules", "--rule", "--score", "--scoring"):
+    if sub in ("rules", "rule", "score", "scoring"):
         return _rules_text()
 
     # ---------- 小游戏榜单 / 对局详情 ----------
@@ -129,11 +129,11 @@ def handle(content, context):
         return leaderboard.format_match_detail(match_id, game_type=game_type)
 
     # ---------- 玩家详情 ----------
-    if sub in ("--player", "--p") and rest:
+    if sub in ("player", "p") and rest:
         return leaderboard.format_player_detail(rest)
 
     # ---------- 手动拉取 ----------
-    if sub in ("--refresh", "--poll"):
+    if sub in ("refresh", "poll"):
         if not _is_admin(context):
             return "仅管理员可手动拉取"
         if monitor is None:
@@ -142,7 +142,7 @@ def handle(content, context):
         return result.get("message", "拉取完成")
 
     # ---------- 全量重算 ----------
-    if sub in ("--recompute", "--rebuild"):
+    if sub in ("recompute", "rebuild"):
         if not _is_admin(context):
             return "仅管理员可重算积分"
         if monitor is None:
@@ -153,7 +153,7 @@ def handle(content, context):
         return result.get("message", "重算完成")
 
     # ---------- 同步玩家名 ----------
-    if sub in ("--syncnames", "--sync"):
+    if sub in ("syncnames", "sync"):
         if not _is_admin(context):
             return "仅管理员可同步玩家名"
         path = tourney_config.get_usercache_path()
@@ -161,7 +161,7 @@ def handle(content, context):
         return result.get("message", "同步完成")
 
     # ---------- 重置所有对局数据（管理员） ----------
-    if sub in ("--reset", "--wipe"):
+    if sub in ("reset", "wipe"):
         if not _is_admin(context):
             return "仅管理员可重置对局数据"
         try:
@@ -174,7 +174,7 @@ def handle(content, context):
             return f"重置失败: {e}"
 
     # ---------- 帮助 ----------
-    if sub in ("--help", "-h", "--?"):
+    if sub in ("help", "h", "?"):
         return _help_text()
 
     # ---------- 未知子命令 ----------

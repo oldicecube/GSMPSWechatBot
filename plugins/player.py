@@ -158,7 +158,7 @@ def build_bound_player_text(player, stats, wxid=None):
 
 
 def build_fortune_text(player_name):
-    """生成 --fortune 命令的运势文本"""
+    """生成 fortune 命令的运势文本"""
     words = load_document(FORTUNE_WORDS_FILE, default={})
     
     if not isinstance(words, dict) or not words:
@@ -200,7 +200,7 @@ def build_fortune_text(player_name):
 
 
 def build_value_template(player_name):
-    """生成 --value 命令的估值模板（不含 LLM 锐评）"""
+    """生成 value 命令的估值模板（不含 LLM 锐评）"""
     iron_count = random.randint(1, 64)
 
     lines = [
@@ -232,7 +232,7 @@ def build_value_template(player_name):
 
 
 def build_life_template(player_name):
-    """生成 --life 命令的转生模板（不含 LLM 锐评）"""
+    """生成 life 命令的转生模板（不含 LLM 锐评）"""
     words = load_document(LIFE_WORDS_FILE, default={})
     
     if not isinstance(words, dict) or not words:
@@ -371,8 +371,8 @@ def handle(content, context):
 
         return "你还未绑定任何玩家"
 
-    # --top 子命令：获取总在线时长前5名
-    if content_str == "--top":
+    # top 子命令：获取总在线时长前5名
+    if content_str == "top":
         top_players = player_stats_top(5)
 
         if not top_players:
@@ -387,8 +387,8 @@ def handle(content, context):
 
         return "\n".join(lines)
 
-    # --fortune 子命令
-    if content_str == "--fortune":
+    # fortune 子命令
+    if content_str == "fortune":
         # 查找当前绑定的玩家
         player_name = None
         player_stats = None
@@ -433,8 +433,8 @@ def handle(content, context):
 
         return fortune_text
 
-    # --value 子命令
-    if content_str == "--value":
+    # value 子命令
+    if content_str == "value":
         # 查找当前绑定的玩家
         player_name = None
         for player, stats in data.items():
@@ -459,7 +459,7 @@ def handle(content, context):
 
         return result
 
-    if content_str == "--life":
+    if content_str == "life":
         # 查找当前绑定的玩家
         player_name = None
         for player, stats in data.items():
@@ -484,15 +484,15 @@ def handle(content, context):
 
         return result
 
-    # --theroom / --tr 子命令：我的 The Room 锦标赛详情
-    if content_str in ("--theroom", "--tr"):
+    # theroom / tr 子命令：我的 The Room 锦标赛详情
+    if content_str in ("theroom", "tr"):
         if not _THEROOM_AVAILABLE:
             return "The Room 模块未加载"
         player_name = find_bound_player(wxid, data)
         return theroom_lb.format_my_theroom(player_name)
 
-    # --rank / --ranking 子命令：我的 The Room 排名概览
-    if content_str in ("--rank", "--ranking"):
+    # rank / ranking 子命令：我的 The Room 排名概览
+    if content_str in ("rank", "ranking"):
         if not _THEROOM_AVAILABLE:
             return "The Room 模块未加载"
         player_name = find_bound_player(wxid, data)

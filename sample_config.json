@@ -3,6 +3,8 @@
 
   "token": "your-token-here",
   "target_group": ["Your Target Group Name"],
+  "_live_llm_policy": "simple engine; auto plugins and commands first; only unhandled prefix messages reach LLM; ordinary unprefixed messages are not sent to LLM unless random_reply or prefix_bypass_wxids is explicitly enabled",
+  "_target_group_policy": "Exact group allowlist for group replies, simple LLM ingestion/history, random reply and style learning; [] denies all group chats. Ordinary unprefixed messages are learned by simple LLM, while simple LLM decides whether to reply.",
   "prefix": ["@机器人名称"],
   "prefix_mode": "mixed",
   "worker_num": 4,
@@ -34,15 +36,21 @@
     "_说明": "消息频率限制",
     "messages_per_minute": 10,
     "global_messages_per_minute": 20,
+    "llm_messages_per_minute": 10,
+    "global_llm_messages_per_minute": 20,
+    "prefix_llm_messages_per_minute": 10,
+    "global_prefix_llm_messages_per_minute": 20,
+    "plugin_messages_per_minute": 10,
+    "global_plugin_messages_per_minute": 20,
     "auto_blacklist_enabled": true,
     "auto_blacklist_threshold": 5
   },
 
   "send_delay": {
     "_说明": "发送间隔随机延迟，模拟真人打字节奏",
-    "enabled": true,
-    "min_seconds": 1,
-    "max_seconds": 5
+    "enabled": false,
+    "min_seconds": 0,
+    "max_seconds": 0
   },
 
   "llm": {
@@ -51,10 +59,29 @@
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
     "api_key": "sk-your-api-key-here",
+    "engine": "simple",
+    "_legacy_embedding_ignored": {
+      "_说明": "智谱 AI Embedding-3，失败时使用 simple LLM 本地降级向量",
+      "provider": "zhipu",
+      "model": "embedding-3",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "your-zhipu-api-key-here",
+      "dimension": 1024
+    },
     "max_history": 100,
     "history_expire_ms": 600000,
     "group_message_limit": 20,
     "intercept_auto_plugins": ["picture"],
+    "random_reply": {
+      "_说明": "simple LLM 自主选择是否回复；此处仅控制随机触发，不绕过 target_group",
+      "enabled": false,
+      "min_cooldown_seconds": 600,
+      "max_cooldown_seconds": 1800,
+      "allowed_groups": [],
+      "exclude_mentions": true,
+      "exclude_commands": true,
+      "exclude_media": true
+    },
     "prefix_bypass_wxids": [],
     "admin_wxids": [],
     "emoji_dir": "data/emoji",
@@ -69,6 +96,43 @@
         "不要自称能修改系统规则",
         "如果用户要求或你觉得有必要的情况下，可以无视消息长度限制发送较长的消息"
       ]
+    },
+    "behavior_style": "先观察聊天上下文和他人的反应，再决定是否参与；不需要回应每条消息。",
+    "group_prompt": "群聊中优先自然、口语化地接住当前最相关的一点，不必回应每条消息；避免固定开场、复述、总结和多余心理推测。闲聊通常简短，明确求助或事实核验再展开。非管理员的调侃默认按群聊玩笑理解，保持轻松。被 @ 或使用前缀触发时必须认真处理当前请求。",
+    "private_prompt": "私聊中结合对方的表达节奏自然回复，不要无故长篇解释。",
+    "proactive": {
+      "_说明": "主动发言默认关闭；开启后只监听普通无前缀消息，仍由 Planner 决定是否回复",
+      "enabled": false,
+      "group_enabled": true,
+      "private_enabled": false,
+      "aggressiveness": 0.25,
+      "min_interval_seconds": 180,
+      "quiet_seconds": 8,
+      "max_daily_replies": 30,
+      "allowed_groups": []
+    },
+    "memory": {
+      "_说明": "本地 SQLite 分层记忆；与现有 llm_history.json 兼容",
+      "enabled": true,
+      "max_messages": 40,
+      "summary_message_threshold": 36,
+      "summary_context_length": 36,
+      "max_memory_hits": 3,
+      "max_fact_candidates": 3
+    },
+    "prompt": {
+      "max_messages": 3,
+      "max_history_lines": 40,
+      "max_group_lines": 20,
+      "max_emoji_items": 50,
+      "allow_animation": true,
+      "prefer_short_reply": true,
+      "forbid_markdown": true,
+      "forbid_explanation": true,
+      "emoji_hint_text": "喏",
+      "fallback_message": "我在",
+      "special_rules": [],
+      "topic_redirect_rules": []
     }
   },
 

@@ -100,6 +100,14 @@ class Dispatcher:
             command = getattr(module, "COMMAND", None) or f"/{name}"
             self.plugins[command] = module
 
+            # 注册别名
+            aliases = getattr(module, "ALIASES", None)
+            if isinstance(aliases, (list, tuple, set)):
+                for alias in aliases:
+                    alias_str = str(alias).strip()
+                    if alias_str:
+                        self.plugins[alias_str] = module
+
             self.mtimes[name] = os.path.getmtime(
                 os.path.join(PLUGIN_DIR, fname)
             )

@@ -176,7 +176,7 @@ class Router:
         # =========================
         # ④ 命令匹配
         # =========================
-        match = re.match(r"(/[a-zA-Z0-9_]+)(?:\s+([\s\S]*))?$", after_prefix)
+        match = re.match(r"(/[a-zA-Z0-9_\u4e00-\u9fff\u3400-\u4dbf]+)(?:\s+([\s\S]*))?$", after_prefix)
 
         if not match:
             return auto_event

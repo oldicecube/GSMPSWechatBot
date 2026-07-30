@@ -1,4 +1,4 @@
-﻿# GSMPS Wechat Bot — 开发引导文档
+# GSMPS WeChat Bot — 开发引导文档
 
 > 快速上手请阅读 [README.MD](./README.MD)。本文档面向插件开发者，涵盖架构、API 参考与最佳实践。
 
@@ -42,7 +42,8 @@ WeFlowClient
 ### 3. 目录结构
 
 ```
-├── config.json          # 全局配置（Token、MC服务器、自定义参数）
+├── sample_config.json   # 配置模板
+├── config.json          # 本地配置（不提交）
 ├── main.py              # 程序入口
 ├── start.bat            # Windows 一键启动
 ├── assets/              # 静态资源
@@ -73,6 +74,8 @@ WeFlowClient
 ├── data/                # 本地数据存储
 └── output/              # 图片、文件输出
 ```
+
+`main.py` 启动时会先构建 Dispatcher，再扫描 `plugins/` 和 `auto/` 下的 Python 文件。`plugins/` 中有 `handle` 的模块按 `COMMAND`（缺省为文件名对应的 `/命令`）注册；`ALIASES` 可注册额外命令别名。`auto/` 模块按文件名注册，`MATCH_RAW_MESSAGE`、`FALLBACK_ONLY` 和 `INTERCEPT_LLM` 等模块级标记会改变其调度阶段。
 
 ---
 
@@ -105,6 +108,20 @@ context = {
 | `wxid` | 微信唯一标识 | 权限绑定、黑名单、用户数据 |
 | `is_group` / `is_private` | 消息来源 | 区分群聊/私聊 |
 | `raw` | 原始消息对象 | 高级拓展 |
+
+Worker 还会向 Context 传递 `is_at`、`is_mentioned`、`is_picture`、`is_emoji`、`is_voice`、`command`、`args`、`prefix_used`、`auto_target` 和 `followup_payload`。插件应读取这些字段，不要修改原始 `raw` 或共享 Context。
+
+### 路由模式
+
+`Router` 在进入 Dispatcher 前依次执行黑名单、时间段、群名白名单和速率限制检查。`prefix_mode` 支持：
+
+| 值 | 行为 |
+| --- | --- |
+| `only` | 只有命中 `prefix` 的消息进入路由 |
+| `mixed` | 命中和未命中前缀的消息都进入路由 |
+| `off` | 关闭前缀要求 |
+
+命令正则支持 ASCII 命令以及中文命令名。命令插件和普通自动插件优先执行；只有没有返回结果时，才会进入 LLM 或 `FALLBACK_ONLY` 自动插件。
 
 ---
 
@@ -281,22 +298,9 @@ def handle_auto(context):
 
 ---
 
-## 五、全局事件监听
+## 五、消息旁路处理
 
-```python
-from core.dispatcher import dispatcher
-
-@dispatcher.on_message
-def message_logger(context):
-    print(f"[{context['user']}] {context['text']}")
-
-# 或直接注册
-def keyword_monitor(context):
-    if "违规词" in context.get("text", ""):
-        print("检测到敏感内容")
-
-dispatcher.on_message(keyword_monitor)
-```
+当前 `Dispatcher` 没有公开的 `on_message` 全局事件注册 API。需要监听消息时，应在 `auto/` 中实现 `handle_auto(context)`；需要监听无前缀原始消息时，额外声明 `MATCH_RAW_MESSAGE = True`。如果任务需要长期运行，在 `start(sender)` 中创建 daemon 线程，并避免阻塞 Worker。
 
 ---
 
@@ -319,50 +323,41 @@ players = player_list()
 ### 当前 LLM 调用链
 
 ```
-群聊消息 → Router prefix 解析 → Dispatcher auto 插件
-→ 若无命令命中且 auto 插件允许放行
-→ LLMService.handle_message()
-  ├─ 读取 llm_history.json
-  ├─ 读取 group_messages.json
-  ├─ 读取表情索引
-  ├─ 构造 prompt → DeepSeek JSON Output
-  └─ 解析 {"messages": [...], "animation": ...}
-→ Worker 拆分 messages 发送
+WeFlow SSE → WeFlowClient → task_queue → Worker
+→ Router（黑名单/时间段/群名/限流/前缀）
+→ Dispatcher（auto → command → LLM 或 fallback auto）
+→ LLMService → DeepSeekProvider → response_parser
+→ Worker → core.sender → 微信发送服务
 ```
+
+LLM 由 `llm/core/llm_service.py` 实现，使用 `llm/provider/deepseek_provider.py` 调用 DeepSeek Chat Completions，以 JSON object 格式请求，并由 `response_parser` 转换为 `messages` 和可选的 `animation`。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
 
 ### LLM 放行条件
 
-1. 消息位于 `target_group` 中
-2. 消息命中 prefix（或 wxid 在 `prefix_bypass_wxids` 中）
-3. 未命中命令插件
-4. `llm.enabled == true`
-5. `llm.intercept_auto_plugins` 中所有插件允许放行
+1. 消息通过 Router 的黑名单、时间段、群名和速率限制。
+2. 消息没有被命令插件直接处理。
+3. 消息带有配置前缀，或发送者 wxid 在 `llm.prefix_bypass_wxids` 中。
+4. `llm.enabled == true`，且 API Key 和模型配置有效。
+5. `llm.intercept_auto_plugins` 中的每个自动插件都存在、声明 `INTERCEPT_LLM = True`，并通过 `allow_llm(context)`。
 
-### 自定义 Provider
+LLM 历史和普通群聊上下文当前分别写入 `data/groups/<group_id>/llm_history.json` 与 `group_messages.json`，由 `llm/memory/memory_manager.py` 按数量和过期时间裁剪。不要把这些文件当作仓库配置提交。
 
-在 `llm/provider/` 下新建文件，实现类似 `DeepSeekProvider` 的接口：
+random reply 默认关闭。启用时必须显式写入 `llm.random_reply.enabled=true`；
+`allowed_groups: []` 继承顶层 `target_group`，不会放开全部群聊：
 
-```python
-class MyProvider:
-    def __init__(self):
-        # 初始化客户端
-        pass
-
-    def send(self, messages: list) -> str:
-        # 调用 API，返回 JSON 字符串
-        pass
+```json
+"random_reply": {
+  "enabled": true,
+  "min_cooldown_seconds": 600,
+  "max_cooldown_seconds": 1800,
+  "allowed_groups": ["Exact group name"],
+  "exclude_mentions": true,
+  "exclude_commands": true,
+  "exclude_media": true
+}
 ```
 
-然后在 `llm/core/llm_service.py` 中注册你的 Provider。
-
-### Prompt 构建接口
-
-```python
-from llm.prompt import build_system_prompt, build_user_prompt
-
-system = build_system_prompt()
-user = build_user_prompt({"nickname": "用户", "content": "消息", "is_admin": False})
-```
+`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`engine`、`behavior_style`、`proactive`、`memory` 及分类型 `rate_limit` 字段目前不是当前运行时的独立执行开关，新增配置时必须同步修改对应代码。
 
 ---
 
@@ -461,7 +456,7 @@ save_document("key_name", {"field": "value"})
 | 结构化返回协议 | `worker.py` | dict 返回支持 target/content/mode/animation |
 | LLM 拦截判定 | `INTERCEPT_LLM` + `allow_llm()` | auto 插件控制消息是否进入 LLM |
 | Fallback 兜底 | `FALLBACK_ONLY = True` | 只在无其他处理时才执行 |
-| 事件广播 | `dispatcher.on_message` | 旁路监听所有消息 |
+| 消息旁路处理 | `auto/*.py` 的 `handle_auto` | 按消息触发自动逻辑 |
 | 积分系统 | `utils/points_manager.py` | 用户积分增减/查询 |
 | SQLite 文档存储 | `utils/sqlite_store.py` | 通用 KV 持久化 |
 | 发送延迟控制 | `send_delay` 配置 | 随机延迟模拟真人 |
@@ -470,7 +465,8 @@ save_document("key_name", {"field": "value"})
 
 ## 十一、热重载说明
 
-- 工程内任意 `.py` 文件变化时，主进程通过 `os.execv()` 自动重启
+- 工程内任意 `.py` 文件变化时，`core/project_reloader.py` 让 `main.py` 以退出码 `100` 退出
+- `launcher.py` 捕获退出码 `100` 并重新启动 `main.py`；`start.bat` 则对所有退出都循环重启
 - 重启后所有插件、配置、线程重新初始化
 - 不要依赖模块级内存状态跨重启保留
 

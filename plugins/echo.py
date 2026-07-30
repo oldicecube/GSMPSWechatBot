@@ -42,7 +42,7 @@ def handle(content, context):
     wxid = str(context.get("wxid") or context.get("raw", {}).get("wxid") or "").strip()
 
     # 检查是否为删除命令
-    if content == "/echo --delete":
+    if content == "delete":
         is_admin = wxid in ADMIN_WXIDS
         if is_admin:
             return delete_last_echo()

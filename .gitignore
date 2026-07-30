@@ -91,3 +91,24 @@ uuid_sync_result.txt
 *_test_*.out
 *_verify_*.py
 *_verify_*.out
+
+# ============================
+# 临时诊断脚本与导出文件（保留本地，暂不上传）
+# ============================
+/_check_lp_db.py
+/_diagnose_tournament.py
+/_diagnose_tournament.out
+/_manual_recompute_tournament.py
+/_manual_sync_lp_3_6.py
+/_rcon_raw_lp_3_6.py
+/*.jsonl
+
+# 损坏备份、运行时本地存储和离线参考项目
+data/*.corrupt-backup-*
+data/local_store.json
+data/weclone/
+weclone_reference/
+
+# 本地临时测试与一次性脚本目录
+/tests/
+/tools/
