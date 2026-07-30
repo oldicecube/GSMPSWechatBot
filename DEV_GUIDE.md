@@ -438,7 +438,6 @@ save_document("key_name", {"field": "value"})
 | 位置 | 说明 | 建议 |
 |------|------|------|
 | `auto/player_monitor.py` | GSMPS 专用计分板逻辑（The Room 积分、每日统计） | 通用部署建议删除或精简 |
-| `plugins/unbind.disabled` | 已禁用的解绑插件 | 可直接删除 |
 | `data/groups/GDUT SIE Minecraft Public Server/` | GSMPS 群历史数据 | 删除 |
 | `data/fortune_words.json` | 运势词库 | 按需保留 |
 | `data/life_words.json` | 转生词库 | 按需保留 |
