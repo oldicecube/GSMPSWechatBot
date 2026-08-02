@@ -7,6 +7,7 @@ import json
 import re
 
 from llm.config import get_llm_config
+from llm.core.response_parser import BALANCE_ERROR_MESSAGE, is_insufficient_balance_error
 
 COMMAND = "/火钱"
 ALIASES = ["/jane"]
@@ -144,6 +145,8 @@ def handle(content: str, context: dict) -> str | None:
     try:
         provider = DeepSeekProvider()
     except Exception as e:
+        if is_insufficient_balance_error(e):
+            return BALANCE_ERROR_MESSAGE
         return f"❌ LLM 客户端初始化失败：{e}"
 
     messages = [
@@ -154,6 +157,8 @@ def handle(content: str, context: dict) -> str | None:
     try:
         response_text = provider.send(messages)
     except Exception as e:
+        if is_insufficient_balance_error(e):
+            return BALANCE_ERROR_MESSAGE
         return f"❌ LLM 请求失败：{e}"
 
     parsed = _parse_llm_response(response_text)

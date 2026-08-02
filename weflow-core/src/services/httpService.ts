@@ -447,6 +447,9 @@ class HttpService {
                 this.handleMessagePushStream(req, res, url)
             } else if (pathname === '/api/v1/messages') {
                 await this.handleMessages(url, res)
+            } else if (pathname === '/api/v1/messages/original') {
+                if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
+                await this.handleOriginalMessage(url, res)
             } else if (pathname === '/api/v1/sessions') {
                 await this.handleSessions(url, res)
             } else if (
@@ -901,6 +904,51 @@ class HttpService {
       },
       messages: apiMessages
     })
+  }
+
+  /**
+   * GET /api/v1/messages/original?talker=&localId=&serverId=
+   *
+   * Return one fully parsed WeFlow message. This is intentionally separate
+   * from the paginated endpoint so a caller can hydrate a forwarded/chat-log
+   * message without scanning a whole conversation.
+   */
+  private async handleOriginalMessage(url: URL, res: http.ServerResponse): Promise<void> {
+    const talker = (url.searchParams.get('talker') || '').trim()
+    const localIdText = (url.searchParams.get('localId') || '').trim()
+    const serverId = (url.searchParams.get('serverId') || '').trim()
+
+    if (!talker) {
+      this.sendError(res, 400, 'Missing required parameter: talker')
+      return
+    }
+
+    const localId = /^\d+$/.test(localIdText) ? Number(localIdText) : 0
+    if (!localId && !serverId) {
+      this.sendError(res, 400, 'Provide localId or serverId')
+      return
+    }
+
+    try {
+      const result = localId > 0
+        ? await chatService.getMessageById(talker, localId)
+        : await chatService.getMessageByServerId(talker, serverId)
+      const message = result.message
+      if (!result.success || !message) {
+        this.sendError(res, 404, result.error || 'Message not found')
+        return
+      }
+
+      this.sendJson(res, {
+        success: true,
+        talker,
+        lookup: localId > 0 ? { localId } : { serverId },
+        message
+      })
+    } catch (error) {
+      console.error('[HttpService] handleOriginalMessage error:', error)
+      this.sendError(res, 500, String(error))
+    }
   }
 
   /**

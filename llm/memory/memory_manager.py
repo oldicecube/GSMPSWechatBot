@@ -12,9 +12,19 @@ GROUPS_DIR = os.path.join(BASE_DIR, "data", "groups")
 class MemoryManager:
     def __init__(self):
         llm_config = get_llm_config()
-        self.max_history = int(llm_config.get("max_history", 100))
+        self.max_history_chars = int(
+            llm_config.get("max_history_chars", llm_config.get("max_history", 5000))
+        )
         self.history_expire_ms = int(llm_config.get("history_expire_ms", 600000))
-        self.group_message_limit = int(llm_config.get("group_message_limit", 20))
+        self.group_message_limit_chars = int(
+            llm_config.get(
+                "group_message_limit_chars",
+                llm_config.get("group_message_limit", 2000),
+            )
+        )
+        # Compatibility aliases for callers outside this module.
+        self.max_history = self.max_history_chars
+        self.group_message_limit = self.group_message_limit_chars
 
     def add_llm_message(self, group_id, nickname, content):
         group_dir = self._ensure_group_dir(group_id)
@@ -28,8 +38,7 @@ class MemoryManager:
             "content": str(content or "")
         })
 
-        if self.max_history > 0:
-            history = history[-self.max_history:]
+        history = self._trim_by_chars(history, self.max_history_chars)
 
         self._write_json(history_path, history)
 
@@ -40,24 +49,32 @@ class MemoryManager:
         history = self._load_json(history_path, default=[])
         history = self._clear_expired_history(history)
 
-        if self.max_history > 0:
-            history = history[-self.max_history:]
+        history = self._trim_by_chars(history, self.max_history_chars)
 
         return history
 
-    def add_group_message(self, group_id, nickname, content):
+    def add_group_message(self, group_id, nickname, content, message_id=None,
+                          local_id=None, server_id=None, session_id=None):
         group_dir = self._ensure_group_dir(group_id)
         messages_path = os.path.join(group_dir, "group_messages.json")
 
         messages = self._load_json(messages_path, default=[])
-        messages.append({
+        item = {
             "nickname": str(nickname or ""),
             "timestamp": int(time.time()),
             "content": str(content or "")
-        })
+        }
+        for key, value in (
+            ("message_id", message_id),
+            ("local_id", local_id),
+            ("server_id", server_id),
+            ("session_id", session_id),
+        ):
+            if value not in (None, ""):
+                item[key] = value
+        messages.append(item)
 
-        if self.group_message_limit > 0:
-            messages = messages[-self.group_message_limit:]
+        messages = self._trim_by_chars(messages, self.group_message_limit_chars)
 
         self._write_json(messages_path, messages)
 
@@ -67,8 +84,7 @@ class MemoryManager:
 
         messages = self._load_json(messages_path, default=[])
 
-        if self.group_message_limit > 0:
-            messages = messages[-self.group_message_limit:]
+        messages = self._trim_by_chars(messages, self.group_message_limit_chars)
 
         return messages
 
@@ -106,3 +122,32 @@ class MemoryManager:
             return []
 
         return history
+
+    @staticmethod
+    def _trim_by_chars(messages, limit):
+        """Keep newest messages until the character budget is reached.
+
+        The budget counts message ``content`` only. The newest complete
+        message that crosses the boundary is retained, so forwarding never
+        splits a message and the total is just over the configured limit.
+        """
+        if not isinstance(messages, list) or limit <= 0:
+            return messages
+
+        selected = []
+        total_chars = 0
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            content_chars = len(str(item.get("content") or ""))
+            selected.append(item)
+            total_chars += content_chars
+            if total_chars >= limit:
+                break
+
+        selected.reverse()
+        return selected
+
+    @staticmethod
+    def trim_messages_by_chars(messages, limit):
+        return MemoryManager._trim_by_chars(messages, limit)

@@ -11,6 +11,10 @@ WeChat Bot 示例管理员命令清单
 
 本文件仅列出示例中的管理员命令，普通示例命令请参阅 plugins/help.txt。
 
+/rcon <服务器指令>
+  直接向 Minecraft 服务器发送一条 RCON 指令并返回服务器响应。
+  仅 config.json 的 llm.admin_wxids 中配置的管理员可用。
+
 
 ======================================
 一、黑名单管理 (/ban)

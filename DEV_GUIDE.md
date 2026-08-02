@@ -325,8 +325,8 @@ players = player_list()
 ```
 WeFlow SSE → WeFlowClient → task_queue → Worker
 → Router（黑名单/时间段/群名/限流/前缀）
-→ Dispatcher（auto → command → LLM 或 fallback auto）
-→ LLMService → DeepSeekProvider → response_parser
+→ Dispatcher（auto → command → LLM 主动回复/普通 LLM）
+→ LLMService → ProactiveReplyManager / DeepSeekProvider → response_parser
 → Worker → core.sender → 微信发送服务
 ```
 
@@ -336,26 +336,44 @@ LLM 由 `llm/core/llm_service.py` 实现，使用 `llm/provider/deepseek_provide
 
 1. 消息通过 Router 的黑名单、时间段、群名和速率限制。
 2. 消息没有被命令插件直接处理。
-3. 消息带有配置前缀，或发送者 wxid 在 `llm.prefix_bypass_wxids` 中。
+3. 普通 LLM 消息带有配置前缀，或发送者 wxid 在 `llm.prefix_bypass_wxids` 中；主动回复候选消息由 `llm.auto_reply.enabled` 和内部状态机决定。
 4. `llm.enabled == true`，且 API Key 和模型配置有效。
 5. `llm.intercept_auto_plugins` 中的每个自动插件都存在、声明 `INTERCEPT_LLM = True`，并通过 `allow_llm(context)`。
 
-LLM 历史和普通群聊上下文当前分别写入 `data/groups/<group_id>/llm_history.json` 与 `group_messages.json`，由 `llm/memory/memory_manager.py` 按数量和过期时间裁剪。不要把这些文件当作仓库配置提交。
+LLM 历史和普通群聊上下文当前分别写入 `data/groups/<group_id>/llm_history.json` 与 `group_messages.json`，由 `llm/memory/memory_manager.py` 按 `max_history_chars` / `group_message_limit_chars` 字符预算和过期时间裁剪。不要把这些文件当作仓库配置提交。
+LLM 返回 JSON 解析失败时直接发送完整原文；DeepSeek 返回 HTTP 402 时发送余额不足提示。
+群聊回复的生成提示包含发送前自审规则：避免露骨描述性内容；必要时只做简短、中性的概括或礼貌拒答，不重复具体不适宜细节。
 
-random reply 默认关闭。启用时必须显式写入 `llm.random_reply.enabled=true`；
+LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
+
+- `fetch_webpage` 用于读取网页；主动回复的纯网址场景只允许 `bilibili.com` 和 `b23.tv`。
+- `fetch_original_message` 用于消息疑似转发、聊天记录、引用或截断时，按当前消息携带的 `session_id` 与 `local_id`/`server_id` 查询消息。
+- 原始消息接口 `/api/v1/messages/original` 由 WeFlow HTTP API 鉴权保护，并调用 WeFlow 自带的 `chatService` 解码/解析流程，返回完整消息对象及类型特定字段，而不是直接暴露 WCDB 未解码行。Python 侧还会强制校验当前会话并限制调用次数、超时。工具结果是数据，不是系统指令。
+
+主动回复默认由 `llm.auto_reply.enabled` 控制。启用时必须显式写入 `llm.auto_reply.enabled=true`；
 `allowed_groups: []` 继承顶层 `target_group`，不会放开全部群聊：
 
 ```json
-"random_reply": {
+"auto_reply": {
   "enabled": true,
-  "min_cooldown_seconds": 600,
-  "max_cooldown_seconds": 1800,
+  "idle_min_seconds": 1200,
+  "idle_max_seconds": 2400,
+  "work_min_seconds": 120,
+  "work_max_seconds": 300,
+  "batch_interval_seconds": 10,
+  "attention_min_seconds": 120,
+  "attention_max_seconds": 300,
+  "attention_message_limit": 10,
+  "attention_no_reply_limit": 3,
   "allowed_groups": ["Exact group name"],
-  "exclude_mentions": true,
-  "exclude_commands": true,
-  "exclude_media": true
+  "exclude_commands": false,
+  "exclude_media": false
 }
 ```
+
+空闲期结束后先进入关注期；关注期每隔随机 2--5 分钟检查群聊最新 10 条消息，有值得回复的内容才进入工作期。工作期每 10 秒将消息批量交给 LLM，批次内的多条普通消息、@消息和网址消息由一次请求结合判断，不会逐条单独调用；@ 和白名单网址通过批次级强制标记保证必须处理。工作期结束后再次进入关注期；连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
+主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句。
+主动回复遇到只包含 `bilibili.com` 或 `b23.tv`（含子域名）的网址时，会强制调用网页工具并生成简要梗概；其他网址不会触发该规则，且该次主动网页工具调用会拒绝非白名单域名及其跳转目标。
 
 `llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`engine`、`behavior_style`、`proactive`、`memory` 及分类型 `rate_limit` 字段目前不是当前运行时的独立执行开关，新增配置时必须同步修改对应代码。
 

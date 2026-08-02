@@ -1,6 +1,7 @@
 """/emoji 命令插件：根据表情序列生成群聊风格的小故事。"""
 
 from llm.config import get_llm_config
+from llm.core.response_parser import BALANCE_ERROR_MESSAGE, is_insufficient_balance_error
 
 import json
 import re
@@ -233,6 +234,8 @@ def handle(content, context):
 
         response_text = DeepSeekProvider().send(messages)
     except Exception as error:
+        if is_insufficient_balance_error(error):
+            return BALANCE_ERROR_MESSAGE
         return f"❌ LLM 请求失败：{error}"
 
     story = _parse_response(response_text)

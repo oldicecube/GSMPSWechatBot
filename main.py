@@ -164,7 +164,15 @@ def main():
         target_group=config.get("target_group", []),
         time_slots=config.get("time_slots", []),
         rate_limit_cfg=config.get("rate_limit", {}),
-        prefix_mode=config.get("prefix_mode", "only")
+        prefix_mode=config.get("prefix_mode", "only"),
+        proactive_enabled=bool(
+            (config.get("llm", {}) or {}).get("enabled")
+            and (
+                (config.get("llm", {}) or {}).get("auto_reply")
+                or (config.get("llm", {}) or {}).get("random_reply")
+                or {}
+            ).get("enabled", False)
+        )
     )
 
     dispatcher = Dispatcher()

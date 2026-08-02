@@ -6,6 +6,20 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -22,23 +36,79 @@ def get_llm_config():
         "enabled",
         "provider",
         "model",
-        "max_history",
         "history_expire_ms",
-        "group_message_limit",
     ]
 
     missing_fields = [field for field in required_fields if field not in llm_config]
     if missing_fields:
         raise ValueError(f"Missing llm config fields: {', '.join(missing_fields)}")
 
+    max_history_chars = _safe_int(
+        llm_config.get("max_history_chars", llm_config.get("max_history", 5000)),
+        5000,
+    )
+    group_message_limit_chars = _safe_int(
+        llm_config.get(
+            "group_message_limit_chars",
+            llm_config.get("group_message_limit", 2000),
+        ),
+        2000,
+    )
+
     result = {
         "enabled": llm_config["enabled"],
         "provider": llm_config["provider"],
         "model": llm_config["model"],
-        "max_history": llm_config["max_history"],
+        "max_history_chars": max(0, max_history_chars),
+        "group_message_limit_chars": max(0, group_message_limit_chars),
+        # Backward-compatible aliases for modules that still read the old names.
+        "max_history": max(0, max_history_chars),
         "history_expire_ms": llm_config["history_expire_ms"],
-        "group_message_limit": llm_config["group_message_limit"],
+        "group_message_limit": max(0, group_message_limit_chars),
+        "web_fetch_enabled": bool(llm_config.get("web_fetch_enabled", True)),
+        "web_fetch_max_calls": _safe_int(llm_config.get("web_fetch_max_calls", 3), 3),
+        "web_fetch_timeout_seconds": _safe_float(
+            llm_config.get("web_fetch_timeout_seconds", 15), 15.0
+        ),
+        "web_fetch_max_chars": _safe_int(llm_config.get("web_fetch_max_chars", 24000), 24000),
+        "original_message_enabled": bool(llm_config.get("original_message_enabled", True)),
+        "original_message_max_calls": max(1, min(_safe_int(llm_config.get("original_message_max_calls", 2), 2), 4)),
+        "original_message_timeout_seconds": _safe_float(
+            llm_config.get("original_message_timeout_seconds", 8), 8.0
+        ),
+        "original_message_max_chars": _safe_int(
+            llm_config.get("original_message_max_chars", 16000), 16000
+        ),
     }
+
+    weflow_config = config.get("weflow")
+    if not isinstance(weflow_config, dict):
+        weflow_config = {}
+    api_base = str(weflow_config.get("apiBase") or "").strip()
+    if not api_base:
+        api_host = str(weflow_config.get("apiHost") or "127.0.0.1").strip() or "127.0.0.1"
+        api_port = _safe_int(weflow_config.get("apiPort", 5031), 5031)
+        api_base = f"http://{api_host}:{api_port}"
+    result["weflow_api_base"] = api_base.rstrip("/")
+    result["weflow_api_token"] = str(
+        config.get("token") or weflow_config.get("apiToken") or ""
+    ).strip()
+
+    target_groups = config.get("target_group", [])
+    if isinstance(target_groups, str):
+        target_groups = [target_groups]
+    result["target_groups"] = [
+        str(item).strip()
+        for item in (target_groups if isinstance(target_groups, list) else [])
+        if str(item).strip()
+    ]
+
+    auto_reply = llm_config.get("auto_reply")
+    if not isinstance(auto_reply, dict):
+        auto_reply = llm_config.get("random_reply")
+    result["auto_reply"] = dict(auto_reply) if isinstance(auto_reply, dict) else {}
+    # Backward-compatible alias for existing deployments.
+    result["random_reply"] = dict(result["auto_reply"])
 
     intercept_auto_plugins = llm_config.get("intercept_auto_plugins", [])
     if isinstance(intercept_auto_plugins, str):
@@ -103,8 +173,6 @@ def get_llm_config():
 
     result["prompt"] = {
         "max_messages": int(prompt.get("max_messages", 3) or 3),
-        "max_history_lines": int(prompt.get("max_history_lines", 100) or 100),
-        "max_group_lines": int(prompt.get("max_group_lines", 20) or 20),
         "max_emoji_items": int(prompt.get("max_emoji_items", 50) or 50),
         "allow_animation": bool(prompt.get("allow_animation", True)),
         "prefer_short_reply": bool(prompt.get("prefer_short_reply", True)),

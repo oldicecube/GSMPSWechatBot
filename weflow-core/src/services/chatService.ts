@@ -9864,6 +9864,20 @@ class ChatService {
     }
   }
 
+  async getMessageByServerId(sessionId: string, serverId: string): Promise<{ success: boolean; message?: Message; error?: string }> {
+    try {
+      const nativeResult = await wcdbService.getMessageByServerId(sessionId, serverId)
+      if (nativeResult.success && nativeResult.row) {
+        const message = await this.parseMessage(nativeResult.row as Record<string, any>, { source: 'detail', sessionId })
+        if (message.localId !== 0) return { success: true, message }
+      }
+      return { success: false, error: nativeResult.error || '未找到消息' }
+    } catch (e) {
+      console.error('ChatService: getMessageByServerId 失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
   async searchMessages(keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
     try {
       const result = await wcdbService.searchMessages(keyword, sessionId, limit, offset, beginTimestamp, endTimestamp)

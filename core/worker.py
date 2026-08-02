@@ -52,16 +52,32 @@ class Worker:
                 # =========================
                 # 📦 context
                 # =========================
+                raw_flags = msg.get("_raw") if isinstance(msg.get("_raw"), dict) else {}
                 context = {
                     "user": item.get("user", "未知用户"),
                     "group": msg.get("group"),
                     "sessionId": msg.get("sessionId"),
+                    "messageKey": msg.get("messageKey"),
+                    "localId": msg.get("localId"),
+                    "serverId": msg.get("serverId") or msg.get("svrid") or msg.get("rawid"),
+                    "svrid": msg.get("svrid"),
+                    "rawid": msg.get("rawid"),
                     "wxid": item.get("wxid") or msg.get("wxid"),
                     "type": msg.get("type"),
                     "is_group": msg.get("is_group", msg.get("type") == "group"),
                     "is_private": msg.get("is_private", msg.get("type") == "private"),
-                    "is_at": msg.get("is_at", False),
-                    "is_mentioned": msg.get("is_mentioned", False),
+                    "is_at": bool(
+                        msg.get("is_at")
+                        or msg.get("isAt")
+                        or raw_flags.get("is_at")
+                        or raw_flags.get("isAt")
+                    ),
+                    "is_mentioned": bool(
+                        msg.get("is_mentioned")
+                        or msg.get("isMentioned")
+                        or raw_flags.get("is_mentioned")
+                        or raw_flags.get("isMentioned")
+                    ),
                     "is_picture": msg.get("is_picture", False),
                     "is_emoji": msg.get("is_emoji", False),
                     "is_voice": msg.get("is_voice", False),
@@ -72,6 +88,7 @@ class Worker:
                     "auto_target": item.get("auto_target"),
                     "followup_payload": item.get("followup_payload") or {},
                     "prefix_used": bool(item.get("prefix_used")),
+                    "proactive_candidate": bool(item.get("proactive_candidate")),
                     "planned_send_delay_seconds": preview_delay_seconds("wechat_text")
                 }
 
@@ -158,12 +175,6 @@ class Worker:
         if not content:
             return
 
-        if info.get("has_prefix"):
-            return
-
-        if info.get("is_command_like"):
-            return
-
         if content.startswith("[") and content.endswith("]"):
             return
 
@@ -175,7 +186,11 @@ class Worker:
         self.memory_manager.add_group_message(
             group_id=group_id,
             nickname=nickname,
-            content=content
+            content=content,
+            message_id=info.get("message_id"),
+            local_id=info.get("local_id"),
+            server_id=info.get("server_id"),
+            session_id=info.get("sessionId") or msg.get("sessionId"),
         )
 
     def _send_structured_result(self, target, result):

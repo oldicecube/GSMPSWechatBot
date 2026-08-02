@@ -10,7 +10,15 @@ from core.followup import consume as consume_followup
 
 
 class Router:
-    def __init__(self, prefix, target_group, time_slots=None, rate_limit_cfg=None, prefix_mode="only"):
+    def __init__(
+        self,
+        prefix,
+        target_group,
+        time_slots=None,
+        rate_limit_cfg=None,
+        prefix_mode="only",
+        proactive_enabled=False,
+    ):
         # 处理prefix，支持单个字符串或数组
         if isinstance(prefix, str):
             self.prefixes = [prefix] if prefix.strip() else []
@@ -20,6 +28,7 @@ class Router:
             self.prefixes = []
 
         self.prefix_mode = self._normalize_prefix_mode(prefix_mode)
+        self.proactive_enabled = bool(proactive_enabled)
         
         self.target_groups = self._normalize_target_groups(target_group)
         self.blacklist_file = "data/blacklist.json"
@@ -109,7 +118,7 @@ class Router:
         has_prefix = self._has_prefix(content)
         after_prefix, used_prefix = self._resolve_routing_content(content)
 
-        if raw_targets and self.prefix_mode == "only" and not has_prefix:
+        if (raw_targets or self.proactive_enabled) and self.prefix_mode == "only" and not has_prefix:
             # =========================
             # ③ 速率限制检测
             # =========================
@@ -127,7 +136,8 @@ class Router:
                 "raw": msg,
                 "auto_target": raw_targets,
                 "wxid": wxid,
-                "prefix_used": False
+                "prefix_used": False,
+                "proactive_candidate": self.proactive_enabled
             }
 
         if after_prefix is None:
@@ -152,7 +162,8 @@ class Router:
             "type": "auto",
             "raw": msg,
             "wxid": wxid,
-            "prefix_used": used_prefix
+            "prefix_used": used_prefix,
+            "proactive_candidate": self.proactive_enabled
         }
 
         # =========================
@@ -206,9 +217,13 @@ class Router:
 
         return {
             "group": msg.get("group"),
+            "sessionId": msg.get("sessionId"),
             "user": msg.get("user", "未知用户"),
             "wxid": msg.get("wxid"),
             "content": content,
+            "message_id": msg.get("messageKey") or msg.get("rawid"),
+            "local_id": msg.get("localId"),
+            "server_id": msg.get("serverId") or msg.get("svrid") or msg.get("rawid"),
             "is_target_group": self._is_target_group(msg.get("group")),
             "has_prefix": self._has_prefix(content),
             "is_command_like": content.strip().startswith("/")

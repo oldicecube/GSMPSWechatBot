@@ -32,6 +32,10 @@ interface MessagePushPayload {
   sessionId: string
   sessionType: 'private' | 'group' | 'official' | 'other'
   rawid: string
+  messageKey?: string
+  localId?: number
+  serverId?: string
+  localType?: number
   avatarUrl?: string
   sourceName: string
   groupName?: string
@@ -727,6 +731,10 @@ class MessagePushService {
         sessionId,
         sessionType,
         rawid,
+        messageKey,
+        localId: Number(message.localId || 0),
+        serverId: String(message.serverId || message.serverIdRaw || '').trim() || undefined,
+        localType: Number(message.localType || 0),
         avatarUrl,
         groupName,
         sourceName,
@@ -738,12 +746,16 @@ class MessagePushService {
 
     const contactInfo = await chatService.getContactAvatar(sessionId)
     const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || contactInfo?.avatarUrl)
-    return {
-      event: 'message.new',
-      sessionId,
-      sessionType,
-      rawid,
-      avatarUrl,
+      return {
+        event: 'message.new',
+        sessionId,
+        sessionType,
+        rawid,
+        messageKey,
+        localId: Number(message.localId || 0),
+        serverId: String(message.serverId || message.serverIdRaw || '').trim() || undefined,
+        localType: Number(message.localType || 0),
+        avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       senderWxid: message.senderUsername || '',
       content,

@@ -6,9 +6,48 @@ import re
 
 class WeFlowClient:
     def __init__(self, token, queue, dedup):
-        self.url = f"http://127.0.0.1:5031/api/v1/push/messages?access_token={token}"
+        self.api_base = "http://127.0.0.1:5031"
+        self.api_token = str(token or "").strip()
+        self.url = f"{self.api_base}/api/v1/push/messages?access_token={self.api_token}"
         self.queue = queue
         self.dedup = dedup
+
+    def get_original_message(self, session_id, local_id=None, server_id=None,
+                             timeout=8):
+        """Fetch one raw WeFlow message for LLM context hydration."""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "missing session_id"}
+
+        params = {"talker": session_id}
+        if local_id is not None:
+            try:
+                parsed_local_id = int(local_id)
+            except (TypeError, ValueError):
+                parsed_local_id = 0
+            if parsed_local_id > 0:
+                params["localId"] = parsed_local_id
+        if not params.get("localId") and str(server_id or "").strip():
+            params["serverId"] = str(server_id).strip()
+        if len(params) == 1:
+            return {"ok": False, "error": "missing local_id or server_id"}
+
+        try:
+            response = requests.get(
+                f"{self.api_base}/api/v1/messages/original",
+                params=params,
+                headers={"Authorization": f"Bearer {self.api_token}"},
+                timeout=timeout,
+            )
+            if response.status_code == 404:
+                return {"ok": False, "error": "original message not found"}
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict):
+                return {"ok": False, "error": "invalid WeFlow response"}
+            return {"ok": True, "message": data.get("message"), "lookup": data.get("lookup")}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:500]}
 
     # =========================
     # 🧠 提取发送者 wxid
@@ -74,6 +113,12 @@ class WeFlowClient:
             "text": self.get_real_content(msg),           # 清洗后的正文内容
             "is_group": self.is_group(msg),               # 是否群聊
             "is_private": self.is_private(msg),           # 是否私聊
+            "is_at": bool(msg.get("is_at") or msg.get("isAt") or msg.get("atBot")),
+            "is_mentioned": bool(
+                msg.get("is_mentioned")
+                or msg.get("isMentioned")
+                or msg.get("isMention")
+            ),
 
             # ===== 原始JSON字段直通 =====
             "event": msg.get("event"),
@@ -83,6 +128,12 @@ class WeFlowClient:
 
             # ===== 扩展字段 =====
             "messageKey": msg.get("messageKey"),
+            "localId": msg.get("localId") or msg.get("local_id"),
+            "serverId": msg.get("serverId") or msg.get("server_id"),
+            "svrid": msg.get("svrid") or msg.get("rawid") or msg.get("serverId"),
+            "rawid": msg.get("rawid"),
+            "timestamp": msg.get("timestamp"),
+            "localType": msg.get("localType") or msg.get("local_type"),
             "avatarUrl": msg.get("avatarUrl"),
 
             # ===== debug =====

@@ -1,4 +1,3 @@
-import atexit
 import httpx
 from openai import OpenAI
 
@@ -6,6 +5,12 @@ from llm.config import get_api_key, get_llm_config
 
 
 class DeepSeekProvider:
+    """Thin DeepSeek/OpenAI-compatible client.
+
+    ``send`` keeps the old string-returning API used by existing plugins.
+    ``send_chat`` exposes the full assistant message for tool-call rounds.
+    """
+
     def __init__(self):
         config = get_llm_config()
         self.model = config["model"]
@@ -13,68 +18,55 @@ class DeepSeekProvider:
         self._init_client()
 
     def _init_client(self):
-        """初始化 OpenAI 客户端，处理 atexit 相关错误"""
         try:
-            # 创建自定义的 httpx 客户端配置，避免 atexit 注册问题
-            http_client = httpx.Client(
-                timeout=httpx.Timeout(60.0)
-            )
-            
+            http_client = httpx.Client(timeout=httpx.Timeout(60.0))
             self.client = OpenAI(
                 api_key=get_api_key(),
                 base_url="https://api.deepseek.com",
-                http_client=http_client
+                http_client=http_client,
             )
-        except RuntimeError as e:
-            # 捕获 "can't register atexit after shutdown" 错误
-            if "atexit" in str(e).lower() and "shutdown" in str(e).lower():
-                # 降级处理：使用默认配置重试
-                try:
-                    # 禁用自动atexit处理
-                    import sys
-                    if not sys.is_finalizing():
-                        self.client = OpenAI(
-                            api_key=get_api_key(),
-                            base_url="https://api.deepseek.com"
-                        )
-                    else:
-                        raise RuntimeError("程序正在关闭，无法初始化 OpenAI 客户端")
-                except Exception as retry_err:
-                    raise RuntimeError(f"LLM 客户端初始化失败: {retry_err}")
-            else:
+        except RuntimeError as exc:
+            if "atexit" not in str(exc).lower() or "shutdown" not in str(exc).lower():
                 raise
+            self.client = OpenAI(
+                api_key=get_api_key(),
+                base_url="https://api.deepseek.com",
+            )
 
-    def send(self, messages: list) -> str:
-        """发送消息到 DeepSeek API"""
+    def send_chat(self, messages: list, tools: list | None = None):
+        """Return the SDK assistant message, including any tool calls."""
         if self.client is None:
             raise RuntimeError("LLM 客户端未初始化")
-        
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        if tools:
+            # DeepSeek documents auto as the default when tools are present;
+            # setting it explicitly makes the model's autonomous choice clear.
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                response_format={"type": "json_object"}
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            # 如果发生连接错误，尝试重新初始化客户端
-            if "atexit" in str(e).lower() or "shutdown" in str(e).lower():
+            response = self.client.chat.completions.create(**kwargs)
+            return response.choices[0].message
+        except Exception as exc:
+            if "atexit" in str(exc).lower() or "shutdown" in str(exc).lower():
                 self._init_client()
-                if self.client is None:
-                    raise RuntimeError(f"LLM 客户端恢复失败: {e}")
-                # 重试一次
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    response_format={"type": "json_object"}
-                )
-                return response.choices[0].message.content
+                response = self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message
             raise
 
+    def send(self, messages: list) -> str:
+        """Backward-compatible string API for existing non-tool plugins."""
+        message = self.send_chat(messages)
+        return str(getattr(message, "content", None) or "")
+
     def __del__(self):
-        """清理资源"""
         try:
-            if self.client is not None and hasattr(self.client, '_client'):
+            if self.client is not None and hasattr(self.client, "_client"):
                 self.client._client.close()
         except Exception:
             pass

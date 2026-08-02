@@ -1,4 +1,4 @@
-# GSMPS WeChat Bot
+# GSMPS WeChat Bot v2
 
 一个基于 [WeFlow](https://github.com/Double6ix/WeFlow) 的 Windows 微信机器人框架。它负责接收微信消息、执行路由和插件、调用 LLM，并通过统一发送接口回复文本或文件。
 
@@ -10,6 +10,8 @@
 - 精确群聊白名单、前缀路由、命令分发和速率限制
 - `plugins/` 命令插件与 `auto/` 自动事件插件
 - DeepSeek LLM 转发、JSON 响应解析、群聊上下文和表情发送
+- LLM 内置主动回复状态机：工作期、关注期、空闲期和批量情景判断
+- DeepSeek 标准网页工具调用，可由模型自主决定是否读取网页
 - Minecraft 状态查询、RCON、玩家监控和 The Room 锦标赛示例
 - ComfyUI 图片生成与媒体发送示例
 - 本地 JSON / SQLite 工具、管理员命令和项目级 Python 热重载
@@ -19,8 +21,8 @@
 - 当前项目面向 Windows 微信客户端，微信需要保持登录。
 - `target_group` 是精确匹配的群聊白名单；空数组或未匹配群名会被路由器直接忽略。
 - `prefix_mode` 默认为 `only`：只有带配置前缀的消息才进入路由；`mixed` 和 `off` 允许无前缀内容继续参与命令/自动插件处理。
-- 插件和自动插件优先于 LLM。未命令命中、且满足前缀/随机回复等条件的消息才会转发到 LLM。
-- 当前 LLM 实现是 `llm/core/llm_service.py` 调用 DeepSeek API，历史记录保存在 `data/groups/<群名>/` 下的 JSON 文件。
+- 插件和自动插件优先于 LLM；普通群聊消息由 LLM 内置主动回复机制按状态机批量判断。
+- 当前 LLM 实现是 `llm/core/llm_service.py` 调用 DeepSeek API，历史记录保存在 `data/groups/<群名>/` 下的 JSON 文件，并按字符预算裁剪。
 
 ## 环境要求
 
@@ -128,22 +130,68 @@ LLM 由 `llm.enabled` 控制，当前 Provider 为 DeepSeek：
     "provider": "deepseek",
     "model": "deepseek-chat",
     "api_key": "sk-...",
-    "max_history": 100,
+    "max_history_chars": 5000,
     "history_expire_ms": 600000,
-    "group_message_limit": 20,
+    "group_message_limit_chars": 2000,
     "intercept_auto_plugins": ["picture"],
-    "prefix_bypass_wxids": []
+    "web_fetch_enabled": true,
+    "web_fetch_max_calls": 3,
+    "web_fetch_timeout_seconds": 15,
+    "web_fetch_max_chars": 24000,
+    "original_message_enabled": true,
+    "original_message_max_calls": 2,
+    "original_message_timeout_seconds": 8,
+    "original_message_max_chars": 16000,
+    "prefix_bypass_wxids": [],
+    "auto_reply": {
+      "enabled": true,
+      "idle_min_seconds": 1200,
+      "idle_max_seconds": 2400,
+      "work_min_seconds": 120,
+      "work_max_seconds": 300,
+      "batch_interval_seconds": 10,
+      "attention_min_seconds": 120,
+      "attention_max_seconds": 300,
+      "attention_message_limit": 10,
+      "attention_no_reply_limit": 3
+    }
   }
 }
 ```
 
-LLM 的基本放行条件是：消息通过路由、没有被命令插件处理、满足前缀或配置的 `prefix_bypass_wxids`，且 `llm.enabled` 为 `true`。配置在 `llm.intercept_auto_plugins` 中的自动插件还必须实现 `INTERCEPT_LLM = True` 和 `allow_llm(context)`，否则会阻断转发。
+`max_history_chars` 是对话历史字符上限，`group_message_limit_chars` 是群聊最近消息字符上限；两者统计消息 `content` 字段字符数，不再按消息条数限制。`history_expire_ms` 仍控制对话历史过期时间。转发给 LLM 时从最新消息向前累积，纳入刚好跨过上限的完整消息，不拆分消息。
 
-`llm.random_reply.enabled` 默认关闭。开启后，`auto/random_reply.py` 会在冷却结束时等待下一条符合条件的群消息，并将其转发给 LLM；它仍受 `target_group` 限制，并默认排除命令、@消息和媒体消息。
+### 主动回复状态机
+
+主动回复已经从 `auto/` 插件迁移到 `llm/proactive_reply.py`，由 `llm.auto_reply.enabled` 控制：
+
+| 状态 | 行为 |
+| --- | --- |
+| 空闲期 | 随机持续 20–40 分钟，结束后先进入关注期 |
+| 工作期 | 随机持续 2–5 分钟，每 10 秒整理期间消息交给 LLM 判断 |
+| 关注期 | 空闲期或工作期结束后，每随机 2–5 分钟检查群聊最新 10 条消息 |
+| 回退空闲 | 连续 3 次判断没有值得回复的内容后进入空闲期 |
+
+关注期发现值得回复的消息会恢复工作期。被 @ 触发时会跳过当前冷却，强制进入 3 分钟工作期并要求 LLM 回复。工作期中 LLM 成功主动回复且剩余时间不足 3 分钟时，工作期重置为 3 分钟。
+
+主动回复的批量 JSON 包含消息 ID、时间、群名、发送人昵称、发送人 wxid、正文、消息类型和 @ 状态。工作期内消息统一先进入十秒批次，即使批次中包含多条 @ 或网址消息，也由一次 LLM 请求结合起来判断和生成回复；@ 和白名单网址只会将该批次标记为必须处理，不会逐条单独请求。LLM 返回 `should_reply`、`reply_to`、`messages` 和 `animation`，由程序决定是否实际发送。
+启用非 prefix 自主回复后，主动回复状态机会接管这些消息；即使发送者配置了 `prefix_bypass_wxids`，也不会绕过工作期批处理而逐条直接请求 LLM。
+主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句，不会参与每一轮。
+
+群聊回复会在生成提示中进行发送前自审：避免露骨描述性内容；涉及不适合大群的话题时改用简短、中性的概括或礼貌拒答，不重复具体细节。
+
+### LLM 网页工具
+
+LLM 使用 DeepSeek 官方 OpenAI 兼容的 `tools` / `tool_choice="auto"` 协议调用 `fetch_webpage`。模型可以自主决定是否读取公开 HTTP/HTTPS 网页；程序会限制请求超时、正文长度，并拒绝本机和内网地址。工具结果会作为不可信网页数据返回给模型，不会被当作系统指令执行。主动回复收到只包含 `bilibili.com` 或 `b23.tv`（含子域名）网址的消息时，会抓取网页并返回简要内容梗概；其他网址不会触发该规则，抓取失败时不会编造内容。
+如果 LLM 返回内容不是合法 JSON 或 JSON 字段格式错误，程序会直接发送完整原文；如果 API 返回 HTTP 402，则发送“余额不足，请检查llm余额是否充足”。
+
+### LLM 原始消息查询工具
+
+当消息记录看起来像聊天记录、转发摘要、引用或被截断的 app 消息时，LLM 可以自主调用 `fetch_original_message`，使用消息 JSON 中已有的 `session_id` 与 `local_id`/`server_id` 查询 WeFlow 的消息。该接口调用 WeFlow 自带的 `chatService` 解析流程，返回完整的解码/解析消息对象（包括聊天记录列表和类型特定字段），而不是直接返回 WCDB 未解码行。工具只允许查询当前会话，禁止猜测 ID，并限制调用次数和超时；返回内容只作为不可信上下文，不会被当作指令执行。该接口由 WeFlow 的鉴权 HTTP API `/api/v1/messages/original` 提供。
 
 ### 外部服务
 
-- `mc` / `rcon`：仅为 Minecraft 示例功能服务，不使用时留空并禁用相关插件。
+- `mc` / `rcon`：仅为 Minecraft 示例功能服务；`/rcon <指令>` 原样发送到 RCON，仅 `llm.admin_wxids` 中的管理员可用。
 - `comfy`：`anima/` 和图片插件需要自行部署 ComfyUI、准备工作流和输出目录。
 - `tournament`：需要 Minecraft 数据包 Storage、RCON 和 `usercache.json` 映射，是特定服务器场景的示例。
 
@@ -182,7 +230,7 @@ return {
 - `MATCH_RAW_MESSAGE = True`：声明接收无前缀原始消息
 - `FALLBACK_ONLY = True`：仅在前面的处理均未返回时执行
 
-插件加载、Context 字段、返回值协议、Follow-up、媒体下载和热重载约定见 [DEV_GUIDE.md](DEV_GUIDE.md)。
+主动回复不再属于自动插件；自动插件仅用于拍一拍、图片 follow-up 等事件。插件加载、Context 字段、返回值协议、Follow-up、媒体下载和热重载约定见 [DEV_GUIDE.md](DEV_GUIDE.md)。
 
 ## 项目结构
 
@@ -194,7 +242,7 @@ core/                   路由、队列、Worker、Dispatcher、WeFlow 和发送
 plugins/                命令插件示例
 auto/                   自动事件/后台任务插件示例
 services/               Minecraft、图片和锦标赛业务服务
-llm/                    DeepSeek Provider、Prompt、上下文和记忆
+llm/                    DeepSeek Provider、Prompt、主动回复、上下文和记忆
 utils/                  SQLite、积分、去重等通用工具
 data/                   运行时数据和本地群聊历史
 assets/                 字体与图片资源
@@ -205,7 +253,7 @@ weflow-core/            随仓库提供的 WeFlow Node.js 内核源码
 ## 开发文档
 
 - [DEV_GUIDE.md](DEV_GUIDE.md)：架构、消息 Context、插件 API、LLM 调用链和开发规范
-- [sample_config.json](sample_config.json)：配置模板
+- [sample_config.json](sample_config.json)：v2 配置模板
 - [admin_commands.txt](admin_commands.txt)：预置管理员命令说明
 - [requirements.txt](requirements.txt)：Python 依赖
 - [weflow-core/package.json](weflow-core/package.json)：WeFlow 构建脚本和 Node.js 依赖
