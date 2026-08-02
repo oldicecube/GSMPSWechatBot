@@ -67,6 +67,9 @@ class LLMService:
     def set_style_review_callback(self, callback):
         self.proactive_reply.set_style_review_callback(callback)
 
+    def set_style_review_due_callback(self, callback):
+        self.proactive_reply.set_style_review_due_callback(callback)
+
     def curate_style(self, group_id, context=None):
         """Replace the dynamic style card during an idle-period review."""
         if not self.style_learner or not self.style_learner.review_enabled:
