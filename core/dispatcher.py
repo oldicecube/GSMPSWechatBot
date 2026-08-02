@@ -284,6 +284,8 @@ class Dispatcher:
             if llm_config.get("enabled"):
                 self.llm_service = LLMService()
                 self.llm_service.set_proactive_callback(self._dispatch_background_batch)
+                self.llm_service.set_style_review_callback(self._review_style_card)
+                self.llm_service.set_style_review_due_callback(self._style_review_due)
             else:
                 self.llm_service = None
         except Exception as e:
@@ -291,6 +293,16 @@ class Dispatcher:
             self.llm_service = None
             self.llm_intercept_auto_plugins = set()
             self.llm_prefix_bypass_wxids = set()
+
+    def _review_style_card(self, group_id, context=None):
+        if not self.llm_service:
+            return False
+        return self.llm_service.curate_style(group_id, context)
+
+    def _style_review_due(self, group_id):
+        if not self.llm_service or not self.llm_service.style_learner:
+            return False
+        return self.llm_service.style_learner.style_review_due(group_id)
 
     def _can_forward_to_llm(self, context):
         if not self.llm_service:

@@ -84,6 +84,30 @@ class ProfileStore:
                     seen_at INTEGER NOT NULL,
                     PRIMARY KEY (group_id, fingerprint)
                 );
+                CREATE TABLE IF NOT EXISTS learning_samples (
+                    group_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    speaker TEXT NOT NULL,
+                    speaker_name TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    PRIMARY KEY (group_id, fingerprint)
+                );
+                CREATE TABLE IF NOT EXISTS style_cards (
+                    group_id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL,
+                    source_message_count INTEGER NOT NULL DEFAULT 0,
+                    card_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS style_card_versions (
+                    group_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    source_message_count INTEGER NOT NULL DEFAULT 0,
+                    card_json TEXT NOT NULL,
+                    PRIMARY KEY (group_id, version)
+                );
                 CREATE INDEX IF NOT EXISTS idx_slang_prompt
                     ON slang_terms(group_id, safe_to_use, confidence DESC, occurrence_count DESC);
                 """
@@ -95,8 +119,18 @@ class ProfileStore:
             connection.execute("DELETE FROM slang_terms WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM term_speakers WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM message_fingerprints WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM learning_samples WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM style_cards WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM style_card_versions WHERE group_id = ?", (group_id,))
 
-    def replace_profile(self, group_id: str, style: dict, message_count: int, terms: list[dict]):
+    def replace_profile(
+        self,
+        group_id: str,
+        style: dict,
+        message_count: int,
+        terms: list[dict],
+        samples: list[dict] | None = None,
+    ):
         """Write one already-aggregated offline profile in a single transaction."""
         now = int(time.time())
         with self._managed_connection() as connection:
@@ -104,6 +138,22 @@ class ProfileStore:
             connection.execute("DELETE FROM slang_terms WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM term_speakers WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM message_fingerprints WHERE group_id = ?", (group_id,))
+            connection.executemany(
+                "INSERT OR REPLACE INTO learning_samples("
+                "group_id, fingerprint, timestamp, speaker, speaker_name, content) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        group_id,
+                        str(item.get("fingerprint") or f"offline-{index}"),
+                        int(item.get("timestamp") or now),
+                        str(item.get("speaker") or "unknown"),
+                        str(item.get("speaker_name") or "")[:80],
+                        str(item.get("content") or "")[:500],
+                    )
+                    for index, item in enumerate((samples or [])[-300:])
+                ],
+            )
             safe_terms = [item for item in terms if item.get("safe_to_use")]
             connection.execute(
                 "INSERT INTO group_profiles(group_id, updated_at, message_count, style_json, top_terms_json) "
@@ -157,6 +207,26 @@ class ProfileStore:
             ).rowcount
             if not inserted:
                 return False
+
+            connection.execute(
+                "INSERT OR REPLACE INTO learning_samples("
+                "group_id, fingerprint, timestamp, speaker, speaker_name, content) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    group_id,
+                    fingerprint,
+                    now,
+                    speaker,
+                    str(observation.get("speaker_name") or "")[:80],
+                    content[:500],
+                ),
+            )
+            connection.execute(
+                "DELETE FROM learning_samples WHERE group_id = ? AND rowid NOT IN ("
+                "SELECT rowid FROM learning_samples WHERE group_id = ? "
+                "ORDER BY timestamp DESC LIMIT 300)",
+                (group_id, group_id),
+            )
 
             profile = connection.execute(
                 "SELECT style_json, message_count FROM group_profiles WHERE group_id = ?",
@@ -283,6 +353,97 @@ class ProfileStore:
                 for row in terms
             ]
             return result
+
+    def get_style_card(self, group_id: str) -> dict:
+        with self._managed_connection() as connection:
+            return self._get_style_card_connection(connection, group_id)
+
+    @staticmethod
+    def _get_style_card_connection(connection, group_id: str) -> dict:
+        row = connection.execute(
+            "SELECT version, updated_at, source_message_count, card_json "
+            "FROM style_cards WHERE group_id = ?",
+            (str(group_id or "unknown"),),
+        ).fetchone()
+        if not row:
+            return {}
+        card = _load_json(row["card_json"], {})
+        card["_version"] = int(row["version"])
+        card["_updated_at"] = int(row["updated_at"])
+        card["_source_message_count"] = int(row["source_message_count"])
+        return card
+
+    def get_review_payload(self, group_id: str, max_samples: int = 80, max_terms: int = 80) -> dict:
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        with self._managed_connection() as connection:
+            profile = connection.execute(
+                "SELECT message_count, style_json FROM group_profiles WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            if not profile:
+                return {}
+            terms = connection.execute(
+                "SELECT phrase, occurrence_count, speaker_count, confidence, safe_to_use, examples_json "
+                "FROM slang_terms WHERE group_id = ? ORDER BY occurrence_count DESC LIMIT ?",
+                (group_id, max(1, int(max_terms))),
+            ).fetchall()
+            samples = connection.execute(
+                "SELECT timestamp, speaker_name, content FROM learning_samples "
+                "WHERE group_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (group_id, max(1, int(max_samples))),
+            ).fetchall()
+            return {
+                "group_id": group_id,
+                "message_count": int(profile["message_count"]),
+                "style_stats": _load_json(profile["style_json"], {}),
+                "existing_card": self._get_style_card_connection(connection, group_id),
+                "candidate_terms": [
+                    {
+                        "phrase": row["phrase"],
+                        "occurrence_count": int(row["occurrence_count"]),
+                        "speaker_count": int(row["speaker_count"]),
+                        "confidence": float(row["confidence"]),
+                        "safe_to_use": bool(row["safe_to_use"]),
+                        "examples": _load_json(row["examples_json"], [])[:2],
+                    }
+                    for row in terms
+                ],
+                "recent_samples": [
+                    {
+                        "timestamp": int(row["timestamp"]),
+                        "speaker_name": row["speaker_name"],
+                        "content": str(row["content"] or "")[:180],
+                    }
+                    for row in reversed(samples)
+                ],
+            }
+
+    def save_style_card(self, group_id: str, card: dict, source_message_count: int, keep_versions: int = 5):
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        now = int(time.time())
+        card_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+        with self._managed_connection() as connection:
+            current = connection.execute(
+                "SELECT version FROM style_cards WHERE group_id = ?", (group_id,)
+            ).fetchone()
+            version = int(current["version"] if current else 0) + 1
+            connection.execute(
+                "INSERT INTO style_cards(group_id, version, updated_at, source_message_count, card_json) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(group_id) DO UPDATE SET "
+                "version=excluded.version, updated_at=excluded.updated_at, "
+                "source_message_count=excluded.source_message_count, card_json=excluded.card_json",
+                (group_id, version, now, int(source_message_count), card_json),
+            )
+            connection.execute(
+                "INSERT INTO style_card_versions(group_id, version, created_at, source_message_count, card_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (group_id, version, now, int(source_message_count), card_json),
+            )
+            connection.execute(
+                "DELETE FROM style_card_versions WHERE group_id = ? AND version NOT IN ("
+                "SELECT version FROM style_card_versions WHERE group_id = ? ORDER BY version DESC LIMIT ?)",
+                (group_id, group_id, max(1, int(keep_versions))),
+            )
 
 
 def _load_json(value, default):

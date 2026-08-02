@@ -106,9 +106,15 @@
       "enabled": true,
       "db_path": "data/llm_learning.sqlite3",
       "queue_max": 2000,
-      "min_term_count": 3,
+      "min_term_count": 2,
       "prompt_max_chars": 1800,
-      "bot_names": ["服务器状态@我"]
+      "bot_names": ["服务器状态@我"],
+      "review_enabled": true,
+      "review_min_messages": 250,
+      "review_min_interval_seconds": 3600,
+      "review_max_samples": 80,
+      "style_card_max_chars": 1800,
+      "keep_style_card_versions": 5
     },
     "emoji_dir": "data/emoji",
     "assistant_nickname": "Bot",

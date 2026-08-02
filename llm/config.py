@@ -88,8 +88,16 @@ def get_llm_config():
         "enabled": bool(learning.get("enabled", True)),
         "db_path": str(learning.get("db_path") or "data/llm_learning.sqlite3").strip(),
         "queue_max": max(100, _safe_int(learning.get("queue_max", 2000), 2000)),
-        "min_term_count": max(2, _safe_int(learning.get("min_term_count", 3), 3)),
+        "min_term_count": max(2, _safe_int(learning.get("min_term_count", 2), 2)),
         "prompt_max_chars": max(400, _safe_int(learning.get("prompt_max_chars", 1800), 1800)),
+        "review_enabled": bool(learning.get("review_enabled", True)),
+        "review_min_messages": max(50, _safe_int(learning.get("review_min_messages", 250), 250)),
+        "review_min_interval_seconds": max(
+            600, _safe_int(learning.get("review_min_interval_seconds", 3600), 3600)
+        ),
+        "review_max_samples": max(20, _safe_int(learning.get("review_max_samples", 80), 80)),
+        "style_card_max_chars": max(600, _safe_int(learning.get("style_card_max_chars", 1800), 1800)),
+        "keep_style_card_versions": max(2, _safe_int(learning.get("keep_style_card_versions", 5), 5)),
         "bot_names": [
             str(item).strip()
             for item in (([learning.get("bot_names")] if isinstance(learning.get("bot_names"), str) else learning.get("bot_names")) or [])

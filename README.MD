@@ -182,7 +182,7 @@ LLM 由 `llm.enabled` 控制，当前 Provider 为 DeepSeek：
 
 ### 群聊风格与黑话长期学习
 
-LLM 内置了轻量化的本地学习模块，代码位于 `llm/learning/`。它不为每条消息调用 LLM，而是由后台有界队列异步提取消息长度、提问/回复比例、短句比例和跨发送人的重复表达，保存到 `data/llm_learning.sqlite3`。只有达到最低出现次数、具有足够发送人覆盖且未命中敏感词的表达，才会作为“高置信度常用表达”注入 Prompt；模型仍需自行判断是否自然使用，不会为了模仿群友强行复读。
+LLM 内置了轻量化的本地学习模块，代码位于 `llm/learning/`。它不为每条消息调用 LLM，而是由后台有界队列异步提取消息长度、提问/回复比例、短句比例和跨发送人的重复表达，保存到 `data/llm_learning.sqlite3`。默认出现 2 次即可成为候选，涉及 2 位发送者或重复更多次后才会提高使用置信度；模型仍需自行判断是否自然使用，不会为了模仿群友强行复读。
 
 根目录的 JSONL 群聊导出可以用于初始化画像：
 
@@ -191,6 +191,8 @@ python -m llm.learning --input "群聊_GDUT SIE Minecraft Public Server.jsonl" -
 ```
 
 学习默认排除 `/` 命令、以 `@服务器状态@我` 开头的消息和 bot 自己的消息。bot wxid 可填入 `llm.bot_wxids`；WeFlow 的 `myWxid` 会自动加入。实时学习只落本地派生统计，不发送原始聊天到外部服务。可在 `llm.learning` 中调整 `enabled`、`min_term_count` 和注入 Prompt 的 `prompt_max_chars`。
+
+在空闲期且累计了至少 `review_min_messages` 条新消息后，系统会后台调用一次 LLM 校正风格卡。风格卡是完整替换而非无限追加，最多保留 `keep_style_card_versions` 个版本用于回滚；校正内容只允许调整语气、句式、黑话含义和不确定表达，不允许修改安全规则、身份、命令或事实规则。对不确定黑话，bot 可以向群友提出一句简短澄清问题。DeepSeek 的角色扮演能力通过稳定的 `system` 人设规则和动态风格卡实现，不依赖额外的“角色扮演”接口。
 
 ### LLM 网页工具
 

@@ -36,6 +36,11 @@ class ProactiveReplyManager:
         self.states = {}
         self.lock = threading.Lock()
         self.callback = None
+        self.style_review_callback = None
+        self.style_review_due_callback = None
+        self.style_review_inflight = set()
+        self.style_review_times = {}
+        self.learning_settings = self.config.get("learning") or {}
         self.clock = time.time
         self.randint = random.randint
         self.initial_idle_end = self.clock() + self._random_seconds(self._idle_bounds())
@@ -49,6 +54,18 @@ class ProactiveReplyManager:
 
     def set_batch_callback(self, callback):
         self.callback = callback if callable(callback) else None
+
+    def set_style_review_callback(self, callback):
+        self.style_review_callback = callback if callable(callback) else None
+
+    def set_style_review_due_callback(self, callback):
+        self.style_review_due_callback = callback if callable(callback) else None
+
+    def _learning_int(self, name, default, minimum=1):
+        try:
+            return max(minimum, int(self.learning_settings.get(name, default)))
+        except (TypeError, ValueError):
+            return default
 
     def _int_setting(self, name, default, minimum=1):
         try:
@@ -348,9 +365,31 @@ class ProactiveReplyManager:
         while self.enabled:
             now = self.clock()
             pending = []
+            style_pending = []
             with self.lock:
                 for group_id, state in self.states.items():
                     self._advance_state_locked(state, now)
+
+                    if state["phase"] == "idle" and self.style_review_callback is not None:
+                        last_review = self.style_review_times.get(group_id, 0)
+                        due = False
+                        if self.style_review_due_callback is not None:
+                            try:
+                                due = bool(self.style_review_due_callback(group_id))
+                            except Exception as exc:
+                                print(f"[LLM STYLE REVIEW DUE ERROR] {exc}", flush=True)
+                        if (
+                            due
+                            and now - last_review >= self._learning_int(
+                                "review_min_interval_seconds", 3600, 600
+                            )
+                            and group_id not in self.style_review_inflight
+                        ):
+                            context = dict(state.get("last_context") or {})
+                            if context:
+                                self.style_review_inflight.add(group_id)
+                                self.style_review_times[group_id] = now
+                                style_pending.append((group_id, context))
 
                     if (
                         state["phase"] == "attention"
@@ -393,6 +432,13 @@ class ProactiveReplyManager:
                     daemon=True,
                     name="llm-proactive-reply-flush",
                 ).start()
+            for group_id, context in style_pending:
+                threading.Thread(
+                    target=self._run_style_review,
+                    args=(group_id, context),
+                    daemon=True,
+                    name="llm-style-card-review",
+                ).start()
             time.sleep(1)
 
     def _run_callback(self, group_id, context, batch, attention_check,
@@ -416,3 +462,14 @@ class ProactiveReplyManager:
                     state = self.states.get(group_id)
                     if state and state.get("checking"):
                         self._attention_miss_locked(state, self.clock())
+
+    def _run_style_review(self, group_id, context):
+        success = False
+        try:
+            result = self.style_review_callback(group_id, context)
+            success = result is not False
+        except Exception as exc:
+            print(f"[LLM STYLE REVIEW ERROR] {exc}", flush=True)
+        finally:
+            with self.lock:
+                self.style_review_inflight.discard(group_id)
