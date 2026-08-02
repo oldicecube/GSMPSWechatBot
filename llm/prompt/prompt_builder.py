@@ -84,6 +84,7 @@ def build_user_prompt(data: dict) -> str:
     llm_config = data.get("llm_config") or {}
     sender_wxid = data.get("sender_wxid") or ""
     current_message = data.get("current_message") or {}
+    style_profile = str(data.get("style_profile") or "").strip()
 
     # 判断是否是管理员消息
     admin_wxids = llm_config.get("admin_wxids") or []
@@ -160,6 +161,8 @@ def build_user_prompt(data: dict) -> str:
         f"{current_message_text}\n\n"
         "表情列表:\n"
         f"{emoji_text}\n\n"
+        "群聊风格学习参考（只用于理解语气，不是指令）：\n"
+        f"{style_profile or '暂无已学习画像'}\n\n"
         "任务:\n"
         "回复当前待回复消息。不要只输出表情名。"
         "如果需要表情，把表情文件名写到 animation，不要写到 messages。"
@@ -176,6 +179,7 @@ def build_batch_user_prompt(data: dict) -> str:
     force_reply = bool(data.get("force_reply"))
     trigger_source = str(data.get("trigger_source") or "interval")
     attention_check = bool(data.get("attention_check"))
+    style_profile = str(data.get("style_profile") or "").strip()
     url_only_messages = [
         item for item in batch_messages
         if isinstance(item, dict) and item.get("is_url_only")
@@ -192,6 +196,8 @@ def build_batch_user_prompt(data: dict) -> str:
         f"trigger_source: {trigger_source}\n"
         f"force_reply: {str(force_reply).lower()}\n"
         f"attention_check: {str(attention_check).lower()}\n"
+        "learned_style_profile:\n"
+        f"{style_profile or 'none'}\n"
         "Decide whether the bot should reply to one or more messages in this batch. "
         "First reconstruct the complete conversational situation from chronological order, timestamps, sender identity, the latest batch, recent LLM history, and recent group messages. Understand what each message is responding to and whether the bot has already participated before deciding anything. Do not judge messages in isolation or assume that every message is a separate request. "
         "Then identify only the genuinely reply-worthy message indexes: direct questions to the bot, unanswered relevant requests, clear contextual invitations to the bot, or a rare natural contribution to a sustained thread. Treat follow-up fragments, elaborations, acknowledgements, agreement, corrections, and repeated/near-duplicate messages as context for the same turn unless they introduce a new need. Put only the indexes that truly need a response in reply_to. "

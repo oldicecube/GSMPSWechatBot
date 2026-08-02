@@ -5,6 +5,7 @@ import queue as queue_lib
 
 from core.sender import preview_delay_seconds, send
 from llm.memory import MemoryManager
+from llm.learning import StyleLearner
 from llm.security import get_emoji_path
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -18,6 +19,19 @@ class Worker:
         self.dispatcher = dispatcher
         self.config = config or {}
         self.memory_manager = self._build_memory_manager()
+        try:
+            worker_llm_config = (self.config or {}).get("llm") if isinstance(self.config, dict) else {}
+            worker_llm_config = dict(worker_llm_config or {})
+            learning_config = dict(worker_llm_config.get("learning") or {})
+            weflow_config = (self.config or {}).get("weflow") or {}
+            learning_config["bot_wxids"] = list(learning_config.get("bot_wxids") or [])
+            if weflow_config.get("myWxid"):
+                learning_config["bot_wxids"].append(weflow_config.get("myWxid"))
+            worker_llm_config["learning"] = learning_config
+            self.style_learner = StyleLearner(worker_llm_config)
+        except Exception as exc:
+            print(f"[WORKER LEARNING INIT ERROR] {exc}")
+            self.style_learner = None
 
     # =========================================================
     # 🚀 主线程
@@ -192,6 +206,26 @@ class Worker:
             server_id=info.get("server_id"),
             session_id=info.get("sessionId") or msg.get("sessionId"),
         )
+        if self.style_learner:
+            self.style_learner.record_message({
+                "group": group_id,
+                "sessionId": info.get("sessionId") or msg.get("sessionId"),
+                "user": nickname,
+                "wxid": info.get("wxid") or msg.get("wxid"),
+                "content": content,
+                "messageKey": info.get("message_id"),
+                "localId": info.get("local_id"),
+                "serverId": info.get("server_id"),
+                "replyToMessageId": msg.get("replyToMessageId"),
+                "is_picture": msg.get("is_picture", False),
+                "is_emoji": msg.get("is_emoji", False),
+                "is_voice": msg.get("is_voice", False),
+                "raw": msg,
+                "is_bot": bool(
+                    (info.get("wxid") or msg.get("wxid"))
+                    and (info.get("wxid") or msg.get("wxid")) == ((self.config.get("weflow") or {}).get("myWxid"))
+                ),
+            })
 
     def _send_structured_result(self, target, result):
         messages = result.get("messages") or []

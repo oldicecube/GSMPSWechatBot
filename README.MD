@@ -180,6 +180,18 @@ LLM 由 `llm.enabled` 控制，当前 Provider 为 DeepSeek：
 
 群聊回复会在生成提示中进行发送前自审：避免露骨描述性内容；涉及不适合大群的话题时改用简短、中性的概括或礼貌拒答，不重复具体细节。
 
+### 群聊风格与黑话长期学习
+
+LLM 内置了轻量化的本地学习模块，代码位于 `llm/learning/`。它不为每条消息调用 LLM，而是由后台有界队列异步提取消息长度、提问/回复比例、短句比例和跨发送人的重复表达，保存到 `data/llm_learning.sqlite3`。只有达到最低出现次数、具有足够发送人覆盖且未命中敏感词的表达，才会作为“高置信度常用表达”注入 Prompt；模型仍需自行判断是否自然使用，不会为了模仿群友强行复读。
+
+根目录的 JSONL 群聊导出可以用于初始化画像：
+
+```powershell
+python -m llm.learning --input "群聊_GDUT SIE Minecraft Public Server.jsonl" --group "GDUT SIE Minecraft Public Server" --replace
+```
+
+学习默认排除 `/` 命令、以 `@服务器状态@我` 开头的消息和 bot 自己的消息。bot wxid 可填入 `llm.bot_wxids`；WeFlow 的 `myWxid` 会自动加入。实时学习只落本地派生统计，不发送原始聊天到外部服务。可在 `llm.learning` 中调整 `enabled`、`min_term_count` 和注入 Prompt 的 `prompt_max_chars`。
+
 ### LLM 网页工具
 
 LLM 使用 DeepSeek 官方 OpenAI 兼容的 `tools` / `tool_choice="auto"` 协议调用 `fetch_webpage`。模型可以自主决定是否读取公开 HTTP/HTTPS 网页；程序会限制请求超时、正文长度，并拒绝本机和内网地址。工具结果会作为不可信网页数据返回给模型，不会被当作系统指令执行。主动回复收到只包含 `bilibili.com` 或 `b23.tv`（含子域名）网址的消息时，会抓取网页并返回简要内容梗概；其他网址不会触发该规则，抓取失败时不会编造内容。

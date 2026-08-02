@@ -100,6 +100,16 @@
     "original_message_max_calls": 2,
     "original_message_timeout_seconds": 8,
     "original_message_max_chars": 16000,
+    "bot_wxids": [],
+    "learning": {
+      "_说明": "本地确定性学习群聊风格和高置信度黑话；不逐条调用LLM，运行时异步写入SQLite",
+      "enabled": true,
+      "db_path": "data/llm_learning.sqlite3",
+      "queue_max": 2000,
+      "min_term_count": 3,
+      "prompt_max_chars": 1800,
+      "bot_names": ["服务器状态@我"]
+    },
     "emoji_dir": "data/emoji",
     "assistant_nickname": "Bot",
     "identity": {

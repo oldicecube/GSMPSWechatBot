@@ -8,6 +8,7 @@ from llm.core.response_parser import (
     parse_llm_response,
 )
 from llm.memory import MemoryManager
+from llm.learning import StyleLearner
 from llm.proactive_reply import ProactiveReplyManager
 from llm.prompt import build_batch_user_prompt, build_system_prompt, build_user_prompt
 from llm.provider import DeepSeekProvider
@@ -44,6 +45,14 @@ class LLMService:
             self.emoji_list = []
 
         self.proactive_reply = ProactiveReplyManager(self.config)
+        try:
+            learning_config = dict(self.config)
+            learning_config["learning"] = dict(self.config.get("learning") or {})
+            learning_config["learning"]["bot_wxids"] = self.config.get("bot_wxids") or []
+            self.style_learner = StyleLearner(learning_config, start_worker=False)
+        except Exception as exc:
+            print(f"[LLM LEARNING INIT ERROR] {exc}", flush=True)
+            self.style_learner = None
 
     def set_proactive_callback(self, callback):
         self.proactive_reply.set_batch_callback(callback)
@@ -119,6 +128,10 @@ class LLMService:
             chat_history = self.memory_manager.get_llm_history(group_id)
             group_messages = self.memory_manager.get_group_messages(group_id)
             emoji_list = list(self.emoji_list)
+            style_profile = (
+                self.style_learner.get_prompt_context(group_id)
+                if self.style_learner else ""
+            )
 
             system_prompt = build_system_prompt(self.config.get("prompt") or {})
             user_prompt = build_user_prompt({
@@ -130,6 +143,7 @@ class LLMService:
                 "prompt": self.config.get("prompt") or {},
                 "sender_wxid": wxid,
                 "current_message": message_context or {},
+                "style_profile": style_profile,
             })
 
             messages = [
@@ -315,6 +329,10 @@ class LLMService:
                 )
 
             prompt_config = self.config.get("prompt") or {}
+            style_profile = (
+                self.style_learner.get_prompt_context(group_id)
+                if self.style_learner else ""
+            )
             system_prompt = build_system_prompt(prompt_config) + (
                 " Proactive mode override: you may set should_reply=false and messages=[] "
                 "when no reply is warranted. Decide from the supplied batch, not from this "
@@ -340,6 +358,7 @@ class LLMService:
                 "force_reply": effective_force_reply,
                 "trigger_source": trigger_source,
                 "attention_check": attention_check,
+                "style_profile": style_profile,
             })
             response_text = self._complete_with_tools(
                 [

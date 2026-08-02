@@ -81,6 +81,22 @@ def get_llm_config():
         ),
     }
 
+    learning = llm_config.get("learning")
+    if not isinstance(learning, dict):
+        learning = {}
+    result["learning"] = {
+        "enabled": bool(learning.get("enabled", True)),
+        "db_path": str(learning.get("db_path") or "data/llm_learning.sqlite3").strip(),
+        "queue_max": max(100, _safe_int(learning.get("queue_max", 2000), 2000)),
+        "min_term_count": max(2, _safe_int(learning.get("min_term_count", 3), 3)),
+        "prompt_max_chars": max(400, _safe_int(learning.get("prompt_max_chars", 1800), 1800)),
+        "bot_names": [
+            str(item).strip()
+            for item in (([learning.get("bot_names")] if isinstance(learning.get("bot_names"), str) else learning.get("bot_names")) or [])
+            if str(item).strip()
+        ],
+    }
+
     weflow_config = config.get("weflow")
     if not isinstance(weflow_config, dict):
         weflow_config = {}
@@ -93,6 +109,12 @@ def get_llm_config():
     result["weflow_api_token"] = str(
         config.get("token") or weflow_config.get("apiToken") or ""
     ).strip()
+    bot_wxids = llm_config.get("bot_wxids") or []
+    if isinstance(bot_wxids, str):
+        bot_wxids = [bot_wxids]
+    if weflow_config.get("myWxid"):
+        bot_wxids = list(bot_wxids) + [weflow_config.get("myWxid")]
+    result["bot_wxids"] = sorted({str(item).strip() for item in bot_wxids if str(item).strip()})
 
     target_groups = config.get("target_group", [])
     if isinstance(target_groups, str):
