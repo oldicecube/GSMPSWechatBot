@@ -4,30 +4,13 @@ import hashlib
 import json
 import os
 import queue
-import re
 import threading
 import time
 
-from llm.config import get_llm_config
 from .profile_store import (
     DEFAULT_DB_PATH,
     ProfileStore,
-    _term_confidence,
     _update_style,
-)
-
-
-_ASCII_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,24}")
-_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff]+")
-_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
-_STOP_TERMS = {
-    "可以", "然后", "这个", "那个", "我们", "你们", "哈哈", "好的", "不是", "真的",
-    "一下", "什么", "怎么", "已经", "因为", "所以", "没有", "就是", "对啊", "还有",
-    "一个", "现在", "知道", "感觉", "应该", "如果", "但是", "自己", "时候", "的话",
-}
-_UNSAFE_HINTS = (
-    "password", "passwd", "token", "secret", "身份证", "手机号", "银行卡", "裸聊",
-    "色情", "强奸", "自杀", "制作炸弹", "杀人",
 )
 
 
@@ -36,6 +19,7 @@ class StyleLearner:
 
     def __init__(self, config: dict | None = None, start_worker: bool = True):
         config = config if isinstance(config, dict) else {}
+        self.config = config
         self.settings = config.get("learning") if isinstance(config.get("learning"), dict) else {}
         self.enabled = bool(self.settings.get("enabled", True))
         path = self.settings.get("db_path") or DEFAULT_DB_PATH
@@ -44,14 +28,7 @@ class StyleLearner:
             path = os.path.join(base_dir, str(path))
         self.store = ProfileStore(str(path))
         self.min_term_count = max(2, _safe_int(self.settings.get("min_term_count"), 2))
-        self.review_enabled = bool(self.settings.get("review_enabled", True))
-        self.review_min_messages = max(50, _safe_int(self.settings.get("review_min_messages"), 250))
-        self.review_min_interval_seconds = max(
-            600, _safe_int(self.settings.get("review_min_interval_seconds"), 3600)
-        )
-        self.review_max_samples = max(20, _safe_int(self.settings.get("review_max_samples"), 80))
         self.style_card_max_chars = max(600, _safe_int(self.settings.get("style_card_max_chars"), 1800))
-        self.keep_style_card_versions = max(2, _safe_int(self.settings.get("keep_style_card_versions"), 5))
         configured_bot_wxids = self.settings.get("bot_wxids") or []
         if isinstance(configured_bot_wxids, str):
             configured_bot_wxids = [configured_bot_wxids]
@@ -62,7 +39,14 @@ class StyleLearner:
         self.bot_names = {
             str(item).strip().casefold() for item in configured_bot_names if str(item).strip()
         } | {"服务器状态@我", "gsmps bot"}
-        self.excluded_prefixes = ("/", "@服务器状态@我")
+        configured_prefixes = self.settings.get("prefixes") or self.config.get("prefixes") or []
+        if isinstance(configured_prefixes, str):
+            configured_prefixes = [configured_prefixes]
+        self.excluded_prefixes = ("/",) + tuple(
+            str(item).strip()
+            for item in configured_prefixes
+            if str(item).strip()
+        )
         self.queue_limit = max(100, _safe_int(self.settings.get("queue_max"), 2000))
         self._queue = queue.Queue(maxsize=self.queue_limit)
         self._stop = threading.Event()
@@ -85,6 +69,160 @@ class StyleLearner:
             # Dropping an observation is preferable to slowing down message delivery.
             return
 
+    def record_response_decision(
+        self,
+        group_id: str,
+        messages: list[dict] | None,
+        result: dict | None,
+        *,
+        force_reply=False,
+        attention_check=False,
+    ):
+        """Learn reply timing from compact decision metadata, never bot text."""
+        if not self.enabled or not group_id or not isinstance(result, dict):
+            return
+        batch = [item for item in (messages or []) if isinstance(item, dict)]
+        direct_address = any(
+            item.get("is_at_bot")
+            or item.get("prefix_used")
+            or item.get("is_mentioned")
+            for item in batch
+        )
+        normalized_contents = [
+            "".join(char for char in str(item.get("content") or "").casefold() if char.isalnum())
+            for item in batch
+        ]
+        repeat_topic_window = len(normalized_contents) >= 2 and any(
+            left and right and (left == right or left in right or right in left)
+            for index, left in enumerate(normalized_contents)
+            for right in normalized_contents[index + 1:]
+        )
+        follow_up = len(batch) >= 2 and any(
+            len(str(item.get("content") or "").strip()) <= 18 for item in batch[1:]
+        )
+        try:
+            self.store.record_response_decision(
+                group_id,
+                message_count=len(batch),
+                should_reply=bool(result.get("should_reply") and result.get("messages")),
+                llm_ok=bool(result.get("_llm_ok", True)),
+                forced=bool(force_reply),
+                attention_check=bool(attention_check),
+                direct_address=direct_address,
+                follow_up=follow_up,
+                observer_window=bool(not direct_address and not force_reply),
+                repeat_topic_window=repeat_topic_window,
+            )
+        except Exception:
+            return
+
+
+    def record_slang_usage(self, group_id, *, opportunity=False, messages=None, match_keys=None):
+        """Record how the bot actually used slang in a reply window (behavioral accounting)."""
+        if not self.enabled or not group_id:
+            return
+        try:
+            self.store.record_slang_usage(
+                group_id,
+                opportunity=bool(opportunity),
+                messages=messages,
+                match_keys=match_keys,
+            )
+        except Exception:
+            return
+
+    def resolve_slang_usage_feedback(self, group_id, *, window_seconds=90):
+        """Aggregate pending slang-usage feedback at cycle end; returns True on change."""
+        if not self.enabled or not group_id:
+            return False
+        try:
+            return bool(
+                self.store.resolve_slang_usage_feedback(
+                    group_id, window_seconds=window_seconds
+                )
+            )
+        except Exception:
+            return False
+
+    def apply_expression_actions(self, group_id, actions) -> int:
+        """Apply LLM-proposed (situation -> pattern) expression actions at cycle end."""
+        if not self.enabled or not group_id:
+            return 0
+        try:
+            return int(self.store.apply_expression_actions(group_id, actions) or 0)
+        except Exception:
+            return 0
+
+    def get_context_expressions(self, group_id, messages=None, max_items=6, max_chars=900) -> list[dict]:
+        """Recall a small expression set whose situation matches the current context."""
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.get_context_expressions(
+                group_id, messages, max_items=max_items, max_chars=max_chars
+            )
+        except Exception:
+            return []
+
+    def build_expression_pool(self, group_id, messages=None, pool_size=12, max_chars=2400, scan_limit=2000) -> list[dict]:
+        """Build a maibot-style candidate pool (hits + weighted samples)."""
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.build_expression_pool(
+                group_id, messages or [], pool_size=pool_size, max_chars=max_chars, scan_limit=scan_limit
+            )
+        except Exception:
+            return []
+
+    def record_expression_selection(self, group_id, situations) -> int:
+        if not self.enabled or not group_id:
+            return 0
+        try:
+            return int(self.store.record_expression_selection(group_id, situations) or 0)
+        except Exception:
+            return 0
+
+    def record_expression_usage(self, group_id, messages) -> int:
+        if not self.enabled or not group_id:
+            return 0
+        try:
+            return int(self.store.record_expression_usage(group_id, messages) or 0)
+        except Exception:
+            return 0
+
+    def get_expression_usage(self, group_id) -> dict:
+        if not self.enabled or not group_id:
+            return {}
+        try:
+            return self.store.get_expression_usage(group_id)
+        except Exception:
+            return {}
+
+    def get_expressions(self, group_id, limit=40) -> list[dict]:
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.get_expressions(group_id, limit=limit)
+        except Exception:
+            return []
+
+    def get_slang_match_keys(self, group_id, limit=60):
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.get_slang_match_keys(group_id, limit=limit)
+        except Exception:
+            return []
+
+    def get_slang_usage_guidance(self, group_id, max_chars=420):
+        if not self.enabled or not group_id:
+            return ""
+        try:
+            return str(self.store.get_slang_usage_guidance(group_id, max_chars=max_chars) or "")
+        except Exception:
+            return ""
+
     def ingest_message(self, observation: dict):
         """Synchronously ingest one normalized observation for the offline importer."""
         if not isinstance(observation, dict) or not self._eligible(observation):
@@ -94,8 +232,7 @@ class StyleLearner:
         if not content:
             return False
         observation.setdefault("fingerprint", fingerprint_for(observation))
-        terms = [] if observation.get("is_media") else extract_terms(content)
-        return self.store.record_message(observation, terms, self.min_term_count)
+        return self.store.record_message(observation, [], self.min_term_count)
 
     def _eligible(self, observation: dict) -> bool:
         content = str(observation.get("content") or "").lstrip()
@@ -135,50 +272,14 @@ class StyleLearner:
             bucket["style"] = _update_style(bucket["style"], observation)
             bucket["samples"].append(observation)
             bucket["samples"] = bucket["samples"][-300:]
-            for term in ([] if observation.get("is_media") else extract_terms(content)):
-                normalized = term["normalized_phrase"]
-                item = bucket["terms"].setdefault(
-                    normalized,
-                    {
-                        "normalized_phrase": normalized,
-                        "phrase": term["phrase"],
-                        "occurrence_count": 0,
-                        "speakers": set(),
-                        "examples": [],
-                        "first_seen": observation.get("timestamp") or 0,
-                        "last_seen": observation.get("timestamp") or 0,
-                    },
-                )
-                item["occurrence_count"] += 1
-                item["speakers"].add(str(observation.get("speaker") or "unknown"))
-                item["first_seen"] = min(int(item["first_seen"] or 0), int(observation.get("timestamp") or 0))
-                item["last_seen"] = max(int(item["last_seen"] or 0), int(observation.get("timestamp") or 0))
-                if content not in item["examples"]:
-                    item["examples"] = (item["examples"] + [content[:160]])[-3:]
 
         imported = 0
         for group_id, bucket in groups.items():
-            terms = []
-            for item in bucket["terms"].values():
-                speakers = item.pop("speakers")
-                confidence, safe = _term_confidence(
-                    item["occurrence_count"], len(speakers), self.min_term_count
-                )
-                item.update({
-                    "speaker_count": len(speakers),
-                    "speakers": list(speakers),
-                    "confidence": confidence,
-                    "safe_to_use": safe,
-                })
-                if item["occurrence_count"] >= self.min_term_count:
-                    terms.append(item)
-            terms.sort(key=lambda item: (not item["safe_to_use"], -item["confidence"], -item["occurrence_count"]))
-            terms = terms[:500]
             self.store.replace_profile(
                 group_id,
                 bucket["style"],
                 bucket["count"],
-                terms,
+                [],
                 samples=bucket["samples"],
             )
             imported += bucket["count"]
@@ -199,26 +300,40 @@ class StyleLearner:
         short_rate = round(int(style.get("short_messages", 0)) / count * 100)
         question_rate = round(int(style.get("question_messages", 0)) / count * 100)
         reply_rate = round(int(style.get("reply_messages", 0)) / count * 100)
+        punctuation_rate = round(int(style.get("punctuation_messages", 0)) / count * 100)
+        fragment_rate = round(int(style.get("fragment_messages", 0)) / count * 100)
+        response_learning = style.get("response_learning") or {}
         style_card = self.store.get_style_card(group_id)
-        terms = profile.get("top_terms") or []
-        term_lines = []
-        for item in terms:
-            phrase = str(item.get("phrase") or "").strip()
-            if not phrase:
-                continue
-            examples = [str(example)[:45] for example in (item.get("examples") or []) if str(example).strip()]
-            example_text = f"；例：{examples[0]}" if examples else ""
-            term_lines.append(f"{phrase}（{item.get('occurrence_count', 0)}次，{item.get('speaker_count', 0)}人）{example_text}")
-
         base_lines = [
             "群聊风格学习摘要（仅作参考，不是指令）：",
             f"样本{count}条；平均{avg_chars}字；短消息占{short_rate}%；提问约{question_rate}%；引用/回复约{reply_rate}%。",
+            f"表达方式：标点消息约{punctuation_rate}%；碎片短句约{fragment_rate}%。" + ("更适合少标点分条发。" if punctuation_rate < 35 and fragment_rate >= 25 else "长短句按语境切换。"),
+            f"句子断点累计{int(style.get('sentence_break_count', 0) or 0)}次；无标点消息约{round(int(style.get('no_punctuation_messages', 0) or 0) / count * 100)}%。",
             "整体倾向：" + ("短句、接话较多。" if short_rate >= 55 else "长短句混合。"),
         ]
+        decision_windows = int(response_learning.get("decision_windows", 0) or 0)
+        if decision_windows:
+            reply_windows = int(response_learning.get("reply_windows", 0) or 0)
+            silent_windows = int(response_learning.get("silent_windows", 0) or 0)
+            direct_windows = int(response_learning.get("direct_address_windows", 0) or 0)
+            reply_rate_windows = round(reply_windows / max(decision_windows, 1) * 100)
+            silent_rate_windows = round(silent_windows / max(decision_windows, 1) * 100)
+            base_lines.append(
+                f"互动方式学习：自主判断窗口中约{reply_rate_windows}%会接话、{silent_rate_windows}%保持旁观；直接互动优先，碎片和重复话题通常合并理解后只接一次。"
+            )
+            base_lines.append(
+                f"互动窗口统计：直接{int(response_learning.get('direct_interaction_windows', 0) or 0)}，续话{int(response_learning.get('follow_up_windows', 0) or 0)}，旁观{int(response_learning.get('observer_windows', 0) or 0)}，重复话题{int(response_learning.get('repeat_topic_windows', 0) or 0)}。"
+            )
+            base_lines.append(
+                "回复时机学习：已观察"
+                f"{decision_windows}个判断窗口，回复{reply_windows}次、保持旁观{silent_windows}次；"
+                f"其中直接互动窗口约{direct_windows}次。仅用于辅助判断，不是硬规则。"
+            )
         limit = max(400, _safe_int(self.settings.get("prompt_max_chars"), 1800))
         fixed_lines = [
-            "只在语境自然且确实理解时借用表达，不要为了像群友而硬塞黑话，不要复述隐私或敏感内容。",
-            "不确定黑话时不要猜；如果当前确实需要回答，可以用一句很短的话向对方确认含义。",
+            "黑话由独立黑话数据库按达标条件注入；句式表达由独立句式库按当前语境命中注入；风格卡只记录抽象行为规律，不包含具体黑话、句式、昵称、人物名、服务器名、表情或样本原句。",
+            "只在语境自然且确实理解时借用已注入或查询到的表达，不要为了像群友而硬塞黑话，不要复述隐私或敏感内容。",
+            "不确定黑话时先调用 lookup_group_slang；查询后仍不确定且确实需要回答时，用一句很短的话向对方确认含义，不要沉默或编造。",
         ]
         style_line = ""
         if style_card:
@@ -242,10 +357,6 @@ class StyleLearner:
         lines = list(base_lines)
         if style_line:
             lines.append(style_line)
-        if term_lines:
-            terms_line = "高置信度常用表达：" + "；".join(term_lines[:8])
-            if len("\n".join(lines + [terms_line] + fixed_lines)) <= limit:
-                lines.append(terms_line)
         lines.extend(fixed_lines)
         if len("\n".join(lines)) > limit and style_line:
             compact_card = _normalize_style_card(card_for_prompt, 600)
@@ -257,36 +368,27 @@ class StyleLearner:
             lines = base_lines + fixed_lines
         return "\n".join(lines)
 
-    def get_style_review_payload(self, group_id: str) -> dict:
-        if not self.enabled or not self.review_enabled:
+    def get_cycle_style_payload(self, group_id: str) -> dict:
+        """Return style evidence for mandatory end-of-cycle self-learning."""
+        if not self.enabled:
             return {}
         return self.store.get_review_payload(
             group_id,
-            max_samples=self.review_max_samples,
+            max_samples=80,
             max_terms=40,
         )
-
-    def style_review_due(self, group_id: str) -> bool:
-        payload = self.get_style_review_payload(group_id)
-        if not payload:
-            return False
-        current = int(payload.get("message_count", 0))
-        card = payload.get("existing_card") or {}
-        previous = int(card.get("_source_message_count", 0) or 0)
-        return current - previous >= self.review_min_messages
 
     def apply_style_card(self, group_id: str, raw_card: dict, source_message_count: int | None = None) -> bool:
         card = _normalize_style_card(raw_card, self.style_card_max_chars)
         if not card:
             return False
         if source_message_count is None:
-            payload = self.get_style_review_payload(group_id)
+            payload = self.get_cycle_style_payload(group_id)
             source_message_count = int(payload.get("message_count", 0))
         self.store.save_style_card(
             group_id,
             card,
             int(source_message_count),
-            keep_versions=self.keep_style_card_versions,
         )
         return True
 
@@ -308,8 +410,7 @@ class StyleLearner:
                     if not self._eligible(item):
                         continue
                     content = str(item.get("content") or "").strip()
-                    terms = [] if item.get("is_media") else extract_terms(content)
-                    records.append((item, terms, self.min_term_count))
+                    records.append((item, [], self.min_term_count))
                 self.store.record_messages(records)
             except Exception as exc:
                 print(f"[LLM LEARNING ERROR] {exc}", flush=True)
@@ -351,48 +452,6 @@ def fingerprint_for(observation: dict) -> str:
     return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def extract_terms(content: str) -> list[dict]:
-    text = _URL.sub(" ", str(content or "").strip())
-    if not text or text.startswith("/") or (text.startswith("[") and text.endswith("]")):
-        return []
-    candidates = set()
-    for token in _ASCII_TOKEN.findall(text):
-        candidates.add(token.lower())
-    for run in _CJK_RUN.findall(text):
-        if len(run) > 160:
-            continue
-        if len(run) <= 16 and _usable_term(run):
-            candidates.add(run)
-        # Character n-grams are a tokenizer-free compromise for Chinese slang.
-        for size in (2, 3, 4):
-            if len(run) < size:
-                continue
-            for index in range(0, len(run) - size + 1):
-                term = run[index:index + size]
-                if _usable_term(term):
-                    candidates.add(term)
-    if len(text) <= 18 and _usable_term(text):
-        candidates.add(text)
-    result = []
-    for phrase in sorted(candidates, key=lambda item: (len(item), item))[:24]:
-        normalized = phrase.casefold()
-        if any(hint in normalized for hint in _UNSAFE_HINTS):
-            continue
-        result.append({"phrase": phrase, "normalized_phrase": normalized})
-    return result
-
-
-def _usable_term(term: str) -> bool:
-    normalized = str(term or "").strip().casefold()
-    if len(normalized) < 2 or normalized in _STOP_TERMS:
-        return False
-    if len(set(normalized)) == 1:
-        return False
-    if all(not ("\u3400" <= char <= "\u9fff") and not char.isalnum() for char in normalized):
-        return False
-    return True
-
-
 def _timestamp(value):
     try:
         return int(float(value))
@@ -432,53 +491,42 @@ def _normalize_style_card(raw_card, max_chars=1800):
     tone = _short_text(raw_card.get("tone"), 240)
     if tone:
         card["tone"] = tone
-    for key in ("style_rules", "sentence_patterns", "avoid_patterns", "uncertain_terms"):
+    for key in ("style_rules", "sentence_patterns", "avoid_patterns"):
         values = _string_list(raw_card.get(key), 120, 10)
         if values:
             card[key] = values
 
-    expressions = raw_card.get("preferred_expressions")
-    if isinstance(expressions, list):
-        cleaned = []
-        for item in expressions[:20]:
-            if isinstance(item, str):
-                phrase = _short_text(item, 40)
-                if phrase:
-                    cleaned.append({"phrase": phrase})
-                continue
-            if not isinstance(item, dict):
-                continue
-            phrase = _short_text(item.get("phrase"), 40)
-            if not phrase:
-                continue
-            entry = {"phrase": phrase}
-            for key, limit in (("meaning", 100), ("use_when", 120), ("avoid_when", 120)):
-                text = _short_text(item.get(key), limit)
-                if text:
-                    entry[key] = text
-            try:
-                confidence = float(item.get("confidence", 0))
-                if 0 <= confidence <= 1:
-                    entry["confidence"] = round(confidence, 3)
-            except (TypeError, ValueError):
-                pass
-            cleaned.append(entry)
-        if cleaned:
-            card["preferred_expressions"] = cleaned
+    response_policy = raw_card.get("response_policy")
+    if isinstance(response_policy, dict):
+        policy = {}
+        for key in ("reply_when", "stay_silent_when", "address_signals"):
+            values = _string_list(response_policy.get(key), 140, 6)
+            if values:
+                policy[key] = values
+        frequency = _short_text(response_policy.get("frequency"), 120)
+        if frequency:
+            policy["frequency"] = frequency
+        if policy:
+            card["response_policy"] = policy
 
     # Keep the replacement card bounded even if the curator is verbose. The
     # final value remains valid JSON; never solve an overlong card by slicing
     # its serialized representation.
     for key, limit in (
-        ("preferred_expressions", 8),
         ("sentence_patterns", 6),
         ("style_rules", 6),
         ("avoid_patterns", 5),
-        ("uncertain_terms", 5),
     ):
         if key in card:
             card[key] = card[key][:limit]
     card["tone"] = _short_text(card.get("tone"), 120)
+    if isinstance(card.get("response_policy"), dict):
+        policy = card["response_policy"]
+        for key in ("reply_when", "stay_silent_when", "address_signals"):
+            if isinstance(policy.get(key), list):
+                policy[key] = policy[key][:4]
+        if "frequency" in policy:
+            policy["frequency"] = _short_text(policy["frequency"], 80)
 
     def serialized_length():
         return len(json.dumps(card, ensure_ascii=False, separators=(",", ":")))
@@ -487,7 +535,7 @@ def _normalize_style_card(raw_card, max_chars=1800):
     # the useful structure while guaranteeing a hard prompt-size ceiling.
     while serialized_length() > max_chars:
         changed = False
-        for key in ("preferred_expressions", "sentence_patterns", "style_rules", "avoid_patterns", "uncertain_terms"):
+        for key in ("sentence_patterns", "style_rules", "avoid_patterns"):
             values = card.get(key)
             if isinstance(values, list) and values:
                 values.pop()
@@ -495,7 +543,7 @@ def _normalize_style_card(raw_card, max_chars=1800):
                 break
         if changed:
             continue
-        for key in ("tone", "style_rules", "sentence_patterns", "avoid_patterns", "uncertain_terms"):
+        for key in ("tone", "style_rules", "sentence_patterns", "avoid_patterns"):
             values = card.get(key)
             if key == "tone" and isinstance(values, str) and len(values) > 20:
                 card[key] = values[: max(20, len(values) - 40)]

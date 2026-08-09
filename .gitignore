@@ -112,3 +112,4 @@ weclone_reference/
 # 本地临时测试与一次性脚本目录
 /tests/
 /tools/
+prompt.txt

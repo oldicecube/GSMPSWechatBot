@@ -16,7 +16,7 @@ class Router:
         target_group,
         time_slots=None,
         rate_limit_cfg=None,
-        prefix_mode="only",
+        prefix_mode="strict",
         proactive_enabled=False,
     ):
         # 处理prefix，支持单个字符串或数组
@@ -83,6 +83,12 @@ class Router:
         user = msg.get("user", "未知用户")
         group = msg.get("group")
         session_id = msg.get("sessionId")
+
+        # Strict mode is a hard ingress boundary: unprefixed messages do not
+        # reach follow-ups, auto plugins, commands, or LLM processing.
+        has_prefix = self._has_prefix(content)
+        if self.prefix_mode == "strict" and not has_prefix:
+            return None
 
         # 对于已进入 follow-up 等待态的会话，放行下一条跟随消息，
         # 但只交给登记的目标插件处理，不恢复普通无前缀消息。
@@ -329,24 +335,19 @@ class Router:
         return set()
 
     def _normalize_prefix_mode(self, prefix_mode):
-        mode = str(prefix_mode or "only").strip().lower()
+        mode = str(prefix_mode or "strict").strip().lower()
 
         alias_map = {
-            "only": "only",
-            "仅": "only",
-            "on": "only",
-            "strict": "only",
-            "off": "off",
-            "关闭": "off",
-            "disable": "off",
-            "disabled": "off",
-            "none": "off",
+            "strict": "strict",
+            "only": "strict",
+            "仅": "strict",
+            "on": "strict",
             "mixed": "mixed",
             "混合": "mixed",
             "both": "mixed"
         }
 
-        normalized = alias_map.get(mode, "only")
+        normalized = alias_map.get(mode, "strict")
         print(f"[ROUTER] prefix_mode = {normalized}")
         return normalized
 
@@ -466,7 +467,7 @@ class Router:
         """根据 prefix_mode 决定是否需要命中前缀，以及最终参与路由的内容"""
         after_prefix = self._extract_after_prefix(content)
 
-        if self.prefix_mode == "only":
+        if self.prefix_mode == "strict":
             if after_prefix is None:
                 return None, False
             return after_prefix, True

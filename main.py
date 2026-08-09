@@ -159,20 +159,31 @@ def main():
 
     dedup = Dedup()
 
+    llm_config = config.get("llm", {}) or {}
+    configured_prefix_mode = str(config.get("prefix_mode", "strict") or "strict").strip().lower()
+    if configured_prefix_mode == "only":
+        configured_prefix_mode = "strict"
+    if configured_prefix_mode not in {"strict", "mixed"}:
+        configured_prefix_mode = "strict"
+    auto_reply_config = llm_config.get("auto_reply")
+    if not isinstance(auto_reply_config, dict):
+        auto_reply_config = {}
+
+    # Mixed mode enables the LLM state machine by default.  Strict mode is a
+    # prefix-only performance mode and always uses direct forced replies.
+    proactive_enabled = bool(
+        llm_config.get("enabled")
+        and configured_prefix_mode == "mixed"
+        and auto_reply_config.get("enabled", True)
+    )
+
     router = Router(
         prefix=config.get("prefix", "@服务器状态@我"),
         target_group=config.get("target_group", []),
         time_slots=config.get("time_slots", []),
         rate_limit_cfg=config.get("rate_limit", {}),
-        prefix_mode=config.get("prefix_mode", "only"),
-        proactive_enabled=bool(
-            (config.get("llm", {}) or {}).get("enabled")
-            and (
-                (config.get("llm", {}) or {}).get("auto_reply")
-                or (config.get("llm", {}) or {}).get("random_reply")
-                or {}
-            ).get("enabled", False)
-        )
+        prefix_mode=configured_prefix_mode,
+        proactive_enabled=proactive_enabled
     )
 
     dispatcher = Dispatcher()

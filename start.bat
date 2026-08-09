@@ -9,6 +9,23 @@ echo.
 
 cd /d %~dp0
 
+:: Generate a local config from the template before any build or startup work.
+if not exist "config.json" (
+    if not exist "sample_config.json" (
+        echo [ERROR] config.json and sample_config.json were not found.
+        exit /b 1
+    )
+    copy /y "sample_config.json" "config.json" >nul
+    if errorlevel 1 (
+        echo [ERROR] Failed to generate config.json from sample_config.json.
+        exit /b 1
+    )
+    echo [SETUP] config.json has been generated from sample_config.json.
+    echo [SETUP] Please complete config.json, then run start.bat again.
+    pause
+    exit /b 0
+)
+
 :: Check if weflow-core has been built
 if not exist "weflow-core\dist\index.js" (
     echo [SETUP] First run, building weflow-core...

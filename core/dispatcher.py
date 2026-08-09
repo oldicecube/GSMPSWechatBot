@@ -1,7 +1,6 @@
 import os
 import importlib
 import threading
-import time
 import sys
 
 from core.auto_registry import register_raw_message_target
@@ -31,6 +30,7 @@ class Dispatcher:
         self.llm_intercept_auto_plugins = set()
         self.llm_prefix_bypass_wxids = set()
         self.auto_modules = {}
+        self.prefix_mode = "strict"
 
     # =========================================================
     # init plugins
@@ -41,6 +41,12 @@ class Dispatcher:
 
         print("[PLUGIN] 初始化配置...")
         self.config = config or {}
+        configured_prefix_mode = str(
+            self.config.get("prefix_mode", "strict") or "strict"
+        ).strip().lower()
+        self.prefix_mode = "strict" if configured_prefix_mode == "only" else configured_prefix_mode
+        if self.prefix_mode not in {"strict", "mixed"}:
+            self.prefix_mode = "strict"
         target_groups = self._normalize_target_groups(config.get("target_group"))
         self._init_llm()
 
@@ -200,6 +206,7 @@ class Dispatcher:
                         batch_messages=auto_result.get("batch_messages") or [],
                         force_reply=bool(auto_result.get("force_reply")),
                         trigger_source=auto_result.get("trigger_source"),
+                        cycle_id=auto_result.get("cycle_id"),
                     )
                 if isinstance(auto_result, dict) and auto_result.get("forward_to_llm"):
                     return self._dispatch_llm(context)
@@ -214,6 +221,7 @@ class Dispatcher:
                         force_reply=bool(proactive_result.get("force_reply")),
                         trigger_source=proactive_result.get("trigger_source"),
                         attention_check=bool(proactive_result.get("attention_check")),
+                        cycle_id=proactive_result.get("cycle_id"),
                     )
 
                 # When non-prefix autonomous mode is enabled, the proactive
@@ -284,8 +292,7 @@ class Dispatcher:
             if llm_config.get("enabled"):
                 self.llm_service = LLMService()
                 self.llm_service.set_proactive_callback(self._dispatch_background_batch)
-                self.llm_service.set_style_review_callback(self._review_style_card)
-                self.llm_service.set_style_review_due_callback(self._style_review_due)
+                self.llm_service.proactive_reply.set_cycle_end_callback(self._curate_cycle)
             else:
                 self.llm_service = None
         except Exception as e:
@@ -294,15 +301,14 @@ class Dispatcher:
             self.llm_intercept_auto_plugins = set()
             self.llm_prefix_bypass_wxids = set()
 
-    def _review_style_card(self, group_id, context=None):
+    def _curate_cycle(self, group_id, context, messages):
         if not self.llm_service:
             return False
-        return self.llm_service.curate_style(group_id, context)
-
-    def _style_review_due(self, group_id):
-        if not self.llm_service or not self.llm_service.style_learner:
-            return False
-        return self.llm_service.style_learner.style_review_due(group_id)
+        return self.llm_service.curate_cycle(
+            group_id,
+            context=context,
+            cycle_messages=messages,
+        )
 
     def _can_forward_to_llm(self, context):
         if not self.llm_service:
@@ -359,6 +365,7 @@ class Dispatcher:
         force_reply=False,
         trigger_source=None,
         attention_check=False,
+        cycle_id=None,
     ):
         try:
             if batch_messages is not None:
@@ -369,6 +376,12 @@ class Dispatcher:
                     trigger_source=trigger_source,
                     attention_check=attention_check,
                     session_id=context.get("sessionId"),
+                    allow_memory_update=False,
+                    cycle_id=cycle_id or context.get("_cycle_id"),
+                    attention_source=context.get("_attention_source") or "idle",
+                    nonsense_opportunity=bool(context.get("_nonsense_opportunity")),
+                    slang_emotional_opportunity=bool(context.get("_slang_emotional_opportunity")),
+                    tieba_opportunity=bool(context.get("_tieba_opportunity")),
                 )
             else:
                 result = self.llm_service.handle_message(
@@ -378,6 +391,7 @@ class Dispatcher:
                     wxid=context.get("wxid", ""),
                     session_id=context.get("sessionId"),
                     message_context=context,
+                    force_reply=bool(context.get("prefix_used")),
                 )
         except Exception as e:
             print("[LLM ERROR]", e)

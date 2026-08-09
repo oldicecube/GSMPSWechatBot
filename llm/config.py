@@ -43,6 +43,12 @@ def get_llm_config():
     if missing_fields:
         raise ValueError(f"Missing llm config fields: {', '.join(missing_fields)}")
 
+    prefix_mode = str(config.get("prefix_mode", "strict") or "strict").strip().lower()
+    if prefix_mode == "only":
+        prefix_mode = "strict"
+    if prefix_mode not in {"strict", "mixed"}:
+        prefix_mode = "strict"
+
     max_history_chars = _safe_int(
         llm_config.get("max_history_chars", llm_config.get("max_history", 5000)),
         5000,
@@ -59,8 +65,15 @@ def get_llm_config():
         "enabled": llm_config["enabled"],
         "provider": llm_config["provider"],
         "model": llm_config["model"],
+        "prefix_mode": prefix_mode,
         "max_history_chars": max(0, max_history_chars),
         "group_message_limit_chars": max(0, group_message_limit_chars),
+        "context_window_tokens": max(
+            10000, _safe_int(llm_config.get("context_window_tokens", 200000), 200000)
+        ),
+        "context_compression_target_tokens": max(
+            5000, _safe_int(llm_config.get("context_compression_target_tokens", 160000), 160000)
+        ),
         # Backward-compatible aliases for modules that still read the old names.
         "max_history": max(0, max_history_chars),
         "history_expire_ms": llm_config["history_expire_ms"],
@@ -90,19 +103,41 @@ def get_llm_config():
         "queue_max": max(100, _safe_int(learning.get("queue_max", 2000), 2000)),
         "min_term_count": max(2, _safe_int(learning.get("min_term_count", 2), 2)),
         "prompt_max_chars": max(400, _safe_int(learning.get("prompt_max_chars", 1800), 1800)),
-        "review_enabled": bool(learning.get("review_enabled", True)),
-        "review_min_messages": max(50, _safe_int(learning.get("review_min_messages", 250), 250)),
-        "review_min_interval_seconds": max(
-            600, _safe_int(learning.get("review_min_interval_seconds", 3600), 3600)
-        ),
-        "review_max_samples": max(20, _safe_int(learning.get("review_max_samples", 80), 80)),
         "style_card_max_chars": max(600, _safe_int(learning.get("style_card_max_chars", 1800), 1800)),
-        "keep_style_card_versions": max(2, _safe_int(learning.get("keep_style_card_versions", 5), 5)),
+        "slang_scene_enabled": bool(learning.get("slang_scene_enabled", True)),
+        "scene_cache_ttl_seconds": max(30, _safe_int(learning.get("scene_cache_ttl_seconds", 900), 900)),
+        "scene_cache_max_items": max(1, min(_safe_int(learning.get("scene_cache_max_items", 8), 8), 24)),
+        "scene_prompt_max_chars": max(240, min(_safe_int(learning.get("scene_prompt_max_chars", 900), 900), 3000)),
+        "slang_min_occurrences": max(2, _safe_int(learning.get("slang_min_occurrences", 2), 2)),
+        "expression_max_items": max(1, min(_safe_int(learning.get("expression_max_items", 6), 6), 12)),
+        "expression_max_chars": max(300, min(_safe_int(learning.get("expression_max_chars", 900), 900), 2400)),
+        "expression_recall_scan_limit": max(200, _safe_int(learning.get("expression_recall_scan_limit", 2000), 2000)),
+        "expression_pool_size": max(4, min(_safe_int(learning.get("expression_pool_size", 12), 12), 24)),
+        "expression_selector_enabled": bool(learning.get("expression_selector_enabled", True)),
+        "expression_selector_max_items": max(1, min(_safe_int(learning.get("expression_selector_max_items", 4), 4), 8)),
+        "expression_selector_max_chars": max(400, min(_safe_int(learning.get("expression_selector_max_chars", 1400), 1400), 4000)),
+        "expression_eval_enabled": bool(learning.get("expression_eval_enabled", False)),
+        "expression_eval_max_items": max(1, min(_safe_int(learning.get("expression_eval_max_items", 6), 6), 12)),
+        "slang_emotional_pool_rotation": bool(learning.get("slang_emotional_pool_rotation", True)),
+        "style_switch_enabled": bool(learning.get("style_switch_enabled", True)),
+        "style_switch_cooldown_seconds": max(0, _safe_int(learning.get("style_switch_cooldown_seconds", 120), 120)),
         "bot_names": [
             str(item).strip()
             for item in (([learning.get("bot_names")] if isinstance(learning.get("bot_names"), str) else learning.get("bot_names")) or [])
             if str(item).strip()
         ],
+    }
+
+    memory = llm_config.get("memory")
+    if not isinstance(memory, dict):
+        memory = {}
+    result["memory"] = {
+        "enabled": bool(memory.get("enabled", True)),
+        "db_path": str(memory.get("db_path") or "data/memory.sqlite3").strip(),
+        "context_max_chars": max(0, _safe_int(memory.get("context_max_chars", 0), 0)),
+        "person_fact_limit": max(1, _safe_int(memory.get("person_fact_limit", 8), 8)),
+        "group_knowledge_limit": max(1, _safe_int(memory.get("group_knowledge_limit", 10), 10)),
+        "candidate_batch_size": max(10, _safe_int(memory.get("candidate_batch_size", 30), 30)),
     }
 
     weflow_config = config.get("weflow")
@@ -133,12 +168,19 @@ def get_llm_config():
         if str(item).strip()
     ]
 
+    prefixes = config.get("prefix", [])
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+    result["prefixes"] = [
+        str(item).strip()
+        for item in (prefixes if isinstance(prefixes, list) else [])
+        if str(item).strip()
+    ]
+
     auto_reply = llm_config.get("auto_reply")
     if not isinstance(auto_reply, dict):
-        auto_reply = llm_config.get("random_reply")
-    result["auto_reply"] = dict(auto_reply) if isinstance(auto_reply, dict) else {}
-    # Backward-compatible alias for existing deployments.
-    result["random_reply"] = dict(result["auto_reply"])
+        auto_reply = {"enabled": prefix_mode == "mixed"}
+    result["auto_reply"] = dict(auto_reply)
 
     intercept_auto_plugins = llm_config.get("intercept_auto_plugins", [])
     if isinstance(intercept_auto_plugins, str):

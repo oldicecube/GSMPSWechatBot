@@ -1,4 +1,5 @@
 import os
+import re
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,17 +23,27 @@ def build_emoji_index(emoji_dir=None):
             continue
 
         try:
-            for name in os.listdir(folder):
+            for name in sorted(os.listdir(folder)):
                 path = os.path.join(folder, name)
                 if not os.path.isfile(path):
                     continue
 
                 emoji_name, _ = os.path.splitext(name)
                 emoji_name = emoji_name.strip()
-                if not emoji_name or emoji_name in result:
+                if not emoji_name:
                     continue
 
-                result[emoji_name] = path
+                # Keep the full stem for compatibility and expose synonyms
+                # from names such as "抽象 或 整活 或 我在.png".
+                names = [emoji_name]
+                names.extend(
+                    part.strip()
+                    for part in re.split(r"\s+或\s+", emoji_name)
+                    if part.strip()
+                )
+                for selectable_name in names:
+                    if selectable_name and selectable_name not in result:
+                        result[selectable_name] = path
         except Exception:
             continue
 

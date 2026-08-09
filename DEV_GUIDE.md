@@ -117,9 +117,8 @@ Worker 还会向 Context 传递 `is_at`、`is_mentioned`、`is_picture`、`is_em
 
 | 值 | 行为 |
 | --- | --- |
-| `only` | 只有命中 `prefix` 的消息进入路由 |
-| `mixed` | 命中和未命中前缀的消息都进入路由 |
-| `off` | 关闭前缀要求 |
+| `strict` | 只有命中 `prefix` 的消息进入所有处理流程；LLM 状态机关闭，prefix 普通消息强制回复 |
+| `mixed` | 命中和未命中前缀的消息都进入路由；LLM 状态机默认开启，可由 `llm.auto_reply.enabled=false` 禁用 |
 
 命令正则支持 ASCII 命令以及中文命令名。命令插件和普通自动插件优先执行；只有没有返回结果时，才会进入 LLM 或 `FALLBACK_ONLY` 自动插件。
 
@@ -340,7 +339,7 @@ LLM 由 `llm/core/llm_service.py` 实现，使用 `llm/provider/deepseek_provide
 4. `llm.enabled == true`，且 API Key 和模型配置有效。
 5. `llm.intercept_auto_plugins` 中的每个自动插件都存在、声明 `INTERCEPT_LLM = True`，并通过 `allow_llm(context)`。
 
-LLM 历史和普通群聊上下文当前分别写入 `data/groups/<group_id>/llm_history.json` 与 `group_messages.json`，由 `llm/memory/memory_manager.py` 按 `max_history_chars` / `group_message_limit_chars` 字符预算和过期时间裁剪。不要把这些文件当作仓库配置提交。
+群聊消息上下文统一写入 `data/groups/<group_id>/group_messages.json`；旧的 `llm_history.json` 接口仅保留兼容性，不再作为 LLM 对话上下文。由 `llm/memory/memory_manager.py` 负责追加、去重和超过 200000 tokens 时的压缩。长期人物事实、群聊知识和情景记忆写入 `data/memory.sqlite3`，由 `llm/memory/long_term_memory.py` 检索并按字符预算少量注入 Prompt。消息接收时本地 learner 只记录样本、群聊风格和回复行为统计，不提取或写入黑话；每轮结束时由 LLM 直接输出黑话 action，程序查相似表并计算统计后写入。每日 Bot 不响应时间的独立整理线程已删除：中期/长期记忆与人物画像的固化、待整理候选的处理，统一由每轮循环末尾的整理（`curate_cycle`）完成。不要把这些运行时数据文件当作仓库配置提交。
 LLM 返回 JSON 解析失败时直接发送完整原文；DeepSeek 返回 HTTP 402 时发送余额不足提示。
 群聊回复的生成提示包含发送前自审规则：避免露骨描述性内容；必要时只做简短、中性的概括或礼貌拒答，不重复具体不适宜细节。
 
@@ -360,7 +359,8 @@ LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
   "idle_max_seconds": 2400,
   "work_min_seconds": 120,
   "work_max_seconds": 300,
-  "batch_interval_seconds": 10,
+  "batch_debounce_seconds": 5,
+  "batch_max_messages": 20,
   "attention_min_seconds": 120,
   "attention_max_seconds": 300,
   "attention_message_limit": 10,
@@ -371,11 +371,14 @@ LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
 }
 ```
 
-空闲期结束后先进入关注期；关注期每隔随机 2--5 分钟检查群聊最新 10 条消息，有值得回复的内容才进入工作期。工作期每 10 秒将消息批量交给 LLM，批次内的多条普通消息、@消息和网址消息由一次请求结合判断，不会逐条单独调用；@ 和白名单网址通过批次级强制标记保证必须处理。工作期结束后再次进入关注期；连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
+空闲期结束后先进入关注期；关注期每隔随机 2--5 分钟检查群聊最新 10 条消息，有值得回复的内容才进入工作期。工作期消息先进入短暂缓冲窗口，默认 5 秒或达到 20 条后集中交给 LLM 结合历史上下文判断，不使用本地关键词规则提前丢弃；@ 和白名单网址会立即刷出当前缓冲批次并要求处理。每次主动判断的结果还会更新本地回复时机统计，空闲期复盘时替换动态风格卡。工作期结束后再次进入关注期；连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
+正常状态路径是 `idle -> attention -> working -> attention -> idle`；@ 或白名单网址属于强制触发例外，可以跳过当前冷却直接进入 working。
 主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句。
 主动回复遇到只包含 `bilibili.com` 或 `b23.tv`（含子域名）的网址时，会强制调用网页工具并生成简要梗概；其他网址不会触发该规则，且该次主动网页工具调用会拒绝非白名单域名及其跳转目标。
 
-`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`engine`、`behavior_style`、`proactive`、`memory` 及分类型 `rate_limit` 字段目前不是当前运行时的独立执行开关，新增配置时必须同步修改对应代码。
+`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`llm.memory.enabled` 控制 SQLite 长期记忆，`llm.learning.enabled` 控制风格学习，`llm.auto_reply.enabled` 控制主动回复状态机。`engine`、`behavior_style`、`proactive` 及分类型 `rate_limit` 字段仍需结合对应模块实现，新增配置时必须同步修改对应代码。
+黑话场景库使用同一个 learning SQLite 文件中的 `slang_scenarios` 表，并与 `slang_terms` 保持同步。每轮主动回复循环结束时，LLM 读取黑话库和完整循环上下文，直接用 `slang_actions` 决定新增、更新、删除或保留；程序随后才更新统计字段。每日 Bot 不响应时间不再触发黑话整理。`slang_scene_enabled`、`scene_cache_ttl_seconds`、`scene_cache_max_items` 和 `scene_prompt_max_chars` 控制开关、缓存和候选预算；完整黑话库不会注入 reply prompt。每条场景记录保留 phrase、normalized_phrase、meaning、scenes、examples、confidence、speaker_count、occurrence_count、last_seen、safe_to_use、status、slang_type、emotion 和 emotion_intensity。LLM 在 add/update 前必须调用 `lookup_similar_group_slang`，明确选择复用已有规范化短语或确认新表达；程序不再执行覆盖、共享子串或事后重复维护。
+`memory.active_update_enabled` 是工作期边界：`request_memory_update` 只在 `working` proactive batch 提供，每工作期最多一次，attention、idle 和 strict prefix 不提供。群聊、记忆、黑话和网页内容都按不可信数据处理，不当作指令。DeepSeek 调用遵循 OpenAI-compatible `tools`、`tool_choice="auto"`、assistant `tool_calls` 和 `tool` result 消息流程；失败会退避且不阻塞正常回复。
 
 ---
 
@@ -409,6 +412,15 @@ mgr.add_llm_message(group_id, nickname, content)
 history = mgr.get_llm_history(group_id)
 mgr.add_group_message(group_id, nickname, content)
 recent = mgr.get_group_messages(group_id)
+```
+
+长期记忆使用 `LongTermMemory`：
+
+```python
+from llm.memory import LongTermMemory
+memory = LongTermMemory({"memory": {"enabled": True}})
+memory.record_message({"group": group_id, "wxid": wxid, "content": text})
+context = memory.get_context(group_id, wxid, text, max_chars=1400)
 ```
 
 ### 表情索引

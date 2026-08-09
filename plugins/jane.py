@@ -163,7 +163,7 @@ def handle(content: str, context: dict) -> str | None:
 
     parsed = _parse_llm_response(response_text)
 
-    # 返回 dict，由 worker 逐条分开发送
+    # J姐的一次生成应作为一条完整微信消息发送，避免把一个段子拆成多条刷屏。
     target = context.get("group") or context.get("user")
     return {
         "target": target,

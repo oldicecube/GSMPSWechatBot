@@ -4,7 +4,7 @@ import os
 import queue as queue_lib
 
 from core.sender import preview_delay_seconds, send
-from llm.memory import MemoryManager
+from llm.memory import LongTermMemory, MemoryManager
 from llm.learning import StyleLearner
 from llm.security import get_emoji_path
 
@@ -19,12 +19,14 @@ class Worker:
         self.dispatcher = dispatcher
         self.config = config or {}
         self.memory_manager = self._build_memory_manager()
+        self.long_term_memory = self._build_long_term_memory()
         try:
             worker_llm_config = (self.config or {}).get("llm") if isinstance(self.config, dict) else {}
             worker_llm_config = dict(worker_llm_config or {})
             learning_config = dict(worker_llm_config.get("learning") or {})
             weflow_config = (self.config or {}).get("weflow") or {}
             learning_config["bot_wxids"] = list(learning_config.get("bot_wxids") or [])
+            learning_config["prefixes"] = list(self.config.get("prefix") or []) if isinstance(self.config.get("prefix"), list) else [self.config.get("prefix")]
             if weflow_config.get("myWxid"):
                 learning_config["bot_wxids"].append(weflow_config.get("myWxid"))
             worker_llm_config["learning"] = learning_config
@@ -77,6 +79,15 @@ class Worker:
                     "svrid": msg.get("svrid"),
                     "rawid": msg.get("rawid"),
                     "wxid": item.get("wxid") or msg.get("wxid"),
+                    "is_bot": bool(
+                        msg.get("is_bot")
+                        or raw_flags.get("is_bot")
+                        or (
+                            (item.get("wxid") or msg.get("wxid"))
+                            and (item.get("wxid") or msg.get("wxid"))
+                            == ((self.config.get("weflow") or {}).get("myWxid"))
+                        )
+                    ),
                     "type": msg.get("type"),
                     "is_group": msg.get("is_group", msg.get("type") == "group"),
                     "is_private": msg.get("is_private", msg.get("type") == "private"),
@@ -173,8 +184,23 @@ class Worker:
         except Exception:
             return None
 
+    def _build_long_term_memory(self):
+        try:
+            llm_config = self.config.get("llm")
+            if not isinstance(llm_config, dict):
+                return None
+            memory_config = dict(llm_config.get("memory") or {})
+            bot_wxids = list(llm_config.get("bot_wxids") or [])
+            my_wxid = (self.config.get("weflow") or {}).get("myWxid")
+            if my_wxid:
+                bot_wxids.append(my_wxid)
+            return LongTermMemory({"memory": memory_config, "bot_wxids": bot_wxids})
+        except Exception as exc:
+            print(f"[WORKER MEMORY INIT ERROR] {exc}")
+            return None
+
     def _listen_group_message(self, msg):
-        if self.memory_manager is None:
+        if self.memory_manager is None and self.long_term_memory is None:
             return
 
         try:
@@ -183,6 +209,9 @@ class Worker:
             return
 
         if not info.get("is_target_group"):
+            return
+
+        if getattr(self.router, "prefix_mode", "strict") == "strict" and not info.get("has_prefix"):
             return
 
         content = str(info.get("content") or "").strip()
@@ -197,15 +226,33 @@ class Worker:
         if not group_id:
             return
 
-        self.memory_manager.add_group_message(
-            group_id=group_id,
-            nickname=nickname,
-            content=content,
-            message_id=info.get("message_id"),
-            local_id=info.get("local_id"),
-            server_id=info.get("server_id"),
-            session_id=info.get("sessionId") or msg.get("sessionId"),
-        )
+        if self.memory_manager:
+            self.memory_manager.add_group_message(
+                group_id=group_id,
+                nickname=nickname,
+                content=content,
+                message_id=info.get("message_id"),
+                local_id=info.get("local_id"),
+                server_id=info.get("server_id"),
+                session_id=info.get("sessionId") or msg.get("sessionId"),
+                prefix_used=bool(info.get("has_prefix")),
+                is_at_bot=bool(info.get("is_at") or info.get("is_at_bot")),
+                is_mentioned=bool(info.get("is_mentioned")),
+                message_type=info.get("message_type") or msg.get("type"),
+            )
+        if self.long_term_memory:
+            sender_wxid = info.get("wxid") or msg.get("wxid") or ""
+            self.long_term_memory.record_message({
+                "group": group_id,
+                "sessionId": info.get("sessionId") or msg.get("sessionId"),
+                "wxid": sender_wxid,
+                "user": nickname,
+                "content": content,
+                "messageKey": info.get("message_id"),
+                "serverId": info.get("server_id"),
+                "prefix_used": bool(info.get("has_prefix")),
+                "is_bot": bool(sender_wxid and sender_wxid == ((self.config.get("weflow") or {}).get("myWxid"))),
+            })
         if self.style_learner:
             self.style_learner.record_message({
                 "group": group_id,

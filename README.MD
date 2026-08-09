@@ -1,287 +1,164 @@
-# GSMPS WeChat Bot v2
+# GSMPS WeChat Bot v3
 
-一个基于 [WeFlow](https://github.com/Double6ix/WeFlow) 的 Windows 微信机器人框架。它负责接收微信消息、执行路由和插件、调用 LLM，并通过统一发送接口回复文本或文件。
-
-> 仓库中的插件和业务服务主要是 GSMPS / Minecraft 群聊场景的示例实现。部署前请逐项检查群名、服务器地址、账号标识、API Key 和本地路径；不需要的示例插件应禁用或移除。
-
-## 功能概览
-
-- WeFlow 消息接入与微信消息发送
-- 精确群聊白名单、前缀路由、命令分发和速率限制
-- `plugins/` 命令插件与 `auto/` 自动事件插件
-- DeepSeek LLM 转发、JSON 响应解析、群聊上下文和表情发送
-- LLM 内置主动回复状态机：工作期、关注期、空闲期和批量情景判断
-- DeepSeek 标准网页工具调用，可由模型自主决定是否读取网页
-- Minecraft 状态查询、RCON、玩家监控和 The Room 锦标赛示例
-- ComfyUI 图片生成与媒体发送示例
-- 本地 JSON / SQLite 工具、管理员命令和项目级 Python 热重载
-
-## 运行边界
-
-- 当前项目面向 Windows 微信客户端，微信需要保持登录。
-- `target_group` 是精确匹配的群聊白名单；空数组或未匹配群名会被路由器直接忽略。
-- `prefix_mode` 默认为 `only`：只有带配置前缀的消息才进入路由；`mixed` 和 `off` 允许无前缀内容继续参与命令/自动插件处理。
-- 插件和自动插件优先于 LLM；普通群聊消息由 LLM 内置主动回复机制按状态机批量判断。
-- 当前 LLM 实现是 `llm/core/llm_service.py` 调用 DeepSeek API，历史记录保存在 `data/groups/<群名>/` 下的 JSON 文件，并按字符预算裁剪。
-
-## 环境要求
-
-- Windows 10/11
-- Python 3.10 或更高版本
-- Node.js LTS（用于构建 `weflow-core`）
-- 已登录的微信客户端
-- 可选：DeepSeek API Key、Minecraft 服务器/RCON、ComfyUI
+基于 WeFlow 的 Windows 微信群聊机器人。项目负责接收群消息、执行插件、调用 DeepSeek，并通过统一发送接口回复文本或文件。`core/` 负责路由和队列，`plugins/` 负责命令，`auto/` 负责后台事件，`llm/` 负责模型、提示词、主动回复、记忆和学习。
 
 ## 快速开始
 
-### 1. 安装依赖并构建 WeFlow
-
-推荐首次运行直接执行：
+环境要求：Windows 10/11、Python 3.10+、Node.js LTS，以及已登录的 WeChat/WeFlow 客户端。
 
 ```powershell
+Copy-Item sample_config.json config.json
 .\start.bat
 ```
 
-脚本会在缺少 `weflow-core/dist/index.js` 时执行 `npm install` 和构建，安装 Python 依赖，然后启动机器人。
-
-也可以手动执行：
+也可以手动安装并运行：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-
 Push-Location weflow-core
 npm ci
 npm run build
 Pop-Location
-```
-
-### 2. 创建配置
-
-```powershell
-Copy-Item sample_config.json config.json
-```
-
-至少修改以下字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `target_group` | 允许处理的群聊名称，必须与微信中的群名完全一致 |
-| `prefix` | 触发前缀，可填写字符串或字符串数组 |
-| `prefix_mode` | `only`、`mixed` 或 `off` |
-| `weflow.dbPath` | 微信文件目录 |
-| `weflow.decryptKey` | 64 位十六进制解密密钥 |
-| `weflow.myWxid` | 当前微信账号 wxid |
-| `llm.api_key` | 启用 LLM 时填写 DeepSeek API Key |
-
-缺少 WeFlow 配置时，`main.py` 会尝试启动配置向导。也可以在 WeFlow 已构建后手动执行：
-
-```powershell
-python setup_wizard.py
-```
-
-### 3. 启动与验证
-
-```powershell
-# 直接运行，适合调试
 python main.py
-
-# 带热重载守护，适合开发
-python launcher.py
 ```
 
-启动后，在目标群使用配置的前缀发送 `/ping`。如果能收到回复，说明 WeFlow、消息接收、路由和发送链路基本正常。
+至少需要配置 `target_group`、`prefix`、WeFlow 数据库路径、`weflow.myWxid` 和 `llm.api_key`。`prefix` 是机器人的身份前缀；提示词和群聊记录中的 `<prefix>` 都明确表示 Bot 已经说过的内容，或当前消息正在指向 Bot。
 
-`start.bat` 会在进程退出后自动重启；开发时如需查看真实异常，优先使用 `python main.py` 或 `python launcher.py`。
+## 路由与主动回复状态机
 
-## 配置说明
+`prefix_mode=strict` 只处理命中 prefix 的消息；`mixed` 允许普通群消息进入 LLM 主动回复状态机。插件和明确命令优先于 LLM。
 
-### 路由与群聊边界
-
-`target_group` 支持字符串或数组，比较时会去除首尾空格但不会模糊匹配。群名修改后必须同步修改配置。`time_slots` 可限制允许处理消息的时间段，并支持跨午夜区间，例如 `22:00` 到 `02:00`。
-
-`prefix_mode` 的含义：
-
-| 值 | 行为 |
-| --- | --- |
-| `only` | 仅处理带前缀的消息；默认值 |
-| `mixed` | 带前缀和不带前缀的消息都交给路由 |
-| `off` | 关闭前缀要求 |
-
-### 速率限制
-
-当前 `core/router.py` 实际执行的是：
-
-- `rate_limit.messages_per_minute`：单个 wxid 每分钟上限
-- `rate_limit.global_messages_per_minute`：全局每分钟上限
-- `rate_limit.auto_blacklist_enabled` 与 `auto_blacklist_threshold`：超限后自动写入 `data/blacklist.json`
-
-示例配置中名为 `llm_*`、`prefix_llm_*` 和 `plugin_*` 的字段目前不会被当前 Router 独立计数；如需启用独立限流，需要先修改实现，不应仅修改配置后假设它们已生效。
-
-### LLM
-
-LLM 由 `llm.enabled` 控制，当前 Provider 为 DeepSeek：
-
-```json
-{
-  "llm": {
-    "enabled": true,
-    "provider": "deepseek",
-    "model": "deepseek-chat",
-    "api_key": "sk-...",
-    "max_history_chars": 5000,
-    "history_expire_ms": 600000,
-    "group_message_limit_chars": 2000,
-    "intercept_auto_plugins": ["picture"],
-    "web_fetch_enabled": true,
-    "web_fetch_max_calls": 3,
-    "web_fetch_timeout_seconds": 15,
-    "web_fetch_max_chars": 24000,
-    "original_message_enabled": true,
-    "original_message_max_calls": 2,
-    "original_message_timeout_seconds": 8,
-    "original_message_max_chars": 16000,
-    "prefix_bypass_wxids": [],
-    "auto_reply": {
-      "enabled": true,
-      "idle_min_seconds": 1200,
-      "idle_max_seconds": 2400,
-      "work_min_seconds": 120,
-      "work_max_seconds": 300,
-      "batch_interval_seconds": 10,
-      "attention_min_seconds": 120,
-      "attention_max_seconds": 300,
-      "attention_message_limit": 10,
-      "attention_no_reply_limit": 3
-    }
-  }
-}
-```
-
-`max_history_chars` 是对话历史字符上限，`group_message_limit_chars` 是群聊最近消息字符上限；两者统计消息 `content` 字段字符数，不再按消息条数限制。`history_expire_ms` 仍控制对话历史过期时间。转发给 LLM 时从最新消息向前累积，纳入刚好跨过上限的完整消息，不拆分消息。
-
-### 主动回复状态机
-
-主动回复已经从 `auto/` 插件迁移到 `llm/proactive_reply.py`，由 `llm.auto_reply.enabled` 控制：
-
-| 状态 | 行为 |
-| --- | --- |
-| 空闲期 | 随机持续 20–40 分钟，结束后先进入关注期 |
-| 工作期 | 随机持续 2–5 分钟，每 10 秒整理期间消息交给 LLM 判断 |
-| 关注期 | 空闲期或工作期结束后，每随机 2–5 分钟检查群聊最新 10 条消息 |
-| 回退空闲 | 连续 3 次判断没有值得回复的内容后进入空闲期 |
-
-关注期发现值得回复的消息会恢复工作期。被 @ 触发时会跳过当前冷却，强制进入 3 分钟工作期并要求 LLM 回复。工作期中 LLM 成功主动回复且剩余时间不足 3 分钟时，工作期重置为 3 分钟。
-
-主动回复的批量 JSON 包含消息 ID、时间、群名、发送人昵称、发送人 wxid、正文、消息类型和 @ 状态。工作期内消息统一先进入十秒批次，即使批次中包含多条 @ 或网址消息，也由一次 LLM 请求结合起来判断和生成回复；@ 和白名单网址只会将该批次标记为必须处理，不会逐条单独请求。LLM 返回 `should_reply`、`reply_to`、`messages` 和 `animation`，由程序决定是否实际发送。
-启用非 prefix 自主回复后，主动回复状态机会接管这些消息；即使发送者配置了 `prefix_bypass_wxids`，也不会绕过工作期批处理而逐条直接请求 LLM。
-主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句，不会参与每一轮。
-
-群聊回复会在生成提示中进行发送前自审：避免露骨描述性内容；涉及不适合大群的话题时改用简短、中性的概括或礼貌拒答，不重复具体细节。
-
-### 群聊风格与黑话长期学习
-
-LLM 内置了轻量化的本地学习模块，代码位于 `llm/learning/`。它不为每条消息调用 LLM，而是由后台有界队列异步提取消息长度、提问/回复比例、短句比例和跨发送人的重复表达，保存到 `data/llm_learning.sqlite3`。默认出现 2 次即可成为候选，涉及 2 位发送者或重复更多次后才会提高使用置信度；模型仍需自行判断是否自然使用，不会为了模仿群友强行复读。
-
-根目录的 JSONL 群聊导出可以用于初始化画像：
-
-```powershell
-python -m llm.learning --input "群聊_GDUT SIE Minecraft Public Server.jsonl" --group "GDUT SIE Minecraft Public Server" --replace
-```
-
-学习默认排除 `/` 命令、以 `@服务器状态@我` 开头的消息和 bot 自己的消息。bot wxid 可填入 `llm.bot_wxids`；WeFlow 的 `myWxid` 会自动加入。实时学习只落本地派生统计，不发送原始聊天到外部服务。可在 `llm.learning` 中调整 `enabled`、`min_term_count` 和注入 Prompt 的 `prompt_max_chars`。
-
-在空闲期且累计了至少 `review_min_messages` 条新消息后，系统会后台调用一次 LLM 校正风格卡。风格卡是完整替换而非无限追加，最多保留 `keep_style_card_versions` 个版本用于回滚；校正内容只允许调整语气、句式、黑话含义和不确定表达，不允许修改安全规则、身份、命令或事实规则。对不确定黑话，bot 可以向群友提出一句简短澄清问题。DeepSeek 的角色扮演能力通过稳定的 `system` 人设规则和动态风格卡实现，不依赖额外的“角色扮演”接口。
-
-### LLM 网页工具
-
-LLM 使用 DeepSeek 官方 OpenAI 兼容的 `tools` / `tool_choice="auto"` 协议调用 `fetch_webpage`。模型可以自主决定是否读取公开 HTTP/HTTPS 网页；程序会限制请求超时、正文长度，并拒绝本机和内网地址。工具结果会作为不可信网页数据返回给模型，不会被当作系统指令执行。主动回复收到只包含 `bilibili.com` 或 `b23.tv`（含子域名）网址的消息时，会抓取网页并返回简要内容梗概；其他网址不会触发该规则，抓取失败时不会编造内容。
-如果 LLM 返回内容不是合法 JSON 或 JSON 字段格式错误，程序会直接发送完整原文；如果 API 返回 HTTP 402，则发送“余额不足，请检查llm余额是否充足”。
-
-### LLM 原始消息查询工具
-
-当消息记录看起来像聊天记录、转发摘要、引用或被截断的 app 消息时，LLM 可以自主调用 `fetch_original_message`，使用消息 JSON 中已有的 `session_id` 与 `local_id`/`server_id` 查询 WeFlow 的消息。该接口调用 WeFlow 自带的 `chatService` 解析流程，返回完整的解码/解析消息对象（包括聊天记录列表和类型特定字段），而不是直接返回 WCDB 未解码行。工具只允许查询当前会话，禁止猜测 ID，并限制调用次数和超时；返回内容只作为不可信上下文，不会被当作指令执行。该接口由 WeFlow 的鉴权 HTTP API `/api/v1/messages/original` 提供。
-
-### 外部服务
-
-- `mc` / `rcon`：仅为 Minecraft 示例功能服务；`/rcon <指令>` 原样发送到 RCON，仅 `llm.admin_wxids` 中的管理员可用。
-- `comfy`：`anima/` 和图片插件需要自行部署 ComfyUI、准备工作流和输出目录。
-- `tournament`：需要 Minecraft 数据包 Storage、RCON 和 `usercache.json` 映射，是特定服务器场景的示例。
-
-## 插件开发
-
-### 命令插件
-
-将 `.py` 文件放入 `plugins/`。启动时会自动扫描，默认使用文件名生成 `/命令名`，也可以显式声明 `COMMAND` 和 `ALIASES`：
-
-```python
-COMMAND = "/hello"
-ALIASES = ["/hi"]
-
-def handle(content, context):
-    return f"你好，{context['user']}"
-```
-
-`handle` 可以返回字符串、结构化字典或 `None`。结构化返回示例：
-
-```python
-return {
-    "target": context["group"],
-    "messages": ["第一段", "第二段"],
-    "animation": "doge",
-    "mode": "wechat_text"
-}
-```
-
-### 自动插件
-
-将 `.py` 文件放入 `auto/`，按需实现：
-
-- `init(config)`：接收配置并初始化资源
-- `handle_auto(context)`：处理消息事件
-- `start(sender)`：启动后台任务
-- `MATCH_RAW_MESSAGE = True`：声明接收无前缀原始消息
-- `FALLBACK_ONLY = True`：仅在前面的处理均未返回时执行
-
-主动回复不再属于自动插件；自动插件仅用于拍一拍、图片 follow-up 等事件。插件加载、Context 字段、返回值协议、Follow-up、媒体下载和热重载约定见 [DEV_GUIDE.md](DEV_GUIDE.md)。
-
-## 项目结构
+主动回复循环为：
 
 ```text
-main.py / launcher.py   程序入口与热重载守护
-start.bat               Windows 构建、依赖安装和循环启动脚本
-config.json             本地配置，不应提交
-core/                   路由、队列、Worker、Dispatcher、WeFlow 和发送接口
-plugins/                命令插件示例
-auto/                   自动事件/后台任务插件示例
-services/               Minecraft、图片和锦标赛业务服务
-llm/                    DeepSeek Provider、Prompt、主动回复、上下文和记忆
-utils/                  SQLite、积分、去重等通用工具
-data/                   运行时数据和本地群聊历史
-assets/                 字体与图片资源
-anima/                  ComfyUI 工作流示例
-weflow-core/            随仓库提供的 WeFlow Node.js 内核源码
+空闲期 -> 关注期 -> 工作期 -> 关注期 -> 空闲期
 ```
 
-## 开发文档
+- 空闲期随机等待（默认 20–40 分钟，`idle_min_seconds` / `idle_max_seconds`）后进入关注期。
+- 从空闲期进入关注期时读取最新约 1000 tokens 群聊消息（`attention_context_token_budget`）。
+- 从工作期进入关注期时保留工作期完整上下文，并叠加最新约 1000 tokens 消息。
+- 关注期允许参与任何仍有连贯性的群聊话题，不要求 prefix；明显结束、已经转题或无法形成连贯贡献的碎片可以保持旁观。
+- 关注期默认有 30% 的无厘头插话机会（`attention_nonsense_probability`）；连续约 2 小时没有 Bot 回复（`attention_boost_after_seconds`）时显著提高参与积极度。
+- 每次关注期拉取后按 n*10% 递增概率触发一次黑话情绪回复（未触发计数器 n 在命中后清零，默认步长 0.1，配置 `attention_slang_emotional_step`）。
+- 关注期按冷却与概率提供弱智吧热门内容搬运机会（默认至少间隔 6 小时、概率 0.5，`tieba_repost_min_interval_seconds` / `tieba_repost_probability`）。
+- 工作期批量判断并生成回复；连续多次没有可回复内容后回到空闲期（`attention_no_reply_limit`，默认 3 次）。
 
-- [DEV_GUIDE.md](DEV_GUIDE.md)：架构、消息 Context、插件 API、LLM 调用链和开发规范
-- [sample_config.json](sample_config.json)：v2 配置模板
-- [admin_commands.txt](admin_commands.txt)：预置管理员命令说明
-- [requirements.txt](requirements.txt)：Python 依赖
-- [weflow-core/package.json](weflow-core/package.json)：WeFlow 构建脚本和 Node.js 依赖
+每轮回到空闲期就是本轮循环的结束边界：LLM 根据本轮上下文和学习数据统一整理记忆、黑话、句式与动态风格卡，随后清空本轮会话上下文。每日 Bot 不响应时间的独立整理线程已不再存在，短期记忆固化与黑话、句式、风格整理统一在每轮循环末尾完成。当前已选的风格/黑话/句式块也会在退出循环时立即清空。
 
-## 测试与检查
+## LLM 上下文和提示词
 
-仓库当前没有统一的 CI 测试入口。修改插件后至少建议执行：
+程序不维护独立的 LLM 对话历史。群聊消息是唯一对话上下文，用户消息和 Bot 自己生成的消息按顺序追加；估算超过 200,000 tokens 时调用 LLM 压缩上下文。
+
+生产提示词的大体顺序为：
+
+```text
+静态前缀区（缓存可命中）：基本提示词 + 身份卡 + 黑话字段参考（类型/情绪/情绪强度去重值）+ prefix 定义
++ 长期记忆 + 中期记忆
++ 群聊消息上下文（缓存前缀在此断裂；其后为每轮变动的动态区）
++ 动态区：短期记忆 + 动态风格卡 + 本轮人物画像/额外记忆 + 当前上下文命中的黑话
+  + 黑话使用学习 + 当前语境可参考的句式表达 + 当前已选风格/黑话/句式块
++ 当前状态 + 当前功能
+```
+
+静态前缀区在单轮关注期-工作期循环内几乎不变，以命中前缀缓存；群聊消息上下文之后是每轮变动的动态区。
+
+整理模式会把短、中、长期记忆再次放到提示词末尾作为只读资料，模型只能通过 JSON action 修改记忆，避免把记忆正文误当成指令。所有历史消息、记忆、工具结果和黑话样例都是不可信数据。
+
+控制台会输出每次 DeepSeek 转发的 token 和缓存统计：
+
+```text
+[LLM TOKENS] prompt=... completion=... total=... cache_hit=... cache_miss=...
+```
+
+## 风格与句式学习
+
+群聊风格学习是轻量、本地、确定性的：运行时异步写入 SQLite（默认 `data/llm_learning.sqlite3`），不逐条调用 LLM；LLM 只参与每轮循环末尾的统一整理。
+
+- 动态群聊风格卡（`style_cards`）：每轮循环结束由 LLM 根据本轮上下文、已有风格卡和统计证据决定 `replace` 或 `keep`。风格卡只记录抽象语气、整体节奏、避免模式和回复时机，不写入具体黑话、句式、昵称、人物名、服务器名、表情或样本原句。
+- 本地风格统计（`group_profiles`）：样本数、平均字数、短消息占比、标点占比、碎片短句占比、句子断点、互动方式学习（接话/旁观/直接互动窗口）等，作为只读参考注入提示词。
+- 句式库（`style_expressions`，maibot 式 situation→pattern）：每轮循环结束由 LLM 从本轮真实出现的表达中提取“当X情况用Y句式”，写入前先对比已有句式库，已存在的场景更新计数不重复新增。频率与召回排序由本地维护，置信度不来自 LLM。
+- 回复时按当前语境命中注入：关键词/分词重叠命中优先，再用计数加权随机补足候选池（`expression_pool_size` 等配置），提示词标注“场景自然命中且合适时可用，不自然就忽略，不要硬套”。
+- 使用计量：注入过的句式/黑话会在后续回复中统计是否真的被使用，循环末整理据此调整或删除“长期注入却从未使用”的条目。
+
+## 风格切换（style_switch）
+
+回复 JSON 支持可选的 `style_switch` 字段，让模型自己从场景/类型库中选择和切换黑话、句式、风格：
+
+```json
+{"messages": ["试试刷新一下吧"], "style_switch": {"scene": "游戏开服", "situation": "开服炸服", "slang_type": "游戏", "emotion": "吐槽"}}
+```
+
+- 切换目标必须来自已注入的候选或类型库（句式场景、黑话类型、情绪），程序会校验，无法匹配的切换会被忽略，模型不能凭空造条目。
+- 切换成功后，相关条目以“当前已选风格/黑话/句式”块注入动态区，在后续回复中保持，直到模型再次切换或本循环结束。
+- 已选块只在当前循环内有效，退出循环（回到空闲期）时立即清空，不会跨循环残留。
+- 切换有冷却（默认 120 秒，`style_switch_cooldown_seconds`），避免模型频繁切换；`style_switch_enabled` 可整体开关。
+- 纯黑话情绪回复、嵌入黑话、弱智吧搬运等“是否行动”仍由本地机会门（概率/冷却）控制，与风格切换互不干扰。
+
+## 黑话学习
+
+黑话数据库默认是 `data/llm_learning.sqlite3`，主要使用两张表：
+
+- `slang_terms`：LLM 确认写入后的统计主表，保存规范化表达、出现次数、说话人数、时间、样例和本地置信度。
+- `slang_scenarios`：同一条 LLM 确认记录的语义表，保存含义、场景、状态、类型、情绪、情绪强度、样例和可用资格。
+
+同一群组中相同的 `(group_id, normalized_phrase)` 使用 SQLite 主键更新原记录，不会产生精确重复。项目不维护覆盖关系、共享子串关系、排除表、Trie/重叠分析等事后重复黑话维护。
+
+每轮循环结束时，LLM 读取黑话库和本轮对话上下文，直接通过 `slang_actions` 整理黑话。每个 add/update action 先调用 `lookup_similar_group_slang`，使用无 Embedding 的规范化文本匹配，返回相同、包含或共享明显文本的候选及其含义和样例。LLM 必须作出明确决定：
+
+- `reuse_existing`：填写已有候选的 `canonical_normalized_phrase`，更新原记录。
+- `new_distinct`：确认它与候选是不同的群体表达后才新增。
+- `uncertain`：本轮不写入数据库。
+
+模型也可以调用 `lookup_group_slang` 查询未直接注入的记录。只有 `active`、安全、置信度达标且命中当前上下文的黑话才直接进入回复提示词；类型、情绪和情绪强度的去重值放在身份卡后供模型选择。
+
+置信度与安全判定由本地出现频率算法（出现次数、说话人数等）计算，LLM 只负责决定黑话是否入库及其含义、场景、示例，不输出 confidence 或 safe_to_use 字段。
+
+## 记忆
+
+- 短期记忆只在末尾追加；中期、长期记忆和人物画像的固化由每轮循环末尾的统一整理（`curate_cycle`）直接完成。
+- 中期记忆表示本群近期高热度话题。
+- 长期记忆表示本群稳定特色、事实和交流风格。
+- 人物画像只保存消息明确表达或重复确认的事实，不推断敏感属性。
+- 每类记忆没有硬字数上限，但提示词建议控制在 3000 字以内。
+- 每轮循环结束都由 LLM 决定记忆与黑话、句式的新增、更新、删除和固化内容。
+
+记忆数据库默认是 `data/memory.sqlite3`；群聊上下文保存在 `data/groups/<群名>/`。
+
+## 工具和命令
+
+LLM 可按需调用：
+
+- `lookup_group_slang`：查询当前群黑话。
+- `lookup_similar_group_slang`：写入前查询相同或相似黑话。
+- `lookup_group_memory`：查询当前群记忆和人物画像。
+- `fetch_original_message`：读取当前会话中疑似截断消息的原文。
+- `fetch_webpage`：读取允许的公开网页。
+- `fetch_tieba_hot_post`：读取百度贴吧（默认弱智吧）当前热门内容，供关注期机会自然搬运。
+
+管理员可使用 `/prompt` 将最近一次完整 LLM 提示词写入根目录 `prompt.txt` 并发送到群聊。管理员身份由 `llm.admin_wxids` 控制。其他插件命令见 [admin_commands.txt](admin_commands.txt) 和 [DEV_GUIDE.md](DEV_GUIDE.md)。
+
+## 配置参考
+
+`llm` 配置的主要分组：
+
+- `identity`：Bot 名称、角色、风格、额外规则。
+- `prompt`：最大回复条数、是否允许表情、是否禁止 Markdown 与解释、表情提示语、兜底回复、特殊规则与话题转移规则。
+- `learning`：本地学习开关与参数（`style_card_max_chars`、`expression_pool_size`、`expression_selector_enabled`、`slang_min_occurrences`、`slang_emotional_pool_rotation`、`style_switch_enabled`、`style_switch_cooldown_seconds` 等）。
+- `auto_reply`：主动回复状态机参数（各阶段时长、关注期上下文预算、无厘头/黑话情绪/弱智吧机会概率与冷却、批量窗口等）。
+- `memory`：长期记忆与人物画像参数。
+- `web_fetch_*` / `original_message_*`：网页与原始消息工具的上限与超时。
+
+完整示例见 [sample_config.json](sample_config.json)。
+
+## 测试和检查
 
 ```powershell
-python -m compileall core plugins auto services llm utils
+python -m compileall -q core plugins auto services llm utils main.py
+git diff --check
 ```
 
-然后使用 `/ping`、`/help` 和实际需要的插件做一次手工验证。涉及 LLM、RCON 或 ComfyUI 的功能需要对应外部服务可用。
+涉及 DeepSeek、WeFlow、RCON 或 ComfyUI 的功能还需要对应外部服务可用后进行实际验证。
 
-## 许可证与致谢
-
-根目录许可证见 [LICENSE](LICENSE)。项目集成或参考了 WeFlow、WechatRobot、DeepSeek、ComfyUI、mcstatus、mcrcon 等组件；分发和部署时请遵守各依赖项目的许可证及使用要求。
+项目结构、插件 API 和 LLM 运行约定见 [DEV_GUIDE.md](DEV_GUIDE.md)。
