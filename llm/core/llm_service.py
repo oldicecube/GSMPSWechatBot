@@ -26,6 +26,7 @@ from llm.prompt import (
     build_memory_curation_messages,
     build_system_prompt,
     build_user_messages,
+    group_message_identity,
 )
 from llm.provider import DeepSeekProvider
 from llm.provider.deepseek_provider import ProviderShuttingDown
@@ -68,6 +69,12 @@ class LLMService:
         self._cycle_context_cache = {}
         self._cycle_context_cache_lock = threading.RLock()
         self._proactive_context_cache = {}
+        # Per group/flow anchor for the immutable history record that is emitted
+        # as the Responses cache checkpoint. It intentionally lives only for the
+        # process lifetime: after restart one request writes a fresh cache, while
+        # later incremental requests preserve and reuse the same boundary.
+        self._history_cache_breakpoints = {}
+        self._history_cache_breakpoints_lock = threading.RLock()
         self._balance_warning_sent = False
         self.assistant_nickname = self.config.get("assistant_nickname", "LLM")
         self.emoji_list = []
@@ -720,6 +727,35 @@ class LLMService:
             return True, f"cost-effective(breakeven={breakeven:.1f}<={horizon})"
         return False, f"keep-cached(breakeven={breakeven:.1f}>{horizon})"
 
+    def _history_cache_breakpoint_id(self, group_id, messages, namespace):
+        """Return a durable history-record id for one group/LLM flow.
+
+        The first request writes a checkpoint at its current history tail. Later
+        calls retain that exact record while appending new history after it, which
+        lets Responses reuse the cached prefix instead of moving the marker with
+        every latest message.
+        """
+        records = [item for item in (messages or []) if isinstance(item, dict)]
+        if not records:
+            return ""
+        flow = str(namespace or "chat").strip().lower() or "chat"
+        key = (flow, str(group_id or "global"))
+        available = {group_message_identity(item) for item in records}
+        with self._history_cache_breakpoints_lock:
+            current = self._history_cache_breakpoints.get(key)
+            if current in available:
+                return current
+            selected = group_message_identity(records[-1])
+            self._history_cache_breakpoints[key] = selected
+            return selected
+
+    @staticmethod
+    def _responses_prompt_cache_key(group_id, namespace):
+        """Return a non-sensitive stable cache-routing key for Responses APIs."""
+        flow = re.sub(r"[^a-z0-9_-]+", "-", str(namespace or "chat").lower()).strip("-") or "chat"
+        digest = hashlib.sha256(f"{flow}|{group_id or 'global'}".encode("utf-8")).hexdigest()[:20]
+        return f"wechat:{flow}:{digest}"
+
     def _current_cache_scope(self):
         """读取当前生效 API 的缓存范围；provider 未就绪时按 full（最保守）处理。"""
         try:
@@ -755,6 +791,7 @@ class LLMService:
                 }),
                 current_session_id=session_id,
                 memory_group_id=group_id,
+                cache_namespace="context-compression",
             )
             data = load_json_lenient(response)
             summary = str(data.get("summary") or "").strip()
@@ -924,6 +961,7 @@ class LLMService:
                 ] + build_memory_curation_messages(batch_data),
                 current_session_id=context.get("sessionId"),
                 memory_group_id=group_id,
+                cache_namespace="memory-curation",
             )
             data = load_json_lenient(response)
             if not isinstance(data, dict) or any(
@@ -1571,6 +1609,9 @@ class LLMService:
             system_prompt = build_system_prompt(self.config.get("prompt") or {}, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])
             prompt_data = {
                 "group_messages": group_messages,
+                "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
+                    group_id, group_messages, "direct-reply"
+                ),
                 "emoji_list": emoji_list,
                 "identity": self.config.get("identity") or {},
                 "llm_config": self.config or {},
@@ -1601,6 +1642,7 @@ class LLMService:
                 messages,
                 current_session_id=session_id,
                 memory_group_id=group_id,
+                cache_namespace="direct-reply",
             )
             parsed = parse_llm_response(response_text, emoji_list)
             style_switch = parsed.get("style_switch")
@@ -1645,7 +1687,7 @@ class LLMService:
         )
         return {"ok": True, "group_id": group_id, "records": records}
 
-    def _complete_with_tools(self, messages, allowed_hosts=None, current_session_id=None, memory_group_id=None, allow_memory_update=False, memory_observations=None, tieba_opportunity=False, behavior_lookup_enabled=False):
+    def _complete_with_tools(self, messages, allowed_hosts=None, current_session_id=None, memory_group_id=None, allow_memory_update=False, memory_observations=None, tieba_opportunity=False, behavior_lookup_enabled=False, cache_namespace="generic"):
         """Run DeepSeek's assistant/tool/assistant loop and return final JSON."""
         tools = []
         if self.config.get("web_fetch_enabled", True):
@@ -1662,8 +1704,9 @@ class LLMService:
                 tools.append(BEHAVIOR_LOOKUP_TOOL)
         if memory_group_id and self.long_term_memory and self.long_term_memory.enabled:
             tools.append(MEMORY_LOOKUP_TOOL)
+        prompt_cache_key = self._responses_prompt_cache_key(memory_group_id, cache_namespace)
         if not tools:
-            return self.provider.send(messages)
+            return self.provider.send(messages, prompt_cache_key=prompt_cache_key)
 
         try:
             max_calls = int(self.config.get("web_fetch_max_calls", 3) or 3)
@@ -1700,6 +1743,7 @@ class LLMService:
             assistant_message = self.provider.send_chat(
                 conversation,
                 tools=tools,
+                prompt_cache_key=prompt_cache_key,
             )
             tool_calls = getattr(assistant_message, "tool_calls", None) or []
             if not tool_calls:
@@ -1798,7 +1842,10 @@ class LLMService:
                 # Do not leave the model in an unbounded tool-call loop. The
                 # tool error (or the last successful result) is still included
                 # in the context for one final JSON-only response.
-                final_message = self.provider.send_chat(conversation)
+                final_message = self.provider.send_chat(
+                    conversation,
+                    prompt_cache_key=prompt_cache_key,
+                )
                 return str(getattr(final_message, "content", None) or "")
 
     def handle_batch_message(
@@ -1996,6 +2043,9 @@ class LLMService:
             prompt_data = {
                 "batch_messages": batch_messages,
                 "group_messages": prompt_group_messages,
+                "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
+                    group_id, prompt_group_messages, "proactive-reply"
+                ),
                 "force_reply": effective_force_reply,
                 "trigger_source": trigger_source,
                 "attention_check": attention_check,
@@ -2047,6 +2097,7 @@ class LLMService:
                     (attention_check and tieba_opportunity) or proactive_web_opportunity
                 ),
                 behavior_lookup_enabled=bool(not attention_check),
+                cache_namespace="proactive-reply",
             )
             parsed = parse_proactive_response(
                 response_text,

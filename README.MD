@@ -81,7 +81,7 @@ system：静态规则、身份卡、prefix 定义
 
 ### API 池与故障切换
 
-API 按 `priority` 数字升序调用。每一笔 LLM 请求都从当前最高优先级、未停用的 API 开始；某路本次请求出错后，立即在**同一笔请求**内尝试下一路。单路在当前 Bot 响应期累计 5 次请求错误后，停用至下一次 Bot 不响应期开始；成功调用不会清零该累计数。到不响应期边界时，所有错误计数和停用状态会重置，随后又从最高优先级开始。未配置 `time_slots` 时边界为每日 `00:00`。
+API 按 `priority` 数字升序调用。每一笔 LLM 请求都从当前最高优先级、未停用的 API 开始；某路本次请求出错后，立即在**同一笔请求**内尝试下一路。单路在当前 Bot 响应期累计 3 次请求错误后，停用至下一次 Bot 不响应期开始；成功调用不会清零该累计数。到不响应期边界时，所有错误计数和停用状态会重置，随后又从最高优先级开始。未配置 `time_slots` 时边界为每日 `00:00`。
 
 ## 风格与句式学习
 
@@ -186,7 +186,7 @@ LLM 可按需调用：
 - `max_concurrent_requests` 默认为 1：Worker、主动回复和周期整理共享同一个 LLM/网页工具并发槽；忙时自主请求跳过，前缀/@ 请求最多等待 `direct_request_wait_seconds`。
 - `request_timeout_seconds` 与 `tool_loop_timeout_seconds`：分别限制单次模型 HTTP 请求和一轮工具调用链，避免网页工具连续失败时长期占用 Worker。
 - `auto_reply.reply_timing_*`：至少积累 20 个关注期判断后，按历史关注期回复率本地降低后续插话机会；直接前缀、@ 和白名单网址不受影响。
-- `apis`：多路 LLM API 池。每路字段：`name`、`protocol`（`openai`=Chat Completions 兼容、`responses`=OpenAI Responses、`anthropic`=Anthropic Messages）、`model`、`api_key`、`base_url`、`timeout_seconds`（单次请求超时，限制为 10~120 秒）、`priority`（数字越小越优先）、`cache`、`cache_scope`（`full` / `system` / `none`）、`cache_ttl`、`cache_mode`（Anthropic：标准端点用 `manual`；仅已验证支持顶层 `auto_cached` 的网关用 `auto`；`off` 关闭）和可选 `prompt_cache_key`（仅在服务商明确支持时填写）。`apis` 存在时以最小 `priority` 作为实际主路；顶层 `model` / `api_key` / `api_base` 只为兼容旧配置保留镜像。故障时当前请求内立即按优先级回退；单路当前响应期累计 5 次错误后停用到下一个不响应期边界，届时恢复并清零计数。
+- `apis`：多路 LLM API 池。每路字段：`name`、`protocol`（`openai`=Chat Completions 兼容、`responses`=OpenAI Responses、`anthropic`=Anthropic Messages）、`model`、`api_key`、`base_url`、`timeout_seconds`（单次请求超时，限制为 10~120 秒）、`priority`（数字越小越优先）、`cache`、`cache_scope`（`full` / `system` / `none`）、`cache_ttl`、`cache_mode`（Anthropic：标准端点用 `manual`；仅已验证支持顶层 `auto_cached` 的网关用 `auto`；`off` 关闭）和可选 `prompt_cache_key`（仅在服务商明确支持时填写）。`apis` 存在时以最小 `priority` 作为实际主路；顶层 `model` / `api_key` / `api_base` 只为兼容旧配置保留镜像。故障时当前请求内立即按优先级回退；单路当前响应期累计 3 次错误后停用到下一个不响应期边界，届时恢复并清零计数。
 - `cache_cost_ratio`（命中:未命中价格比，默认 5.428）、`cache_hit_rate`（完整缓存端点命中率估计，默认 0.85）、`cache_break_even_horizon`（压缩回本请求数上限，默认 40）：驱动成本感知的自动上下文压缩——命中缓存时保持大上下文更便宜，仅在硬上限或能在有限请求数内回本时才压缩。
 
 完整示例见 [sample_config.json](sample_config.json)。

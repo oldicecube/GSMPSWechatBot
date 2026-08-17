@@ -346,7 +346,7 @@ WeFlow SSE → WeFlowClient → task_queue → Worker
 → Worker → core.sender → 微信发送服务
 ```
 
-LLM 由 `llm/core/llm_service.py` 实现，`llm/provider/deepseek_provider.py` 保留历史文件名，实际是多路 API 池适配层。它统一支持 `openai`（Chat Completions）、`responses`（OpenAI Responses）和 `anthropic`（Anthropic Messages）协议，再由 `response_parser` 归一为 `messages` 和可选的 `animation`。API 按 `priority` 升序选择。每次 LLM 请求都从最高优先级的未停用 API 开始；某路失败时，会在同次请求内按优先级继续尝试下一个可用 API，直到成功或全部失败。每路的错误数在当前 bot 响应期内累计，成功不清零；累计 5 次错误后停用至下一个不响应期边界。边界会清空计数、恢复所有 API，后续请求重新从最高优先级开始。没有配置不响应时间时，边界默认为每日 00:00。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
+LLM 由 `llm/core/llm_service.py` 实现，`llm/provider/deepseek_provider.py` 保留历史文件名，实际是多路 API 池适配层。它统一支持 `openai`（Chat Completions）、`responses`（OpenAI Responses）和 `anthropic`（Anthropic Messages）协议，再由 `response_parser` 归一为 `messages` 和可选的 `animation`。API 按 `priority` 升序选择。每次 LLM 请求都从最高优先级的未停用 API 开始；某路失败时，会在同次请求内按优先级继续尝试下一个可用 API，直到成功或全部失败。每路的错误数在当前 bot 响应期内累计，成功不清零；累计 3 次错误后停用至下一个不响应期边界。边界会清空计数、恢复所有 API，后续请求重新从最高优先级开始。没有配置不响应时间时，边界默认为每日 00:00。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
 
 ### LLM 放行条件
 

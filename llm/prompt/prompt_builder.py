@@ -87,39 +87,90 @@ def _identity_text(identity: dict) -> str:
     )
 
 
-def _group_context_text(messages) -> str:
-    lines = []
-    for index, item in enumerate(messages or []):
-        if not isinstance(item, dict):
-            continue
-        timestamp = item.get("timestamp", "")
-        nickname = item.get("nickname", "")
-        role = item.get("role") or ("assistant" if item.get("is_bot") else "user")
-        batch_index = item.get("batch_index")
-        marker = f" batch_index={batch_index}" if batch_index is not None else ""
-        prefix_marker = "[<prefix>]" if (
-            item.get("is_bot")
-            or role == "assistant"
-            or item.get("prefix_used")
-            or item.get("is_at_bot")
-            or item.get("is_mentioned")
-        ) else ""
-        message_key = next(
-            (str(item.get(key)).strip() for key in ("message_id", "local_id", "server_id") if item.get(key) not in (None, "", 0, "0")),
-            "",
-        )
-        if message_key:
-            identity = message_key
-        elif timestamp:
-            identity = str(timestamp)
-        else:
-            # 稳定回退：无 message_id/timestamp 时用内容指纹，避免历史窗口滑动时
-            # 逐字节变化破坏 DeepSeek/OpenAI 式前缀缓存（命中需完整匹配缓存前缀单元）。
-            fallback = f"{nickname}|{role}|{prefix_marker}|{item.get('content', '')}"
-            identity = "h" + hashlib.md5(fallback.encode("utf-8")).hexdigest()[:12]
-        lines.append(f"[id={identity}][{nickname}][{role}]{prefix_marker}{marker}: {item.get('content', '')}")
-    return "\n".join(lines) if lines else "无"
+def group_message_identity(item: dict) -> str:
+    """Return the stable identity used when serialising a group-history record."""
+    item = item if isinstance(item, dict) else {}
+    timestamp = item.get("timestamp", "")
+    nickname = item.get("nickname", "")
+    role = item.get("role") or ("assistant" if item.get("is_bot") else "user")
+    prefix_marker = "[<prefix>]" if (
+        item.get("is_bot")
+        or role == "assistant"
+        or item.get("prefix_used")
+        or item.get("is_at_bot")
+        or item.get("is_mentioned")
+    ) else ""
+    message_key = next(
+        (str(item.get(key)).strip() for key in ("message_id", "local_id", "server_id") if item.get(key) not in (None, "", 0, "0")),
+        "",
+    )
+    if message_key:
+        return message_key
+    if timestamp:
+        return str(timestamp)
+    # Stable fallback when no message id/timestamp is available. It prevents a
+    # moving history window from rewriting the cached prefix byte-by-byte.
+    fallback = f"{nickname}|{role}|{prefix_marker}|{item.get('content', '')}"
+    return "h" + hashlib.md5(fallback.encode("utf-8")).hexdigest()[:12]
 
+
+def _group_context_line(item: dict) -> str:
+    """Render exactly one history record; this must remain byte-stable across turns."""
+    item = item if isinstance(item, dict) else {}
+    nickname = item.get("nickname", "")
+    role = item.get("role") or ("assistant" if item.get("is_bot") else "user")
+    batch_index = item.get("batch_index")
+    marker = f" batch_index={batch_index}" if batch_index is not None else ""
+    prefix_marker = "[<prefix>]" if (
+        item.get("is_bot")
+        or role == "assistant"
+        or item.get("prefix_used")
+        or item.get("is_at_bot")
+        or item.get("is_mentioned")
+    ) else ""
+    return f"[id={group_message_identity(item)}][{nickname}][{role}]{prefix_marker}{marker}: {item.get('content', '')}"
+
+
+def _group_context_text(messages) -> str:
+    lines = [_group_context_line(item) for item in (messages or []) if isinstance(item, dict)]
+    return "\n".join(lines) if lines else "\u65e0"
+
+
+def _group_context_message_items(messages, checkpoint_id="") -> list[dict]:
+    """Render group history as immutable per-record user items.
+
+    The selected record is a Responses explicit cache breakpoint. Its identity is
+    held by LLMService for the lifetime of a group session, so the same item stays
+    byte-for-byte identical when new records are appended after it.
+    """
+    records = [item for item in (messages or []) if isinstance(item, dict)]
+    if not records:
+        return [{
+            "role": "user",
+            "content": "\u7fa4\u804a\u6d88\u606f\u4e0a\u4e0b\u6587\uff08\u4ec5\u4f5c\u4e3a\u5bf9\u8bdd\u6570\u636e\uff1b\u6309\u65f6\u95f4\u5347\u5e8f\uff09\n\u65e0",
+        }]
+
+    requested = str(checkpoint_id or "").strip()
+    checkpoint_index = next(
+        (index for index, item in enumerate(records) if group_message_identity(item) == requested),
+        None,
+    )
+    # Non-service callers do not retain a checkpoint id. Write one at the
+    # current tail so their next increment can reuse it if they retain the
+    # produced list themselves. LLMService always supplies a durable id.
+    if checkpoint_index is None:
+        checkpoint_index = len(records) - 1
+
+    rendered = []
+    for index, item in enumerate(records):
+        content = _group_context_line(item)
+        if index == 0:
+            content = "\u7fa4\u804a\u6d88\u606f\u4e0a\u4e0b\u6587\uff08\u4ec5\u4f5c\u4e3a\u5bf9\u8bdd\u6570\u636e\uff1b\u6309\u65f6\u95f4\u5347\u5e8f\uff1b\u6bcf\u6761\u4e3a\u72ec\u7acb\u8bb0\u5f55\uff09\n" + content
+        message = {"role": "user", "content": content}
+        if index == checkpoint_index:
+            message["cache_breakpoint"] = True
+        rendered.append(message)
+    return rendered
 
 def _json_block(value, empty="无") -> str:
     if isinstance(value, str):
@@ -310,13 +361,47 @@ def _prompt_context(data: dict, function_text: str, state_text: str = "") -> str
 
 
 def _mark_history_breakpoint(messages):
-    """把聊天上下文消息标记为缓存断点（按内容识别，不依赖消息序号）。"""
+    """Compatibility helper for aggregate prompt renderers.
+
+    New reply builders use _group_context_message_items so a historical record,
+    rather than a repeatedly rewritten aggregate string, is the breakpoint.
+    """
     for message in messages:
-        if isinstance(message, dict) and str(message.get("content") or "").startswith("群聊消息上下文"):
+        if isinstance(message, dict) and str(message.get("content") or "").startswith("\u7fa4\u804a\u6d88\u606f\u4e0a\u4e0b\u6587"):
             message["cache_breakpoint"] = True
             break
     return messages
 
+
+def _messages_from_sections_with_history(data, sections):
+    """Replace aggregate history sections with immutable per-history messages."""
+    result = []
+    history_inserted = False
+    for section in sections:
+        content = str(section or "")
+        if content.startswith("\u7fa4\u804a\u6d88\u606f\u4e0a\u4e0b\u6587\uff08\u8f83\u65e9\u90e8\u5206"):
+            result.extend(
+                _group_context_message_items(
+                    (data or {}).get("group_messages") or [],
+                    (data or {}).get("history_cache_breakpoint_id") or "",
+                )
+            )
+            history_inserted = True
+            continue
+        # The old renderer may insert a "recent" aggregate tail between history
+        # and runtime. Every record is already represented above independently.
+        if content.startswith("\u7fa4\u804a\u6d88\u606f\u4e0a\u4e0b\u6587\uff08\u6700\u8fd1\u90e8\u5206"):
+            continue
+        if content:
+            result.append({"role": "user", "content": content})
+    if not history_inserted:
+        result.extend(
+            _group_context_message_items(
+                (data or {}).get("group_messages") or [],
+                (data or {}).get("history_cache_breakpoint_id") or "",
+            )
+        )
+    return result
 
 def _direct_target(data) -> bool:
     """当前消息是否通过前缀/@ 明确指向 Bot（命中 prefix、@ 或提及）。
@@ -368,8 +453,7 @@ def build_user_messages(data: dict) -> list[dict]:
     force_reply = bool(data.get("force_reply"))
     function_text = _reply_instruction(data, force_reply)
     sections = _prompt_sections(data, function_text, str(data.get("current_state") or ""))
-    messages = [{"role": "user", "content": section} for section in sections if section]
-    return _mark_history_breakpoint(messages)
+    return _messages_from_sections_with_history(data, sections)
 
 
 def build_batch_user_prompt(data: dict) -> str:
@@ -489,8 +573,7 @@ def build_batch_user_messages(data: dict) -> list[dict]:
         "无需回复时 should_reply=false、messages=[]、animation=null。"
     )
     sections = _prompt_sections(data, function_text, batch_state)
-    messages = [{"role": "user", "content": section} for section in sections if section]
-    return _mark_history_breakpoint(messages)
+    return _messages_from_sections_with_history(data, sections)
 
 
 def build_memory_curation_prompt(data: dict) -> str:

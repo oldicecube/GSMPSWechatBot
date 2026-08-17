@@ -6,7 +6,7 @@ DeepSeekProvider 是历史类名，实际从 ``llm.apis`` 读取按 ``priority``
 （OpenAI Responses）和 ``anthropic``（Anthropic Messages）。
 
 每笔请求从最高优先级且未停用的 API 开始；失败时在同一笔请求内依次
-回退。单路在当前 Bot 响应期累计 5 次失败后停用，到下一不响应期边界
+回退。单路在当前 Bot 响应期累计 3 次失败后停用，到下一不响应期边界
 清零并恢复。Responses 的 system 提示词放在 ``instructions``；工具定义
 会从 Chat Completions 的嵌套 ``function`` 结构转换为 Responses 所需的
 顶层 ``name`` / ``description`` / ``parameters`` 结构。缓存是否可用及
@@ -442,44 +442,59 @@ def _responses_instructions(messages):
     return "\n\n".join(part for part in parts if part).strip()
 
 
-def _to_responses_input(messages):
-    """OpenAI 对话格式 -> OpenAI Responses API input items。"""
+def _to_responses_input(messages, include_cache_breakpoints=False):
+    """OpenAI chat messages -> OpenAI Responses input items.
+
+    GPT-5.6 retains implicit/automatic caching by default. ``cache_breakpoint``
+    merely adds an explicit checkpoint to an immutable history record; it does
+    not switch the request into an explicit-only cache mode.
+    """
     items = []
     for msg in messages or []:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role")
         if role == "system":
-            # system 由 _responses_instructions 提取到顶层 instructions，不放入 input。
             continue
-        elif role == "user":
-            items.append({"role": "user", "content": _content_to_text(msg.get("content"))})
+        if role == "user":
+            content = _content_to_text(msg.get("content"))
+            if include_cache_breakpoints and msg.get("cache_breakpoint"):
+                items.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": content,
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    }],
+                })
+            else:
+                items.append({"role": "user", "content": content})
         elif role == "assistant":
-            text = _content_to_text(msg.get("content"))
+            content = _content_to_text(msg.get("content"))
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
-                items.append({"role": "assistant", "content": text or None})
+                items.append({"role": "assistant", "content": content or None})
                 for call in tool_calls:
                     if isinstance(call, dict):
-                        cid = str(call.get("id") or "")
-                        fn = call.get("function") or {}
-                        name = str(fn.get("name") or "")
-                        args = fn.get("arguments") or "{}"
+                        call_id = str(call.get("id") or "")
+                        function = call.get("function") or {}
+                        name = str(function.get("name") or "")
+                        arguments = function.get("arguments") or "{}"
                     else:
-                        cid = str(getattr(call, "id", "") or "")
-                        fn = getattr(call, "function", None)
-                        name = str(getattr(fn, "name", "") or "")
-                        args = getattr(fn, "arguments", "{}") or "{}"
-                    if not isinstance(args, str):
-                        args = json.dumps(args, ensure_ascii=False)
+                        call_id = str(getattr(call, "id", "") or "")
+                        function = getattr(call, "function", None)
+                        name = str(getattr(function, "name", "") or "")
+                        arguments = getattr(function, "arguments", "{}") or "{}"
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
                     items.append({
                         "type": "function_call",
-                        "call_id": cid,
+                        "call_id": call_id,
                         "name": name,
-                        "arguments": args,
+                        "arguments": arguments,
                     })
             else:
-                items.append({"role": "assistant", "content": text})
+                items.append({"role": "assistant", "content": content})
         elif role == "tool":
             items.append({
                 "type": "function_call_output",
@@ -487,6 +502,24 @@ def _to_responses_input(messages):
                 "output": _content_to_text(msg.get("content")) or "",
             })
     return items
+
+
+def _responses_breakpoint_count(items) -> int:
+    """Count explicit markers without logging any prompt content."""
+    return sum(
+        1
+        for item in items or []
+        if isinstance(item, dict) and isinstance(item.get("content"), list)
+        for block in item["content"]
+        if isinstance(block, dict) and block.get("prompt_cache_breakpoint")
+    )
+
+
+def _responses_breakpoint_unsupported(exc) -> bool:
+    error_text = str(exc or "").lower()
+    return "prompt_cache_breakpoint" in error_text and any(
+        token in error_text for token in ("unknown", "unsupported", "unrecognized", "invalid", "extra fields")
+    )
 
 
 class _SimpleFunction:
@@ -523,6 +556,11 @@ class OpenAICompatibleClient:
         self.model = entry["model"]
         self.timeout = entry["timeout_seconds"]
         self.last_usage = {}
+        # Automatic Responses caching is widely supported; the GPT-specific
+        # content-block breakpoint extension is not.  Keep it opt-in per API.
+        self._explicit_cache_breakpoints_enabled = bool(
+            self.entry.get("responses_explicit_cache_breakpoint", False)
+        )
         self._init_client()
         # 缓存范围：full（完整前缀缓存）/ system（仅系统提示词）/ none（不可缓存）。
         scope = str(self.entry.get("cache_scope") or "").strip().lower()
@@ -551,7 +589,7 @@ class OpenAICompatibleClient:
             _shutdown_diagnostic("httpx_client_init_error", exc)
             raise ProviderShuttingDown("LLM provider is shutting down") from exc
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, prompt_cache_key=None):
         """调用该端点，返回 assistant 消息（含工具调用）。"""
         if _shutting_down():
             raise ProviderShuttingDown("LLM provider is shutting down")
@@ -690,13 +728,17 @@ class ResponsesClient:
             _mark_interp_shutdown("httpx_client_init")
             raise ProviderShuttingDown("LLM provider is shutting down") from exc
 
-    def chat(self, messages, tools=None):
-        """调用该端点（Responses API），返回 assistant 消息（含工具调用）。"""
+    def chat(self, messages, tools=None, prompt_cache_key=None):
+        """Call this endpoint with implicit cache plus one history checkpoint."""
         if _shutting_down():
             raise ProviderShuttingDown("LLM provider is shutting down")
+        responses_input = _to_responses_input(
+            messages,
+            include_cache_breakpoints=self._explicit_cache_breakpoints_enabled,
+        )
         kwargs = {
             "model": self.model,
-            "input": _to_responses_input(messages),
+            "input": responses_input,
         }
         instructions = _responses_instructions(messages)
         if instructions:
@@ -708,13 +750,22 @@ class ResponsesClient:
             kwargs["text"] = {"format": {"type": "json_object"}}
         if self.max_output_tokens > 0:
             kwargs["max_output_tokens"] = self.max_output_tokens
-        # Responses 协议的显式提示词缓存：配置了 prompt_cache_key 时按 key 缓存稳定前缀。
-        cache_key = str(self.entry.get("prompt_cache_key") or "").strip()
-        if cache_key:
-            kwargs["prompt_cache_key"] = cache_key
 
-        # 部分兼容网关不支持 text.format=json_object；首次上游格式错误时
-        # 去掉该参数并按提示词约束重试一次（模型仍应输出合法 JSON）。
+        # Do not set prompt_cache_options.mode=explicit: GPT-5.6's default
+        # implicit/automatic cache remains enabled. The key routes a group/flow
+        # to a stable cache shard and never contains the raw group identifier.
+        cache_enabled = bool(self.entry.get("cache", True)) and self.cache_scope != "none"
+        cache_key = str(prompt_cache_key or self.entry.get("prompt_cache_key") or "").strip()
+        if cache_enabled and cache_key:
+            kwargs["prompt_cache_key"] = cache_key
+        breakpoint_count = _responses_breakpoint_count(responses_input)
+        if cache_enabled:
+            print(
+                f"[LLM CACHE REQUEST] api={self.name} mode=implicit "
+                f"key={'yes' if cache_key else 'no'} explicit_breakpoints={breakpoint_count}",
+                flush=True,
+            )
+
         retried_format = False
         try:
             capture_prompt(messages)
@@ -733,19 +784,33 @@ class ResponsesClient:
                 _mark_interp_shutdown("responses_request")
                 _shutdown_diagnostic("responses_request_error", exc)
                 raise ProviderShuttingDown("LLM provider is shutting down") from exc
+            # Keep the request usable with gateways that implement automatic
+            # caching but have not yet added the GPT-5.6 content-block marker.
+            if _responses_breakpoint_unsupported(exc) and breakpoint_count:
+                # Prevent every future call in this process from first paying
+                # for a known-invalid request.
+                self._explicit_cache_breakpoints_enabled = False
+                print(
+                    f"[LLM CACHE FALLBACK] api={self.name} gateway rejected explicit breakpoint; "
+                    "disabling it for this process and retrying automatic caching only",
+                    flush=True,
+                )
+                kwargs["input"] = _to_responses_input(messages, include_cache_breakpoints=False)
+                response = self._client.responses.create(**kwargs)
+                self._log_usage(response)
+                return _responses_message_to_openai(response)
             if (
                 not tools
                 and not retried_format
                 and any(marker in str(exc).lower() for marker in (
                     "502", "503", "504", "upstream", "internal server",
-                    "bad gateway", "server error",
-                    "must contain the word 'json'",
+                    "bad gateway", "server error", "must contain the word 'json'",
                 ))
             ):
                 retried_format = True
                 print(
                     f"[LLM FORMAT RETRY] api={self.name} "
-                    f"网关对 json_object 格式返回上游错误，去掉 text.format 重试",
+                    "Gateway rejected text.format=json_object; retrying without text.format",
                     flush=True,
                 )
                 kwargs.pop("text", None)
@@ -799,6 +864,17 @@ class ResponsesClient:
             + (f" cache_creation={cache_write}" if cache_write is not None else ""),
             flush=True,
         )
+        input_tokens = fields.get("prompt")
+        if cache_read is not None and input_tokens not in (None, 0):
+            try:
+                hit_rate = max(0.0, min(1.0, float(cache_read) / float(input_tokens)))
+                print(
+                    f"[LLM CACHE] api={self.name} hit_rate={hit_rate:.1%} "
+                    f"hit={cache_read} input={input_tokens}",
+                    flush=True,
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
 
     def close(self):
         if getattr(self, "_closed", False):
@@ -862,7 +938,7 @@ class AnthropicClient:
                 raise ProviderShuttingDown("LLM provider is shutting down") from exc
             raise
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, prompt_cache_key=None):
         if _shutting_down():
             raise ProviderShuttingDown("LLM provider is shutting down")
         # 供 /prompt 等使用的最后一次完整提示词快照（在协议转换前记录 OpenAI 格式）。
@@ -1020,7 +1096,7 @@ class DeepSeekProvider:
     Each request starts from the highest-priority endpoint that is not disabled.
     A failed endpoint is retried immediately against the next available endpoint in
     the same request.  Failure counts are cumulative for the current bot response
-    period: after five failures, that endpoint is skipped until the next reset.
+    period: after three failures, that endpoint is skipped until the next reset.
     """
 
     def __init__(self):
@@ -1045,7 +1121,7 @@ class DeepSeekProvider:
         # Cumulative failures during the current response period, per endpoint.
         self._failure_counts = [0 for _ in self._endpoints]
         self._disabled_until_reset = [False for _ in self._endpoints]
-        self._failure_disable_threshold = 5
+        self._failure_disable_threshold = 3
         self.last_usage = {}
         self._apply_daily_reset_if_needed()
         print(
@@ -1136,7 +1212,7 @@ class DeepSeekProvider:
             )
         return failures, disabled
 
-    def send_chat(self, messages, tools=None):
+    def send_chat(self, messages, tools=None, prompt_cache_key=None):
         """Try each enabled API in priority order within the same LLM request."""
         if _shutting_down():
             raise ProviderShuttingDown("LLM provider is shutting down")
@@ -1152,7 +1228,7 @@ class DeepSeekProvider:
         for attempt, index in enumerate(indices, start=1):
             endpoint = self._endpoints[index]
             try:
-                message = endpoint.chat(messages, tools=tools)
+                message = endpoint.chat(messages, tools=tools, prompt_cache_key=prompt_cache_key)
                 self.last_usage = dict(endpoint.last_usage or {})
                 return message
             except Exception as exc:

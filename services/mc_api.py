@@ -5,11 +5,12 @@ DEFAULT_GAME_HOST = "game.sie.gdutmc.com"
 _game_host = DEFAULT_GAME_HOST
 _game_port = None
 
-FAKE_NAME = "Anonymous Player"
+DEFAULT_FAKE_NAME = "Anonymous Player"
+_fake_name = DEFAULT_FAKE_NAME
 
 
 def configure(config=None):
-    global _game_host, _game_port
+    global _game_host, _game_port, _fake_name
 
     mc_config = {}
     if isinstance(config, dict):
@@ -22,8 +23,10 @@ def configure(config=None):
 
     host = mc_config.get("host") or mc_config.get("server") or DEFAULT_GAME_HOST
     port = mc_config.get("port")
+    fake_name = mc_config.get("fake_name", DEFAULT_FAKE_NAME)
 
     _game_host = str(host).strip() or DEFAULT_GAME_HOST
+    _fake_name = str(fake_name).strip() or DEFAULT_FAKE_NAME
 
     try:
         _game_port = int(port) if port not in (None, "") else None
@@ -61,7 +64,7 @@ def get_status(timeout=3):
             players = []
             if status.players.sample:
                 for p in status.players.sample:
-                    if p.name != FAKE_NAME:
+                    if p.name != _fake_name:
                         players.append(p.name)
 
             result["data"] = {

@@ -120,8 +120,6 @@ def get_llm_config():
 
     required_fields = [
         "enabled",
-        "provider",
-        "model",
         "history_expire_ms",
     ]
 
@@ -149,8 +147,10 @@ def get_llm_config():
 
     result = {
         "enabled": llm_config["enabled"],
-        "provider": llm_config["provider"],
-        "model": llm_config["model"],
+        # ``provider`` used to select a single built-in client. API selection is
+        # now entirely driven by ``apis[*].protocol`` and priority.
+        "provider": str(llm_config.get("provider") or "multi_api_pool").strip(),
+        "model": str(llm_config.get("model") or "").strip(),
         "prefix_mode": prefix_mode,
         "max_history_chars": max(0, max_history_chars),
         "group_message_limit_chars": max(0, group_message_limit_chars),
@@ -215,6 +215,11 @@ def get_llm_config():
         result["api_base"] = _primary["base_url"]
         result["model"] = _primary["model"]
     else:
+        if result["enabled"]:
+            raise ValueError(
+                "Missing a valid LLM API: configure llm.apis or the legacy "
+                "llm.model/llm.api_key/llm.api_base fields"
+            )
         result["api_key"] = ""
         result["api_base"] = ""
     # 每日重置时刻依赖顶部 time_slots（bot 不响应时间段起点）。
@@ -230,13 +235,6 @@ def get_llm_config():
         "min_term_count": max(2, _safe_int(learning.get("min_term_count", 2), 2)),
         "prompt_max_chars": max(400, _safe_int(learning.get("prompt_max_chars", 1800), 1800)),
         "style_card_max_chars": max(600, _safe_int(learning.get("style_card_max_chars", 1800), 1800)),
-        "slang_scene_enabled": bool(learning.get("slang_scene_enabled", True)),
-        "scene_cache_ttl_seconds": max(30, _safe_int(learning.get("scene_cache_ttl_seconds", 900), 900)),
-        "scene_cache_max_items": max(1, min(_safe_int(learning.get("scene_cache_max_items", 8), 8), 24)),
-        "scene_prompt_max_chars": max(240, min(_safe_int(learning.get("scene_prompt_max_chars", 900), 900), 3000)),
-        "slang_min_occurrences": max(2, _safe_int(learning.get("slang_min_occurrences", 2), 2)),
-        "expression_max_items": max(1, min(_safe_int(learning.get("expression_max_items", 6), 6), 12)),
-        "expression_max_chars": max(300, min(_safe_int(learning.get("expression_max_chars", 900), 900), 2400)),
         "expression_recall_scan_limit": max(200, _safe_int(learning.get("expression_recall_scan_limit", 2000), 2000)),
         "expression_pool_size": max(4, min(_safe_int(learning.get("expression_pool_size", 12), 12), 24)),
         "expression_selector_enabled": bool(learning.get("expression_selector_enabled", True)),
@@ -264,6 +262,7 @@ def get_llm_config():
         "person_fact_limit": max(1, _safe_int(memory.get("person_fact_limit", 8), 8)),
         "group_knowledge_limit": max(1, _safe_int(memory.get("group_knowledge_limit", 10), 10)),
         "candidate_batch_size": max(10, _safe_int(memory.get("candidate_batch_size", 30), 30)),
+        "short_memory_max_tokens": max(50, _safe_int(memory.get("short_memory_max_tokens", 1000), 1000)),
     }
 
     weflow_config = config.get("weflow")
