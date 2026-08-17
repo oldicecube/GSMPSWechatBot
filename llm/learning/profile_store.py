@@ -34,7 +34,7 @@ _EXPRESSION_UNSAFE_MARKERS = (
 # Explicit general-language/system terms are never injected as group slang.
 # Keep this conservative: frequency alone must not remove expressions such as
 # "串子" or "吓哭了" that may have a group-specific meaning.
-_GENERIC_SLANG_WORDS = {"还是", "服务", "服务器", "状态", "直接", "问题", "这么", "群里", "这样", "都是", "这是", "东西", "不会", "不要", "有点", "我是", "不能", "其实", "给我", "出来", "个人", "有人", "我的", "你的", "为什么", "可能", "不过", "游戏", "可以", "然后", "这个", "那个", "我们", "你们", "哈哈", "好的", "不是", "真的", "一下", "什么", "怎么", "已经", "因为", "所以", "没有", "就是", "对啊", "还有", "一个", "现在", "知道", "感觉", "应该", "如果", "但是", "自己", "时候", "的话", "年老", "务器", "器状态", "拍了", "了拍", "说话", "看看", "需要", "开始", "结束", "地方", "事情", "一样", "一样的"}
+_GENERIC_SLANG_WORDS = {"还是", "服务", "服务器", "状态", "直接", "问题", "这么", "群里", "这样", "都是", "这是", "东西", "不会", "不要", "有点", "我是", "不能", "其实", "给我", "出来", "个人", "有人", "我的", "你的", "为什么", "可能", "不过", "游戏", "可以", "然后", "这个", "那个", "我们", "你们", "哈哈", "好的", "不是", "真的", "一下", "什么", "怎么", "已经", "因为", "所以", "没有", "就是", "对啊", "还有", "一个", "现在", "知道", "感觉", "应该", "如果", "但是", "自己", "时候", "的话", "年老", "务器", "器状态", "拍了", "了拍", "说话", "看看", "需要", "开始", "结束", "地方", "事情", "一样", "一样的", "哈哈哈", "哈哈哈哈"}
 
 
 def _is_generic_slang_phrase(value: str) -> bool:
@@ -129,6 +129,97 @@ class ProfileStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_style_expressions_prompt "
                 "ON style_expressions(group_id, status, count DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS behavior_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    scene TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    outcome TEXT NOT NULL DEFAULT '',
+                    actor_type TEXT NOT NULL DEFAULT 'group_collective',
+                    learning_type TEXT NOT NULL DEFAULT 'observed_behavior',
+                    source_ids_json TEXT NOT NULL DEFAULT '[]',
+                    score REAL NOT NULL DEFAULT 0.5,
+                    selected_count INTEGER NOT NULL DEFAULT 0,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_selected_at INTEGER NOT NULL DEFAULT 0,
+                    last_feedback_at INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_behavior_patterns_lookup "
+                "ON behavior_patterns(group_id, status, score DESC, selected_count DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cycle_curation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL DEFAULT '',
+                    finished_at INTEGER NOT NULL,
+                    cycle_message_count INTEGER NOT NULL DEFAULT 0,
+                    user_message_count INTEGER NOT NULL DEFAULT 0,
+                    outcome TEXT NOT NULL,
+                    slang_action_count INTEGER NOT NULL DEFAULT 0,
+                    slang_grounded_count INTEGER NOT NULL DEFAULT 0,
+                    slang_applied_count INTEGER NOT NULL DEFAULT 0,
+                    slang_rejected_json TEXT NOT NULL DEFAULT '{}',
+                    error_text TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cycle_curation_runs_group "
+                "ON cycle_curation_runs(group_id, finished_at DESC)"
+            )
+            # Uncertain slang is evidence for a later cycle, not a usable
+            # slang record. Keep only compact identifiers/counters here;
+            # never copy the source message body into this queue.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_slang_terms (
+                    group_id TEXT NOT NULL,
+                    normalized_phrase TEXT NOT NULL,
+                    phrase TEXT NOT NULL,
+                    occurrence_count INTEGER NOT NULL DEFAULT 0,
+                    speaker_count INTEGER NOT NULL DEFAULT 0,
+                    first_seen INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, normalized_phrase)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_slang_evidence (
+                    group_id TEXT NOT NULL,
+                    normalized_phrase TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, normalized_phrase, source_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_slang_speakers (
+                    group_id TEXT NOT NULL,
+                    normalized_phrase TEXT NOT NULL,
+                    speaker TEXT NOT NULL,
+                    PRIMARY KEY (group_id, normalized_phrase, speaker)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_slang_review "
+                "ON pending_slang_terms(group_id, last_seen DESC)"
             )
             for table, column, definition in (
                 ("style_expressions", "last_active_time", "INTEGER NOT NULL DEFAULT 0"),
@@ -365,7 +456,8 @@ class ProfileStore:
         required_tables = {
             "group_profiles", "slang_terms", "term_speakers", "message_fingerprints",
             "learning_samples", "style_cards", "slang_scenarios", "maintenance_runs",
-            "style_expressions",
+            "style_expressions", "behavior_patterns", "cycle_curation_runs",
+            "pending_slang_terms", "pending_slang_evidence", "pending_slang_speakers",
         }
         rows = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -404,6 +496,11 @@ class ProfileStore:
             connection.execute("DELETE FROM learning_samples WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM style_cards WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM style_expressions WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM behavior_patterns WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM cycle_curation_runs WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM pending_slang_evidence WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM pending_slang_speakers WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM pending_slang_terms WHERE group_id = ?", (group_id,))
 
     @_maintenance_serialized
     def replace_profile(
@@ -493,6 +590,10 @@ class ProfileStore:
                 increment("follow_up_windows")
             if observer_window:
                 increment("observer_windows")
+                if llm_ok and should_reply:
+                    increment("observer_reply_windows")
+                elif llm_ok:
+                    increment("observer_silent_windows")
             if repeat_topic_window:
                 increment("repeat_topic_windows")
             if llm_ok:
@@ -518,6 +619,76 @@ class ProfileStore:
                     "VALUES (?, ?, 0, ?, '[]')",
                     (group_id, now, serialized),
                 )
+
+    def get_response_learning(self, group_id: str) -> dict:
+        """Return compact reply-timing counters for local proactive gating."""
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        with self._managed_connection() as connection:
+            row = connection.execute(
+                "SELECT style_json FROM group_profiles WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        style = _load_json(row["style_json"], {})
+        learning = style.get("response_learning") if isinstance(style, dict) else {}
+        return dict(learning) if isinstance(learning, dict) else {}
+
+    @_maintenance_serialized
+    def record_curation_run(
+        self,
+        group_id,
+        *,
+        cycle_id="",
+        cycle_message_count=0,
+        user_message_count=0,
+        outcome="success",
+        slang_action_count=0,
+        slang_grounded_count=0,
+        slang_applied_count=0,
+        slang_rejected=None,
+        error_text="",
+    ):
+        """Persist compact curation observability without storing chat text."""
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        with self._managed_connection() as connection:
+            connection.execute(
+                "INSERT INTO cycle_curation_runs(group_id, cycle_id, finished_at, cycle_message_count, "
+                "user_message_count, outcome, slang_action_count, slang_grounded_count, "
+                "slang_applied_count, slang_rejected_json, error_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    group_id,
+                    str(cycle_id or "")[:120],
+                    int(time.time()),
+                    max(0, int(cycle_message_count or 0)),
+                    max(0, int(user_message_count or 0)),
+                    str(outcome or "success")[:40],
+                    max(0, int(slang_action_count or 0)),
+                    max(0, int(slang_grounded_count or 0)),
+                    max(0, int(slang_applied_count or 0)),
+                    json.dumps(slang_rejected or {}, ensure_ascii=False, separators=(",", ":")),
+                    str(error_text or "")[:500],
+                ),
+            )
+
+    def get_recent_curation_runs(self, group_id, limit=20) -> list[dict]:
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        limit = max(1, min(int(limit or 20), 100))
+        with self._managed_connection() as connection:
+            rows = connection.execute(
+                "SELECT cycle_id, finished_at, cycle_message_count, user_message_count, outcome, "
+                "slang_action_count, slang_grounded_count, slang_applied_count, slang_rejected_json, error_text "
+                "FROM cycle_curation_runs WHERE group_id=? ORDER BY id DESC LIMIT ?",
+                (group_id, limit),
+            ).fetchall()
+        return [
+            {
+                **dict(row),
+                "slang_rejected": _load_json(row["slang_rejected_json"], {}),
+            }
+            for row in rows
+        ]
 
 
     def get_slang_match_keys(self, group_id: str, limit: int = 60) -> list[dict]:
@@ -1077,6 +1248,105 @@ class ProfileStore:
         return result
 
     @_maintenance_serialized
+    def defer_slang_candidate(self, item: dict) -> bool:
+        """Persist one grounded-but-uncertain slang observation for re-review.
+
+        This queue is separate from ``slang_terms`` and ``slang_scenarios``:
+        a deferred term is never reply-eligible and contains no chat body.
+        """
+        if not isinstance(item, dict):
+            return False
+        group_id = str(item.get("group_id") or "").strip()[:200]
+        normalized = _normalize_match_text(item.get("normalized_phrase") or item.get("phrase"))
+        phrase = str(item.get("phrase") or normalized).strip()[:80]
+        if not group_id or not normalized or not phrase or _is_generic_slang_phrase(normalized):
+            return False
+        source_ids = list(dict.fromkeys(
+            str(value).strip()[:160]
+            for value in (item.get("source_ids") or [])
+            if str(value).strip()
+        ))[:8]
+        if not source_ids:
+            return False
+        speakers = list(dict.fromkeys(
+            str(value).strip()[:120]
+            for value in (item.get("source_speakers") or item.get("speakers") or [])
+            if str(value).strip()
+        ))[:20]
+        now = int(time.time())
+        with self._managed_connection() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM pending_slang_terms WHERE group_id=? AND normalized_phrase=?",
+                (group_id, normalized),
+            ).fetchone()
+            inserted = 0
+            for source_id in source_ids:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO pending_slang_evidence("
+                    "group_id, normalized_phrase, source_id, observed_at) VALUES (?, ?, ?, ?)",
+                    (group_id, normalized, source_id, now),
+                )
+                inserted += int(cursor.rowcount or 0)
+            for speaker in speakers:
+                connection.execute(
+                    "INSERT OR IGNORE INTO pending_slang_speakers(group_id, normalized_phrase, speaker) "
+                    "VALUES (?, ?, ?)",
+                    (group_id, normalized, speaker),
+                )
+            speaker_count = connection.execute(
+                "SELECT COUNT(*) FROM pending_slang_speakers WHERE group_id=? AND normalized_phrase=?",
+                (group_id, normalized),
+            ).fetchone()[0]
+            if existing:
+                connection.execute(
+                    "UPDATE pending_slang_terms SET phrase=?, occurrence_count=occurrence_count+?, "
+                    "speaker_count=?, last_seen=? WHERE group_id=? AND normalized_phrase=?",
+                    (phrase, inserted, int(speaker_count), now, group_id, normalized),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO pending_slang_terms(group_id, normalized_phrase, phrase, occurrence_count, "
+                    "speaker_count, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (group_id, normalized, phrase, inserted, int(speaker_count), now, now),
+                )
+        return bool(inserted)
+
+    def get_pending_slang_candidates(self, group_id, limit=20) -> list[dict]:
+        """Return compact pending evidence for the next end-of-cycle review."""
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        limit = max(1, min(int(limit or 20), 40))
+        with self._managed_connection() as connection:
+            rows = connection.execute(
+                "SELECT normalized_phrase, phrase, occurrence_count, speaker_count, first_seen, last_seen "
+                "FROM pending_slang_terms WHERE group_id=? "
+                "ORDER BY last_seen DESC, occurrence_count DESC LIMIT ?",
+                (group_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_maintenance_serialized
+    def remove_pending_slang_candidate(self, group_id, normalized_phrase) -> bool:
+        """Discard deferred evidence once the phrase has been resolved."""
+        group_id = str(group_id or "").strip()
+        normalized = _normalize_match_text(normalized_phrase)
+        if not group_id or not normalized:
+            return False
+        with self._managed_connection() as connection:
+            connection.execute(
+                "DELETE FROM pending_slang_evidence WHERE group_id=? AND normalized_phrase=?",
+                (group_id, normalized),
+            )
+            connection.execute(
+                "DELETE FROM pending_slang_speakers WHERE group_id=? AND normalized_phrase=?",
+                (group_id, normalized),
+            )
+            cursor = connection.execute(
+                "DELETE FROM pending_slang_terms WHERE group_id=? AND normalized_phrase=?",
+                (group_id, normalized),
+            )
+        return bool(cursor.rowcount)
+
+    @_maintenance_serialized
     def apply_slang_scenario(self, item: dict) -> bool:
         """Apply one bounded, model-reviewed scenario without trusting its counters."""
         if not isinstance(item, dict):
@@ -1592,7 +1862,7 @@ class ProfileStore:
         return ranked[:limit]
 
     def resolve_slang_write(self, item: dict) -> dict | None:
-        """Require an explicit LLM decision after the similarity lookup."""
+        """Resolve a bounded, context-grounded slang write against local matches."""
         if not isinstance(item, dict):
             return None
         normalized = _normalize_match_text(item.get("normalized_phrase"))
@@ -1601,7 +1871,11 @@ class ProfileStore:
         decision = str(item.get("similarity_decision") or "").strip().lower()
         similar = self.find_similar_slang(item.get("group_id"), normalized, max_items=8)
         if not similar:
-            if decision != "new_distinct":
+            # No lexical collision is a safe deterministic result.  Older
+            # model responses may omit this optional field; accepting that
+            # case prevents a valid new, context-grounded term from being
+            # silently discarded.
+            if decision not in {"", "new_distinct"}:
                 return None
             return dict(item, normalized_phrase=normalized)
         exact = next(
@@ -1761,6 +2035,138 @@ class ProfileStore:
                     for row in expressions
                 ],
             }
+
+    @_maintenance_serialized
+    def apply_behavior_actions(self, group_id, actions, valid_source_ids=None, min_messages=10) -> int:
+        """Persist cycle-end behavior observations after source validation.
+
+        Behavior learning is intentionally separate from slang learning.  A
+        pattern is accepted only when the cycle has enough user messages and
+        every cited source id belongs to that cycle.
+        """
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        valid = {str(item).strip() for item in (valid_source_ids or []) if str(item).strip()}
+        if len(valid) < max(1, int(min_messages or 10)):
+            return 0
+        now = int(time.time())
+        applied = 0
+        with self._managed_connection() as connection:
+            for raw in actions or []:
+                if not isinstance(raw, dict):
+                    continue
+                scene = _clean_text(raw.get("scene"), 140)
+                action = _clean_text(raw.get("action"), 180)
+                outcome = _clean_text(raw.get("outcome"), 220)
+                if not scene or not action:
+                    continue
+                source_ids = raw.get("source_ids")
+                if isinstance(source_ids, str):
+                    source_ids = [source_ids]
+                source_ids = list(dict.fromkeys(
+                    str(item).strip() for item in (source_ids or []) if str(item).strip()
+                ))[:12]
+                if not source_ids or any(item not in valid for item in source_ids):
+                    continue
+                actor_type = str(raw.get("actor_type") or "group_collective").strip().lower()
+                if actor_type not in {"other_user", "group_collective", "maibot_self"}:
+                    actor_type = "group_collective"
+                learning_type = str(raw.get("learning_type") or "observed_behavior").strip().lower()
+                if learning_type not in {"observed_behavior", "self_reflection"}:
+                    learning_type = "observed_behavior"
+                searchable = f"{scene} {action} {outcome}".casefold()
+                if any(marker in searchable for marker in _EXPRESSION_UNSAFE_MARKERS):
+                    continue
+                try:
+                    incoming_score = max(0.0, min(1.0, float(raw.get("score", 0.5))))
+                except (TypeError, ValueError):
+                    incoming_score = 0.5
+                existing = connection.execute(
+                    "SELECT id, source_ids_json, score FROM behavior_patterns "
+                    "WHERE group_id=? AND scene=? AND action=? AND learning_type=? AND status='active' "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (group_id, scene, action, learning_type),
+                ).fetchone()
+                if existing:
+                    old_sources = _load_json(existing["source_ids_json"], [])
+                    merged_sources = list(dict.fromkeys(
+                        [str(item).strip() for item in old_sources if str(item).strip()] + source_ids
+                    ))[-20:]
+                    score = round(float(existing["score"] or 0.5) * 0.7 + incoming_score * 0.3, 4)
+                    connection.execute(
+                        "UPDATE behavior_patterns SET outcome=?, actor_type=?, source_ids_json=?, "
+                        "score=?, updated_at=? WHERE id=?",
+                        (outcome, actor_type, json.dumps(merged_sources, ensure_ascii=False), score, now, existing["id"]),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO behavior_patterns(group_id, scene, action, outcome, actor_type, "
+                        "learning_type, source_ids_json, score, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (group_id, scene, action, outcome, actor_type, learning_type,
+                         json.dumps(source_ids, ensure_ascii=False), incoming_score, now, now),
+                    )
+                applied += 1
+        return applied
+
+    def lookup_group_behaviors(self, group_id, query="", max_items=3) -> list[dict]:
+        """Return a small local scene/action candidate set for working replies."""
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        limit = max(1, min(int(max_items or 3), 3))
+        query = str(query or "").strip().casefold()
+        query_tokens = _topic_tokens(query)
+        with self._managed_connection() as connection:
+            rows = connection.execute(
+                "SELECT id, scene, action, outcome, actor_type, learning_type, score, selected_count "
+                "FROM behavior_patterns WHERE group_id=? AND status='active' "
+                "ORDER BY score DESC, selected_count DESC, updated_at DESC LIMIT 100",
+                (group_id,),
+            ).fetchall()
+        ranked = []
+        for row in rows:
+            searchable = " ".join(str(row[key] or "") for key in ("scene", "action", "outcome")).casefold()
+            if query and query not in searchable and not (query_tokens & _topic_tokens(searchable)):
+                continue
+            hits = sum(1 for token in query_tokens if token and token in searchable)
+            score = hits * 3 + float(row["score"] or 0) * 2 + min(1.0, int(row["selected_count"] or 0) / 20)
+            ranked.append((score, row))
+        ranked.sort(key=lambda item: (-item[0], int(item[1]["id"])))
+        return [
+            {
+                "id": int(row["id"]),
+                "scene": str(row["scene"] or "")[:140],
+                "action": str(row["action"] or "")[:180],
+                "outcome": str(row["outcome"] or "")[:220],
+                "actor_type": row["actor_type"],
+                "learning_type": row["learning_type"],
+                "score": round(float(row["score"] or 0), 3),
+            }
+            for _, row in ranked[:limit]
+        ]
+
+    @_maintenance_serialized
+    def record_behavior_selection(self, group_id, behavior_ids) -> int:
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        ids = []
+        for item in behavior_ids or []:
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                ids.append(value)
+        if not ids:
+            return 0
+        now = int(time.time())
+        with self._managed_connection() as connection:
+            updated = 0
+            for behavior_id in list(dict.fromkeys(ids))[:8]:
+                cursor = connection.execute(
+                    "UPDATE behavior_patterns SET selected_count=selected_count+1, last_selected_at=?, updated_at=? "
+                    "WHERE id=? AND group_id=? AND status='active'",
+                    (now, now, behavior_id, group_id),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
 
     def save_style_card(self, group_id: str, card: dict, source_message_count: int):
         group_id = str(group_id or "unknown").strip() or "unknown"

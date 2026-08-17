@@ -110,11 +110,38 @@ class StyleLearner:
                 attention_check=bool(attention_check),
                 direct_address=direct_address,
                 follow_up=follow_up,
-                observer_window=bool(not direct_address and not force_reply),
+                observer_window=bool(
+                    not attention_check and not direct_address and not force_reply
+                ),
                 repeat_topic_window=repeat_topic_window,
             )
         except Exception:
             return
+
+    def get_response_learning(self, group_id: str) -> dict:
+        """Read timing counters without putting a database call on ingress."""
+        if not self.enabled or not group_id:
+            return {}
+        try:
+            return self.store.get_response_learning(group_id)
+        except Exception:
+            return {}
+
+    def record_curation_run(self, group_id, **kwargs):
+        if not self.enabled or not group_id:
+            return
+        try:
+            self.store.record_curation_run(group_id, **kwargs)
+        except Exception:
+            return
+
+    def get_recent_curation_runs(self, group_id, limit=20) -> list[dict]:
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.get_recent_curation_runs(group_id, limit=limit)
+        except Exception:
+            return []
 
 
     def record_slang_usage(self, group_id, *, opportunity=False, messages=None, match_keys=None):
@@ -150,6 +177,33 @@ class StyleLearner:
             return 0
         try:
             return int(self.store.apply_expression_actions(group_id, actions) or 0)
+        except Exception:
+            return 0
+
+    def apply_behavior_actions(self, group_id, actions, valid_source_ids=None, min_messages=10) -> int:
+        """Apply cycle-end behavior observations after local source validation."""
+        if not self.enabled or not group_id:
+            return 0
+        try:
+            return int(self.store.apply_behavior_actions(
+                group_id, actions, valid_source_ids=valid_source_ids, min_messages=min_messages
+            ) or 0)
+        except Exception:
+            return 0
+
+    def lookup_group_behaviors(self, group_id, query="", max_items=3) -> list[dict]:
+        if not self.enabled or not group_id:
+            return []
+        try:
+            return self.store.lookup_group_behaviors(group_id, query, max_items=max_items)
+        except Exception:
+            return []
+
+    def record_behavior_selection(self, group_id, behavior_ids) -> int:
+        if not self.enabled or not group_id:
+            return 0
+        try:
+            return int(self.store.record_behavior_selection(group_id, behavior_ids) or 0)
         except Exception:
             return 0
 

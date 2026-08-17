@@ -55,6 +55,28 @@ def _tokens(text):
     return {item for item in result if len(item) >= 2}
 
 
+def _estimate_tokens(value) -> int:
+    """轻量 token 估算（CJK 每字 1 token，其他每 4 字符 1 token），与 prompt_builder/MemoryManager 一致。"""
+    text = str(value or "")
+    cjk = sum("㐀" <= char <= "鿿" for char in text)
+    return cjk + max(0, (len(text) - cjk + 3) // 4)
+
+
+def _truncate_to_token_budget(text, budget):
+    """保留不超过预算的最长前缀（单条超长时的安全兆底）。"""
+    text = str(text or "")
+    if not text or _estimate_tokens(text) <= budget:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _estimate_tokens(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low].rstrip()
+
+
 class LongTermMemory:
     """SQLite store for person facts, group knowledge, and episodes."""
 
@@ -72,6 +94,7 @@ class LongTermMemory:
         self.max_context_chars = max(400, self._int(settings.get("context_max_chars"), 1400))
         self.fact_limit = max(1, self._int(settings.get("person_fact_limit"), 8))
         self.knowledge_limit = max(1, self._int(settings.get("group_knowledge_limit"), 10))
+        self.short_memory_max_tokens = max(50, self._int(settings.get("short_memory_max_tokens"), 1000))
         self.bot_wxids = {
             _safe(item, 100)
             for item in (config.get("bot_wxids") or [])
@@ -430,6 +453,46 @@ class LongTermMemory:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _enforce_short_memory_budget(self, state, counters=None):
+        """短期记忆硬上限：超限时从开头丢弃最旧条目
+        （行首为最早记忆，新内容追加在末尾），单条超长时截断；
+        保证写库后的短期记忆不超过上限。"""
+        counters = counters if counters is not None else {}
+        text = str(state.get("short_memory") or "").strip()
+        if not text:
+            return
+        budget = self.short_memory_max_tokens
+        if _estimate_tokens(text) <= budget:
+            return
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        kept = []
+        used = 0
+        for line in reversed(lines):  # 自最新往最早收集，优先保留最新的短期记忆
+            cost = _estimate_tokens(line)
+            if not kept and cost > budget:
+                kept.append(_truncate_to_token_budget(line, budget))
+                used = _estimate_tokens(kept[0])
+                break
+            if kept and used + cost > budget:
+                break
+            kept.append(line)
+            used += cost
+        kept.reverse()
+        state["short_memory"] = "\n".join(kept)
+        counters["truncated"] = int(counters.get("truncated") or 0) + 1
+
+    def enforce_short_memory_budget(self, group_id) -> int:
+        """独立触发的短期记忆上限整理并落库（返回被截断的条数）。"""
+        if not self.enabled:
+            return 0
+        group_id = _safe(group_id, 200)
+        state = self.get_group_memory_state(group_id)
+        counters = {}
+        self._enforce_short_memory_budget(state, counters)
+        if counters.get("truncated"):
+            self.save_group_memory_state(group_id, state)
+        return int(counters.get("truncated") or 0)
+
     def apply_memory_actions(self, group_id, actions) -> dict:
         """Apply validated LLM actions atomically; the LLM chooses the changes."""
         if not self.enabled:
@@ -497,6 +560,7 @@ class LongTermMemory:
                 )
                 counters["updated" if operation in {"update", "replace", "set"} else "added"] += 1
 
+            self._enforce_short_memory_budget(state, counters)
             connection.execute(
                 "INSERT INTO group_memory_state(group_id, short_memory, medium_memory, long_memory, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT(group_id) DO UPDATE SET "

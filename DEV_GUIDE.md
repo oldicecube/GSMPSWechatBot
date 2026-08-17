@@ -66,7 +66,7 @@ WeFlowClient
 │   ├── core/            # LLM 服务与响应解析
 │   ├── memory/          # 群聊上下文存储
 │   ├── prompt/          # System/User Prompt 构造
-│   ├── provider/        # Provider 转发层（目前仅 DeepSeek）
+│   ├── provider/        # 多协议 API 池：openai / responses / anthropic
 │   └── security/        # 表情索引与辅助逻辑
 ├── plugins/             # 命令行插件
 ├── services/            # 业务服务层
@@ -76,6 +76,8 @@ WeFlowClient
 ```
 
 `main.py` 启动时会先构建 Dispatcher，再扫描 `plugins/` 和 `auto/` 下的 Python 文件。`plugins/` 中有 `handle` 的模块按 `COMMAND`（缺省为文件名对应的 `/命令`）注册；`ALIASES` 可注册额外命令别名。`auto/` 模块按文件名注册，`MATCH_RAW_MESSAGE`、`FALLBACK_ONLY` 和 `INTERCEPT_LLM` 等模块级标记会改变其调度阶段。
+
+`llm/` 是核心源码，必须和 `core/` 一起提交；它包含配置归一化、三种协议适配、提示词构建、记忆、学习与主动回复。`data/*.sqlite3`、`data/groups/`、`logs/`、`output/`、`config.json`、`prompt.txt`、`__pycache__/`、`weflow-core/node_modules/` 与 `weflow-core/dist/` 是运行时内容，不应提交。不要因名称含有 `llm`、`data` 或 `output` 就直接删除，应先用 `git ls-files -- <path>` 判断是否属于源码。
 
 ---
 
@@ -179,13 +181,28 @@ return {
 
 ```python
 from core.sender import send
+from core.wechat_sender.file_down import download_voice_file
 
 # 文本
 send(target=context["group"], content="通知", mode="wechat_text")
 
 # 图片/文件
 send(target=context["group"], file_path="output/demo.png", mode="wechat_file")
+
+# 语音：先用统一临时目录下载或生成文件，然后交给发送组件
+voice_path = download_voice_file(audio_url, prefix="plugin")
+send(
+    target=context["group"],
+    file_path=voice_path,
+    mode="wechat_voice",
+    duration=None,      # None = 裁剪后音频的实际时长，最多 60 秒
+    voice_start=0.0,    # 可选起始秒，支持浮点
+)
 ```
+
+语音发送仅支持 Windows + VB-CABLE。发送组件会切换目标聊天后长按 Shift，等待 0.5 秒再向 `CABLE Input` 注入音频，完成后才松开 Shift。微信录音设备应设为 `CABLE Output`。不得绕过 `core.sender.send` 或直接向物理扬声器播放。
+
+所有待发送语音必须位于 `core.wechat_sender.file_down.VOICE_TEMP_DIR`（默认 `%TEMP%\WechatRobot\voice`）。hook 服务仅会删除该目录内的文件；插件不得自行删除任意音频路径。设备名称可用 `WECHAT_VOICE_PLAYBACK_DEVICE` 和 `WECHAT_VOICE_CAPTURE_DEVICE` 环境变量覆盖。
 
 ---
 
@@ -329,7 +346,7 @@ WeFlow SSE → WeFlowClient → task_queue → Worker
 → Worker → core.sender → 微信发送服务
 ```
 
-LLM 由 `llm/core/llm_service.py` 实现，使用 `llm/provider/deepseek_provider.py` 调用 DeepSeek Chat Completions，以 JSON object 格式请求，并由 `response_parser` 转换为 `messages` 和可选的 `animation`。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
+LLM 由 `llm/core/llm_service.py` 实现，`llm/provider/deepseek_provider.py` 保留历史文件名，实际是多路 API 池适配层。它统一支持 `openai`（Chat Completions）、`responses`（OpenAI Responses）和 `anthropic`（Anthropic Messages）协议，再由 `response_parser` 归一为 `messages` 和可选的 `animation`。API 按 `priority` 升序选择。每次 LLM 请求都从最高优先级的未停用 API 开始；某路失败时，会在同次请求内按优先级继续尝试下一个可用 API，直到成功或全部失败。每路的错误数在当前 bot 响应期内累计，成功不清零；累计 5 次错误后停用至下一个不响应期边界。边界会清空计数、恢复所有 API，后续请求重新从最高优先级开始。没有配置不响应时间时，边界默认为每日 00:00。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
 
 ### LLM 放行条件
 
@@ -343,7 +360,7 @@ LLM 由 `llm/core/llm_service.py` 实现，使用 `llm/provider/deepseek_provide
 LLM 返回 JSON 解析失败时直接发送完整原文；DeepSeek 返回 HTTP 402 时发送余额不足提示。
 群聊回复的生成提示包含发送前自审规则：避免露骨描述性内容；必要时只做简短、中性的概括或礼貌拒答，不重复具体不适宜细节。
 
-LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
+上层将工具定义与结果统一规范化：`openai` 与 `responses` 端点使用 OpenAI 风格的 `tools` / `tool_choice="auto"`，`anthropic` 端点使用 Messages 结构。插件不得直接组装任一协议的 HTTP 请求：
 
 - `fetch_webpage` 用于读取网页；主动回复的纯网址场景只允许 `bilibili.com` 和 `b23.tv`。
 - `fetch_original_message` 用于消息疑似转发、聊天记录、引用或截断时，按当前消息携带的 `session_id` 与 `local_id`/`server_id` 查询消息。
@@ -352,14 +369,26 @@ LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
 主动回复默认由 `llm.auto_reply.enabled` 控制。启用时必须显式写入 `llm.auto_reply.enabled=true`；
 `allowed_groups: []` 继承顶层 `target_group`，不会放开全部群聊：
 
+主动回复有两层本地时机门控：`reply_timing_min_windows` 之前只观察不干预；达到样本量后，根据 `attention_reply_windows / attention_windows` 与目标回复率计算一次采样概率，该层只作用于自主 attention 检查。`reply_trigger_mode=reply_necessity` 时，working 批次还会先使用纯本地必要性评分，默认 `reply_necessity_threshold=35`；达到最小样本后，working 还会根据 `observer_reply_windows / observer_windows` 对历史回复过密施加最多 15 分扣分。低于阈值直接静默，不发起 LLM 请求。工作批次默认最多等待 15 秒或累计 20 条消息。前缀、@、白名单 URL 和主动网页机会绕过 working 门控。所有模型、网页工具和周期整理任务共享 `max_concurrent_requests`，自主请求在占满时直接跳过，避免多个 Worker 同时阻塞。
+
+循环结束整理统一包含记忆、黑话、句式、风格和行为模式。行为模式至少需要 10 条有效用户消息，并且每个 `behavior_actions.source_ids` 必须来自本轮带出的 `source_id`；未通过验证不会入库。行为模式只在 working 批次暴露为 `lookup_group_behaviors` 工具，attention 和 direct 请求不预先注入。
+
 ```json
 "auto_reply": {
   "enabled": true,
-  "idle_min_seconds": 1200,
-  "idle_max_seconds": 2400,
+  "idle_quiet_min_seconds": 240,
+  "idle_quiet_max_seconds": 900,
+  "density_window_seconds": 60,
+  "density_upper_messages_per_minute": 8,
+  "density_attention_check_interval_seconds": 30,
+  "density_attention_half_life_seconds": 300,
+  "density_attention_curve_power": 1.7,
+  "proactive_web_min_seconds": 7200,
+  "proactive_web_max_seconds": 10800,
+  "proactive_web_reset_after_bot_messages": 10,
   "work_min_seconds": 120,
   "work_max_seconds": 300,
-  "batch_debounce_seconds": 5,
+  "batch_debounce_seconds": 15,
   "batch_max_messages": 20,
   "attention_min_seconds": 120,
   "attention_max_seconds": 300,
@@ -371,14 +400,15 @@ LLM 工具使用 DeepSeek OpenAI 兼容的 `tools` 与 `tool_choice="auto"`：
 }
 ```
 
-空闲期结束后先进入关注期；关注期每隔随机 2--5 分钟检查群聊最新 10 条消息，有值得回复的内容才进入工作期。工作期消息先进入短暂缓冲窗口，默认 5 秒或达到 20 条后集中交给 LLM 结合历史上下文判断，不使用本地关键词规则提前丢弃；@ 和白名单网址会立即刷出当前缓冲批次并要求处理。每次主动判断的结果还会更新本地回复时机统计，空闲期复盘时替换动态风格卡。工作期结束后再次进入关注期；连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
-正常状态路径是 `idle -> attention -> working -> attention -> idle`；@ 或白名单网址属于强制触发例外，可以跳过当前冷却直接进入 working。
+空闲期使用最近一分钟滑动窗口消息数判断：超过预设上界 8 条时直接进入关注期；未超过上界时按密度 hazard 概率进入关注期。弱智吧主动转发使用独立随机 2--3 小时计时器：到期后在 Bot 不处于工作期时直接切换 `working`，让 LLM 现场调用网页工具判断是否主动转发；工作期未结束则在退出后立即调度。计时期间 Bot 每成功发送一条分开的群文本即计一条，超过 10 条时立即重新随机并清零计数。计时器不依赖 idle/attention 阶段，也不使用固定模板或把内部机会事件写入群聊记忆。工作期消息先进入缓冲窗口，默认最多 15 秒或达到 20 条后集中处理；随后先经本地必要性门控，低于阈值的批次直接静默，不发起 LLM 请求，高价值批次再交给 LLM 结合历史上下文判断。@ 和白名单网址会立即刷出当前缓冲批次并要求处理。每次主动判断的结果还会更新本地回复时机统计，空闲期复盘时替换动态风格卡。连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
+正常状态路径是 `idle -> attention -> working -> attention -> idle`；滑动窗口超过上界可将 idle 直接切入 attention；独立主动转发计时器到期时可将 idle 或 attention 直接切入 working；@ 或白名单网址属于强制触发例外，可以跳过当前冷却直接进入 working。
 主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句。
 主动回复遇到只包含 `bilibili.com` 或 `b23.tv`（含子域名）的网址时，会强制调用网页工具并生成简要梗概；其他网址不会触发该规则，且该次主动网页工具调用会拒绝非白名单域名及其跳转目标。
 
-`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`llm.memory.enabled` 控制 SQLite 长期记忆，`llm.learning.enabled` 控制风格学习，`llm.auto_reply.enabled` 控制主动回复状态机。`engine`、`behavior_style`、`proactive` 及分类型 `rate_limit` 字段仍需结合对应模块实现，新增配置时必须同步修改对应代码。
-黑话场景库使用同一个 learning SQLite 文件中的 `slang_scenarios` 表，并与 `slang_terms` 保持同步。每轮主动回复循环结束时，LLM 读取黑话库和完整循环上下文，直接用 `slang_actions` 决定新增、更新、删除或保留；程序随后才更新统计字段。每日 Bot 不响应时间不再触发黑话整理。`slang_scene_enabled`、`scene_cache_ttl_seconds`、`scene_cache_max_items` 和 `scene_prompt_max_chars` 控制开关、缓存和候选预算；完整黑话库不会注入 reply prompt。每条场景记录保留 phrase、normalized_phrase、meaning、scenes、examples、confidence、speaker_count、occurrence_count、last_seen、safe_to_use、status、slang_type、emotion 和 emotion_intensity。LLM 在 add/update 前必须调用 `lookup_similar_group_slang`，明确选择复用已有规范化短语或确认新表达；程序不再执行覆盖、共享子串或事后重复维护。
-`memory.active_update_enabled` 是工作期边界：`request_memory_update` 只在 `working` proactive batch 提供，每工作期最多一次，attention、idle 和 strict prefix 不提供。群聊、记忆、黑话和网页内容都按不可信数据处理，不当作指令。DeepSeek 调用遵循 OpenAI-compatible `tools`、`tool_choice="auto"`、assistant `tool_calls` 和 `tool` result 消息流程；失败会退避且不阻塞正常回复。
+`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`llm.memory.enabled` 控制 SQLite 长期记忆，`llm.learning.enabled` 控制风格学习，`llm.auto_reply.enabled` 控制主动回复状态机。`engine`、`behavior_style`、`proactive` 及分类型 `rate_limit` 字段仍需结合对应模块实现，新增配置时必须同步修改对应代码。`llm.memory.short_memory_max_tokens`（默认 1000）控制短期记忆硬上限：超限时整理循环会优先压缩最早的短期记忆，并把有价值内容下沉到中长期记忆（无论 LLM 是否产生压缩动作都会在写库后执行硬上限截断）。长/中/短期记忆在每轮循环内保持不变，因此注入到群聊历史之前，使缓存前缀更稳定。
+黑话场景库使用同一个 learning SQLite 文件中的 `slang_scenarios` 表，并与 `slang_terms` 保持同步。每轮主动回复循环结束时，LLM 仅从本轮非 Bot 消息上下文总结黑话；短期/中期/长期记忆、画像和旧黑话记录不构成新黑话证据。每条 `slang_action` 的 phrase 必须在本轮消息中出现，代码会验证/补齐 `source_ids`，无法在当前上下文命中的 action 不写库。短期记忆不写入黑话、释义和样例，运行时还会过滤历史短期记忆里的已知黑话。程序随后才执行相似度校验和统计更新。`cycle_curation_runs` 保存每轮整理的消息数、黑话 action 数、命中数、落库数和拒绝原因（不保存聊天正文），用于排障。每日 Bot 不响应时间不再触发黑话整理。`slang_scene_enabled`、`scene_cache_ttl_seconds`、`scene_cache_max_items` 和 `scene_prompt_max_chars` 控制开关、缓存和候选预算；完整黑话库不会注入 reply prompt。每条场景记录保留 phrase、normalized_phrase、meaning、scenes、examples、confidence、speaker_count、occurrence_count、last_seen、safe_to_use、status、slang_type、emotion 和 emotion_intensity。LLM 在 add/update 前调用 `lookup_similar_group_slang`；无相似项时，本地校验可接受模型省略的 `new_distinct` 字段，避免有效新词被静默丢弃；相似项仍必须明确复用已有规范化短语或确认新表达。
+待确认黑话使用 `pending_slang_terms`、`pending_slang_evidence` 和 `pending_slang_speakers` 三张 SQLite 表持久化词条、来源去重计数和说话人数。它们不含聊天正文，不参与回复注入；只有同一词在后续轮次的当前消息中再次命中且 LLM 改为 `new_distinct` 或 `reuse_existing` 时，才转入正式黑话库并清除待确认记录。
+`memory.active_update_enabled` 是工作期边界：`request_memory_update` 只在 `working` proactive batch 提供，每工作期最多一次，attention、idle 和 strict prefix 不提供。群聊、记忆、黑话和网页内容都按不可信数据处理，不当作指令。工具调用由提供者适配层根据当前协议处理；调用失败会退避且不阻塞正常回复。
 
 ---
 
@@ -392,6 +422,7 @@ from core.sender import send, configure, preview_delay_seconds
 configure(config)
 send(target, content="文本", mode="wechat_text")
 send(target, file_path="img.png", mode="wechat_file")
+send(target, file_path=voice_path, mode="wechat_voice", duration=None, voice_start=0.0)
 delay = preview_delay_seconds(mode="wechat_text")
 ```
 
@@ -452,7 +483,7 @@ save_document("key_name", {"field": "value"})
 
 ## 九、强制规范
 
-1. 所有消息推送必须使用 `core.sender` 统一接口
+1. 所有消息推送必须使用 `core.sender` 统一接口；语音只能使用 `wechat_voice` 链路，且待发文件必须位于 `VOICE_TEMP_DIR`。
 2. 耗时任务必须新建子线程，禁止阻塞主线程
 3. 命令插件指令必须以 `/` 开头
 4. 禁止修改原始 `context` 上下文对象
@@ -461,19 +492,29 @@ save_document("key_name", {"field": "value"})
 
 ---
 
-## 十、冗余功能清理建议
+## 十、仓库卫生与可选裁剪
 
-以下为通用部署时可考虑清理的 GSMPS 专用内容：
+先区分“运行产物”和“可选功能源码”。运行产物可以清理，但不应进入 Git；可选功能只能在确认没有路由、命令、配置或跨模块导入依赖后再删除。
 
-| 位置 | 说明 | 建议 |
+### 可安全清理且不提交的运行产物
+
+| 位置 | 说明 | 处理方式 |
 |------|------|------|
-| `auto/player_monitor.py` | GSMPS 专用计分板逻辑（The Room 积分、每日统计） | 通用部署建议删除或精简 |
-| `data/groups/GDUT SIE Minecraft Public Server/` | GSMPS 群历史数据 | 删除 |
-| `data/fortune_words.json` | 运势词库 | 按需保留 |
-| `data/life_words.json` | 转生词库 | 按需保留 |
-| `plugins/ba.py` | BA Logo 风格图片生成 | 如不需要可删除 |
-| `plugins/seed.py` | MC 地图种子查询 | 如不需要可删除 |
-| `plugins/player.py` | 含 `--fortune`、`--life`、`--value` 玩法 | 通用部署可去掉这些子命令 |
+| `config.json`、`prompt.txt` | 本机密钥和调试提示词 | 保留在本机，绝不提交或复制进 sample |
+| `logs/`、`llm/logs/`、`output/` | 日志、生成图片/文件 | 停止 Bot 后按需删除 |
+| `data/*.sqlite3`、`data/groups/`、`data/pics/` | 记忆、学习库、群历史和缓存 | 备份后按需删除；会丢失学习/历史 |
+| `__pycache__/`、`*.pyc` | Python 缓存 | 可随时删除 |
+| `weflow-core/node_modules/`、`weflow-core/dist/` | Node 依赖和构建产物 | 可删除后用 `npm ci` / `npm run build` 重建 |
+| `%TEMP%\WechatRobot\voice` | 待发送/已发送语音临时文件 | 发送组件自动清理；异常残留可在停机后清理 |
+
+### 可选功能裁剪流程
+
+1. 先用 `git grep -n "模块名" -- core plugins auto services main.py` 查找导入、命令注册和配置读取。
+2. 再检查 `sample_config.json`、README、DEV_GUIDE 和 `requirements.txt`，同步删除对应配置和说明。
+3. 删除后运行 `python -m compileall -q core plugins auto services llm utils main.py`，并启动到不连接真实微信发送的测试环境验证。
+4. 不要删除 `llm/`、`core/`、`services/`、`utils/` 或受 Git 管理的 `weflow-core/resources/`；它们是框架运行依赖，不是缓存目录。
+
+如果只是通用部署，可在完成上述检查后按需裁剪 GSMPS/MC、锦标赛、ComfyUI 或某个命令插件；但 `auto/player_monitor.py` 与 `auto/tournament_monitor.py`、`plugins/theroom.py` 等存在交叉调用，必须作为一个依赖集合评估。
 
 ### 开发新插件可用的框架特性
 
@@ -502,3 +543,9 @@ save_document("key_name", {"field": "value"})
 ---
 
 > 特别感谢：WeFlow、WechatRobot、ComfyUI、mcstatus、DeepSeek 等开源项目。
+
+## 十二、会话脉冲门控
+
+`llm/conversation_pulse.py` 是 working 期的纯本地调度器：读取最近最多 120 条、最多约三分钟的现有群消息，计算一分钟密度、参与人数、二元片段重叠、直接提及和 Bot 静默时间，返回 `skip`、`defer` 或 `plan`。它不调用 LLM、不做 embedding，也不决定回复内容；只有 `plan` 才会调用一次既有的批量 LLM 流程。模型收到完整上下文及脉冲摘要后，仍可返回 `should_reply=false`，并应自行选择连贯话题而不是默认回复批次最后一条。
+
+碎片闲聊的 `plan` 是低频采样机会：默认要求一分钟至少 3 条人类消息、Bot 静默 6 分钟、同群距离上次该机会至少 6 分钟，并以 12% 概率抽样。`attention_nonsense_probability` 默认同样降为 12%。弱智吧内容只在独立随机 2--3 小时主动网页机会中现场拉取；若计时期间 Bot 成功发送超过 10 条分开的群文本，计时器立即重新随机。

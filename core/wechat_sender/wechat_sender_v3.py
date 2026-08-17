@@ -7,6 +7,7 @@
 """
 
 import logging
+import os
 import time
 from time import sleep
 from typing import Dict, Any
@@ -14,12 +15,14 @@ from typing import Dict, Any
 import psutil
 import pyautogui
 import pyperclip
+import win32api
 import win32con
 import win32gui
 import win32process
 import win32ts
 
 from core.wechat_sender.message_sender_interface import MessageSenderInterface, MessageSenderFactory
+from core.wechat_sender.virtual_mic import VirtualMicInjector, MAX_VOICE_DURATION
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -27,6 +30,14 @@ logger = logging.getLogger(__name__)
 # 设置 pyautogui 全局配置（必须在任何 pyautogui 操作之前设置）
 pyautogui.FAILSAFE = False  # 禁用 fail-safe，防止鼠标移动到角落时触发异常
 # pyautogui.PAUSE = 0.1  # 每次操作后的默认暂停时间（秒）
+
+# 语音消息相关常量
+VOICE_MAX_DURATION = 60          # 微信语音消息最大时长（秒）
+# 微信按住说话快捷键：长按 Shift（按住期间注入音频，注入完成再松开，默认左 Shift）
+VOICE_KEY_SHIFT_VK = 0xA0        # VK_LSHIFT 左 Shift
+VOICE_KEY_SHIFT_SCAN = 0x2A      # 左 Shift 扫描码
+# 按下快捷键后、开始注入前的等待时间（秒）：等微信进入录音状态，避免语音开头被截断
+VOICE_PRESS_TO_INJECT_DELAY = 0.5
 
 
 class WeChatSenderV3(MessageSenderInterface):
@@ -46,6 +57,9 @@ class WeChatSenderV3(MessageSenderInterface):
         self.process_names = ["WeChat.exe", "Weixin.exe", "wechat.exe"]
         self.default_group = config.get('default_group', '文件传输助手') if config else '存储统计报告群'
 
+        # dry-run：拦截所有对微信窗口的真实 UI 操作（用于全流程测试，可配合环境变量 WECHAT_SENDER_DRY_RUN=1）
+        self.dry_run = bool((config or {}).get('dry_run', False)) or os.environ.get('WECHAT_SENDER_DRY_RUN', '0') == '1'
+
     def initialize(self) -> bool:
         """初始化个人微信发送器"""
         try:
@@ -53,13 +67,19 @@ class WeChatSenderV3(MessageSenderInterface):
 
             # 查找微信进程
             if not self.find_target_process():
-                logger.error("未找到个人微信进程")
-                return False
+                if self.dry_run:
+                    logger.info("[dry-run] 未检测到微信进程，dry-run 模式下继续（不操作微信）")
+                else:
+                    logger.error("未找到个人微信进程")
+                    return False
 
             # 查找微信窗口
             if not self._find_wechat_windows():
-                logger.error("未找到个人微信窗口")
-                return False
+                if self.dry_run:
+                    logger.info("[dry-run] 未检测到微信窗口，dry-run 模式下继续（不操作微信）")
+                else:
+                    logger.error("未找到个人微信窗口")
+                    return False
 
             self.is_initialized = True
             logger.info("个人微信发送器初始化成功")
@@ -183,6 +203,11 @@ class WeChatSenderV3(MessageSenderInterface):
     def activate_application(self) -> bool:
         """激活个人微信窗口（使用三层降级策略）"""
         try:
+            # dry-run：拦截所有对微信窗口的真实操作
+            if self.dry_run:
+                logger.info("[dry-run] 拦截微信窗口激活，不执行任何真实窗口操作")
+                return True
+
             if not self.main_window_hwnd:
                 logger.error("个人微信窗口句柄不存在")
                 return False
@@ -242,6 +267,11 @@ class WeChatSenderV3(MessageSenderInterface):
     def search_group(self, group_name: str) -> bool:
         """搜索并进入个人微信群聊"""
         try:
+            # dry-run：拦截所有对微信的真实操作
+            if self.dry_run:
+                logger.info(f"[dry-run] 拦截群聊切换（{group_name}），不执行搜索/点击等真实操作")
+                return True
+
             logger.info(f"搜索个人微信群聊(ctrl+f): {group_name}")
 
             # 激活微信窗口
@@ -346,8 +376,9 @@ class WeChatSenderV3(MessageSenderInterface):
             bool: 发送是否成功
         """
         try:
-            # 退到桌面
-            pyautogui.hotkey('win', 'd')
+            # 退到桌面（dry-run 下拦截）
+            if not self.dry_run:
+                pyautogui.hotkey('win', 'd')
             logger.info(f"开始发送文本消息到个人微信：{target_group}")
 
             # 初始化发送器
@@ -380,8 +411,9 @@ class WeChatSenderV3(MessageSenderInterface):
             bool: 发送是否成功
         """
         try:
-            # 退到桌面
-            pyautogui.hotkey('win', 'd')
+            # 退到桌面（dry-run 下拦截）
+            if not self.dry_run:
+                pyautogui.hotkey('win', 'd')
             logger.info(f"开始发送文件到个人微信：{target_group}")
 
             # 初始化发送器
@@ -416,6 +448,111 @@ class WeChatSenderV3(MessageSenderInterface):
 
         except Exception as e:
             logger.error(f"个人微信自动发送文件失败：{e}")
+            return False
+        finally:
+            self.cleanup()
+
+    def _press_voice_key(self):
+        """长按 Shift（微信按住说话）"""
+        if self.dry_run:
+            logger.info("[dry-run] 模拟长按 Shift（不发送真实按键）")
+            return
+        # 单次长按到底，录音完成前不松开（避免快速按下-松开-再按下导致微信误判）
+        win32api.keybd_event(VOICE_KEY_SHIFT_VK, VOICE_KEY_SHIFT_SCAN, 0, 0)
+        logger.info("已长按 Shift（开始录音）")
+
+    def _release_voice_key(self):
+        """松开 Shift（结束录音）"""
+        if self.dry_run:
+            logger.info("[dry-run] 模拟松开 Shift（不发送真实按键）")
+            return
+        win32api.keybd_event(
+            VOICE_KEY_SHIFT_VK, VOICE_KEY_SHIFT_SCAN,
+            win32con.KEYEVENTF_KEYUP, 0,
+        )
+        logger.info("已松开 Shift（结束录音）")
+
+    def send_voice(self, voice_path: str, target_group: str, duration: float = None, start: float = None) -> bool:
+        """发送语音消息到指定的个人微信聊天对象
+
+        流程与文本/文件发送一致：先切换到目标群聊，然后长按 Shift，
+        同时将语音文件注入虚拟麦克风，注入完成后松开 Shift。
+
+        Args:
+            voice_path: 语音文件绝对路径（wav/mp3/flac/ogg 等 soundfile 支持的格式）
+            target_group: 目标聊天对象名称
+            duration: 语音长度（秒），最大 60，支持小数；None 表示按住 Shift 的时长 =
+            音频实际长度（超过 60 秒的语音直接截断为 60 秒）
+            start: 起始秒（从音频第 N 秒开始注入，支持小数），默认 0
+
+        Returns:
+            bool: 发送是否成功
+        """
+        try:
+            # 退到桌面（dry-run 下拦截）
+            if not self.dry_run:
+                pyautogui.hotkey('win', 'd')
+            logger.info(f"开始发送语音消息到个人微信：{target_group}")
+
+            # 校验语音文件
+            if not voice_path or not os.path.isfile(voice_path):
+                logger.error(f"语音文件不存在：{voice_path}")
+                return False
+
+            # 校验语音时长（最大 60 秒，支持小数）
+            try:
+                duration = float(duration) if duration is not None else None
+            except (TypeError, ValueError):
+                duration = None
+            if duration is not None and (duration < 1 or duration > VOICE_MAX_DURATION):
+                logger.error(f"语音时长超出限制（1~{VOICE_MAX_DURATION} 秒）：{duration}")
+                return False
+
+            # 校验起始秒（非负，支持小数；非法按 0 处理）
+            try:
+                start = float(start) if start is not None else None
+            except (TypeError, ValueError):
+                start = None
+            if start is not None and start < 0:
+                start = 0.0
+
+            # 初始化发送器
+            if not self.initialize():
+                logger.error("初始化个人微信发送器失败")
+                return False
+
+            # 与其他消息类型一致的切换到群聊流程
+            if not self.search_group(target_group):
+                logger.error(f"搜索聊天对象失败：{target_group}")
+                return False
+            if not self.activate_application():
+                logger.error("激活微信窗口失败")
+                return False
+
+            # 虚拟麦克风就绪检查
+            injector = VirtualMicInjector()
+            if not injector.is_available():
+                logger.error(
+                    f"未找到虚拟麦克风播放设备（{injector.playback_keyword}）。"
+                    f"请安装 VB-CABLE 并把微信语音输入设为 'CABLE Output'（或设置 WECHAT_VOICE_PLAYBACK_DEVICE）"
+                )
+                return False
+
+            # 长按 Shift 开始录音 -> 注入音频 -> 松开 Shift 结束录音
+            self._press_voice_key()
+            try:
+                # 按下快捷键后等 0.5s 再注入：等微信进入录音状态，避免语音开头被截断
+                time.sleep(VOICE_PRESS_TO_INJECT_DELAY)
+                played_seconds = injector.play(voice_path, duration=duration, start=start)
+                logger.info(f"音频注入完成，实际注入时长：{played_seconds:.2f}s")
+            finally:
+                self._release_voice_key()
+
+            logger.info(f"个人微信语音消息发送成功！目标：{target_group}")
+            return True
+
+        except Exception as e:
+            logger.error(f"个人微信自动发送语音消息失败：{e}", exc_info=True)
             return False
         finally:
             self.cleanup()
@@ -500,6 +637,27 @@ def main():
             sleep(0.1)
             print("=" * 60)
 
+        elif command == "voice":
+            # 发送语音消息到指定的聊天对象
+            # 用法：uv run wechat_sender_v3.py voice [聊天对象名] [语音文件] [时长秒(可选)]
+            if len(sys.argv) < 4:
+                print("❌ 参数不足！用法：uv run wechat_sender_v3.py voice [聊天对象名] [语音文件] [时长秒(可选，最大60)]")
+                sys.exit(1)
+
+            target_name = sys.argv[2]
+            voice_path = sys.argv[3]
+            duration = None
+            if len(sys.argv) > 4 and sys.argv[4].isdigit():
+                duration = int(sys.argv[4])
+
+            success = sender.send_voice(voice_path, target_name, duration)
+            if success:
+                print(f"✅ 语音消息发送成功！目标：{target_name}")
+            else:
+                print(f"❌ 语音消息发送失败！目标：{target_name}")
+            sleep(0.1)
+            print("=" * 60)
+
         elif command == "debug":
             # 退到桌面
             pyautogui.hotkey('win', 'd')
@@ -515,12 +673,14 @@ def main():
         else:
             print("未知命令。可用命令：")
             print("  send [聊天对象名] [聊天文本内容] - 发送文本消息到个人微信")
+            print("  voice [聊天对象名] [语音文件] [时长秒(可选)] - 发送语音消息到个人微信（需安装 VB-CABLE）")
             print("  debug - 获取调试信息")
             print("  test - 测试功能")
     else:
         print("个人微信自动发送工具 v3.0 (接口版)")
         print("用法:")
         print("  uv run wechat_sender_v3.py send [聊天对象名] [聊天文本内容] - 发送文本消息")
+        print("  uv run wechat_sender_v3.py voice [聊天对象名] [语音文件] [时长秒(可选)] - 发送语音消息（需 VB-CABLE）")
         print("  uv run wechat_sender_v3.py debug - 获取调试信息")
         print("  uv run wechat_sender_v3.py test - 测试功能")
 

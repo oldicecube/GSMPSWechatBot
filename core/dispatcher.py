@@ -4,7 +4,7 @@ import threading
 import sys
 
 from core.auto_registry import register_raw_message_target
-from core.sender import preview_delay_seconds, send
+from core.sender import preview_delay_seconds, register_send_listener, send
 from llm.core import LLMService
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -31,6 +31,10 @@ class Dispatcher:
         self.llm_prefix_bypass_wxids = set()
         self.auto_modules = {}
         self.prefix_mode = "strict"
+        # One bounded gate protects the provider and the synchronous web-tool
+        # loop from being multiplied by worker/proactive threads.
+        self._llm_slots = threading.BoundedSemaphore(1)
+        self._llm_direct_wait_seconds = 3.0
 
     # =========================================================
     # init plugins
@@ -291,8 +295,24 @@ class Dispatcher:
 
             if llm_config.get("enabled"):
                 self.llm_service = LLMService()
+                max_concurrent = max(
+                    1,
+                    min(int(self.llm_service.config.get("max_concurrent_requests", 1) or 1), 4),
+                )
+                self._llm_slots = threading.BoundedSemaphore(max_concurrent)
+                try:
+                    self._llm_direct_wait_seconds = max(
+                        0.0,
+                        min(float(self.llm_service.config.get("direct_request_wait_seconds", 3) or 3), 10.0),
+                    )
+                except (TypeError, ValueError):
+                    self._llm_direct_wait_seconds = 3.0
                 self.llm_service.set_proactive_callback(self._dispatch_background_batch)
                 self.llm_service.proactive_reply.set_cycle_end_callback(self._curate_cycle)
+                register_send_listener(
+                    "llm-proactive-web-message-counter",
+                    self._on_successful_bot_send,
+                )
             else:
                 self.llm_service = None
         except Exception as e:
@@ -301,14 +321,31 @@ class Dispatcher:
             self.llm_intercept_auto_plugins = set()
             self.llm_prefix_bypass_wxids = set()
 
+    def _on_successful_bot_send(self, target=None, mode=None, content=None, file_path=None):
+        """Count each successfully sent Bot text for proactive-web timing."""
+        if mode != "wechat_text" or not self.llm_service:
+            return
+        group_id = str(target or "").strip()
+        if not group_id:
+            return
+        self.llm_service.proactive_reply.record_sent_bot_message(group_id, 1)
+
     def _curate_cycle(self, group_id, context, messages):
         if not self.llm_service:
             return False
-        return self.llm_service.curate_cycle(
-            group_id,
-            context=context,
-            cycle_messages=messages,
-        )
+        # Cycle curation also performs synchronous LLM/tool work. Keep it in
+        # the same provider budget as foreground and proactive batches.
+        if not self._llm_slots.acquire(blocking=False):
+            print(f"[LLM BUSY] skip cycle curation group={group_id}", flush=True)
+            return False
+        try:
+            return self.llm_service.curate_cycle(
+                group_id,
+                context=context,
+                cycle_messages=messages,
+            )
+        finally:
+            self._llm_slots.release()
 
     def _can_forward_to_llm(self, context):
         if not self.llm_service:
@@ -367,6 +404,40 @@ class Dispatcher:
         attention_check=False,
         cycle_id=None,
     ):
+        # Attention and ordinary autonomous pulls are cheap to skip when a
+        # request is already using the provider. Direct prefix/@ requests get
+        # a short wait so user-visible interactions retain priority.
+        direct = batch_messages is None or bool(force_reply)
+        wait_seconds = self._llm_direct_wait_seconds if direct else 0.0
+        acquired = self._llm_slots.acquire(timeout=wait_seconds)
+        if not acquired:
+            print(
+                f"[LLM BUSY] skip batch={batch_messages is not None} "
+                f"attention={attention_check} trigger={trigger_source}",
+                flush=True,
+            )
+            return None
+        try:
+            return self._dispatch_llm_unlimited(
+                context,
+                batch_messages=batch_messages,
+                force_reply=force_reply,
+                trigger_source=trigger_source,
+                attention_check=attention_check,
+                cycle_id=cycle_id,
+            )
+        finally:
+            self._llm_slots.release()
+
+    def _dispatch_llm_unlimited(
+        self,
+        context,
+        batch_messages=None,
+        force_reply=False,
+        trigger_source=None,
+        attention_check=False,
+        cycle_id=None,
+    ):
         try:
             if batch_messages is not None:
                 result = self.llm_service.handle_batch_message(
@@ -382,6 +453,7 @@ class Dispatcher:
                     nonsense_opportunity=bool(context.get("_nonsense_opportunity")),
                     slang_emotional_opportunity=bool(context.get("_slang_emotional_opportunity")),
                     tieba_opportunity=bool(context.get("_tieba_opportunity")),
+                    proactive_web_opportunity=bool(context.get("_proactive_web_opportunity")),
                 )
             else:
                 result = self.llm_service.handle_message(

@@ -113,3 +113,8 @@ weclone_reference/
 /tests/
 /tools/
 prompt.txt
+# Local one-off LLM cache probe output
+/_cache_probe_results.txt
+
+# Locally downloaded VB-CABLE installer cache
+/scripts/vb-cable/

@@ -18,6 +18,7 @@ class Worker:
         self.router = router
         self.dispatcher = dispatcher
         self.config = config or {}
+        self._task_local = threading.local()
         self.memory_manager = self._build_memory_manager()
         self.long_term_memory = self._build_long_term_memory()
         try:
@@ -39,6 +40,21 @@ class Worker:
     # 🚀 主线程
     # =========================================================
     def run(self):
+        """Keep the consumer alive when one malformed message/plugin dies."""
+        while True:
+            try:
+                self._run_loop()
+                return
+            except Exception as exc:
+                if getattr(self._task_local, "active", False):
+                    try:
+                        self.queue.task_done()
+                    except Exception:
+                        pass
+                    self._task_local.active = False
+                print(f"[WORKER FATAL] consumer restarted: {type(exc).__name__}: {exc}", flush=True)
+
+    def _run_loop(self):
         print("[WORKER] 线程启动")
 
         while True:
@@ -47,12 +63,15 @@ class Worker:
             except queue_lib.Empty:
                 continue
 
+            self._task_local.active = True
+
             print("[WORKER] 收到任务")
             self._listen_group_message(msg)
 
             parsed = self.router.parse(msg)
 
             if not parsed:
+                self._finish_task()
                 print("[WORKER] 未匹配命令")
                 continue
 
@@ -125,6 +144,7 @@ class Worker:
                 print("[WORKER DEBUG] raw result =", result)
 
                 if not result:
+                    self._finish_task()
                     print("[WORKER] 空返回，跳过")
                     continue
 
@@ -138,11 +158,13 @@ class Worker:
 
                     if isinstance(result.get("messages"), list):
                         self._send_structured_result(target, result)
+                        self._finish_task()
                         continue
 
                     content = result.get("content")
 
                     if content is None or content == "":
+                        self._finish_task()
                         print("[WORKER] content 为空，丢弃")
                         continue
 
@@ -154,6 +176,7 @@ class Worker:
                         mode=mode,
                         delay_seconds=delay_seconds
                     )
+                    self._finish_task()
                     continue
 
                 # =========================================================
@@ -169,12 +192,22 @@ class Worker:
                         mode="wechat_text",
                         delay_seconds=context.get("planned_send_delay_seconds")
                     )
+                    self._finish_task()
                     continue
 
                 # =========================================================
                 # 🧠 3. 其他类型直接丢弃
                 # =========================================================
                 print("[WORKER] unknown result type:", type(result))
+                self._finish_task()
+
+    def _finish_task(self):
+        if not getattr(self._task_local, "active", False):
+            return
+        try:
+            self.queue.task_done()
+        finally:
+            self._task_local.active = False
 
     def _build_memory_manager(self):
         try:

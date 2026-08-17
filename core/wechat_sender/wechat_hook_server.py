@@ -19,7 +19,7 @@ import pyautogui
 import win32gui
 
 from core.wechat_sender.wechat_sender_v3 import WeChatSenderV3
-from core.wechat_sender.file_down import download_file
+from core.wechat_sender.file_down import download_file, download_voice_file, is_in_voice_temp_dir
 from core.wechat_sender.file_copy import copy_file_to_clipboard
 
 # 配置日志
@@ -99,24 +99,102 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
                 self._send_error_response("无效的聊天对象名", "target 必须是非空字符串")
                 return
             
-            # 获取 content 和 file 字段
+            # 获取 content / file / voice / duration 字段
             message_content = data.get('content')
             file_path = data.get('file')
+            voice_path = data.get('voice')
+            duration = data.get('duration')
+            voice_start = data.get('start')
             
-            # 验证 content 和 file 只能有一个有值
+            # 验证 content / file / voice 只能有一个有值
             has_content = message_content is not None and message_content != ''
             has_file = file_path is not None and file_path != ''
-            
-            if not has_content and not has_file:
-                self._send_error_response("缺少消息内容", "请求体必须包含'content'字段（消息内容）或'file'字段（文件路径）")
+            has_voice = voice_path is not None and str(voice_path).strip() != ''
+
+            if not has_content and not has_file and not has_voice:
+                self._send_error_response(
+                    "缺少消息内容",
+                    "请求体必须包含'content'（消息内容）、'file'（文件路径）或'voice'（语音文件路径）之一"
+                )
                 return
-            
-            if has_content and has_file:
-                self._send_error_response("参数冲突", "'content'和'file'字段不能同时有值，请只使用其中一个")
+
+            if (has_content and has_file) or (has_content and has_voice) or (has_file and has_voice):
+                self._send_error_response(
+                    "参数冲突",
+                    "'content'、'file'和'voice'字段不能同时有值，请只使用其中一个"
+                )
                 return
             
             sender = self._get_sender()
             
+            # 处理语音发送
+            if has_voice:
+                # 校验语音时长（1~60 秒，支持小数）
+                try:
+                    duration = float(duration) if duration is not None else None
+                except (TypeError, ValueError):
+                    self._send_error_response("无效的语音时长", "duration 必须是 1~60 之间的数字（支持小数）")
+                    return
+                if duration is not None and (duration < 1 or duration > 60):
+                    self._send_error_response("语音时长超出限制", "duration 必须在 1~60 秒之间")
+                    return
+                # 校验起始秒（非负，支持小数；非法按 0 处理）
+                try:
+                    voice_start = float(voice_start) if voice_start is not None else None
+                except (TypeError, ValueError):
+                    self._send_error_response("无效的起始秒", "start 必须是非负数字（支持小数）")
+                    return
+                if voice_start is not None and voice_start < 0:
+                    voice_start = 0.0
+
+                local_voice_path = None
+                try:
+                    # 判断是否为远程文件
+                    if str(voice_path).startswith('http://') or str(voice_path).startswith('https://'):
+                        logger.info(f"检测到远程语音文件，开始下载：{voice_path}")
+                        try:
+                            local_voice_path = download_voice_file(voice_path)
+                            logger.info(f"语音文件下载成功：{local_voice_path}")
+                        except Exception as e:
+                            self._send_error_response("语音文件下载失败", str(e), status_code=500)
+                            return
+                    else:
+                        # 本地文件，验证文件是否存在
+                        if not os.path.exists(voice_path):
+                            self._send_error_response("语音文件不存在", f"本地语音文件不存在：{voice_path}")
+                            return
+                        local_voice_path = voice_path
+
+                    logger.info(f"收到语音发送请求：目标={chat_target}, 语音={local_voice_path}, 时长={duration}, 起始={voice_start}")
+
+                    # 发送语音
+                    success = sender.send_voice(local_voice_path, chat_target, duration, voice_start)
+
+                    if success:
+                        logger.info(f"语音发送成功：{chat_target}")
+                        self._send_success_response({
+                            "status": "success",
+                            "message": "语音发送成功"
+                        })
+                    else:
+                        logger.error(f"语音发送失败：{chat_target}")
+                        self._send_error_response(
+                            "语音发送失败",
+                            "微信语音发送失败，请检查微信是否正常运行、是否已安装 VB-CABLE 并选中 CABLE Output 作为麦克风",
+                            status_code=500
+                        )
+                finally:
+                    # 发送完成后，由发送组件删除统一语音临时目录中的音频文件
+                    if local_voice_path and is_in_voice_temp_dir(local_voice_path):
+                        try:
+                            os.remove(local_voice_path)
+                            logger.info(f"已删除语音临时文件：{local_voice_path}")
+                        except OSError as e:
+                            logger.warning(f"删除语音临时文件失败：{local_voice_path}，原因：{e}")
+                sleep(0.1)
+                print("=" * 60)
+                return
+
             # 处理文件发送
             if has_file:
                 # 判断是否为远程文件
@@ -192,6 +270,22 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
         try:
             parsed_path = urlparse(self.path)
             
+            # /voice/status 路径：虚拟麦克风注入器状态
+            if parsed_path.path.strip('/') == 'voice/status':
+                from core.wechat_sender.virtual_mic import VirtualMicInjector
+                injector = VirtualMicInjector()
+                result = {
+                    "service": "WeChat Voice Status API",
+                    "dry_run": os.environ.get('WECHAT_SENDER_DRY_RUN', '0') == '1',
+                    "virtual_mic": injector.describe(),
+                }
+                self.send_response(200 if injector.is_available() else 503)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps(result, ensure_ascii=False).encode('utf-8'))
+                return
+
             # /test 路径：测试微信窗口状态
             if parsed_path.path.strip('/') == 'test':
                 logger.info("收到测试请求")

@@ -199,7 +199,10 @@ def main():
         dedup=dedup
     )
 
-    threading.Thread(target=client.start, daemon=False).start()
+    # SSE receiving is the main service loop. Keeping it in the main thread
+    # keeps process lifecycle and signal handling in one well-defined place.
+    print("[bot] SSE client running in main thread", flush=True)
+    client.start()
 
 
 if __name__ == "__main__":

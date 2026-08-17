@@ -20,6 +20,92 @@ def _safe_float(value, default):
         return default
 
 
+def _normalize_api_entries(llm_config, default_timeout):
+    """Normalize the multi-LLM API pool list from ``llm.apis``.
+
+    Each entry: {name, protocol, model, api_key, base_url, timeout_seconds}.
+    Falls back to the legacy single ``model``/``api_key``/``api_base`` fields
+    when ``apis`` is absent or empty.
+    """
+    entries = []
+    raw_apis = llm_config.get("apis")
+    if isinstance(raw_apis, list):
+        for item in raw_apis:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or f"api{len(entries) + 1}"
+            protocol = str(item.get("protocol") or "openai").strip().lower()
+            if protocol not in {"openai", "responses", "anthropic"}:
+                protocol = "openai"
+            model = str(item.get("model") or "").strip()
+            api_key = str(item.get("api_key") or "").strip()
+            base_url = str(item.get("base_url") or item.get("api_base") or "").strip().rstrip("/")
+            if not model or not api_key or not base_url:
+                continue
+            timeout = _safe_float(item.get("timeout_seconds", default_timeout), default_timeout)
+            timeout = max(10.0, min(timeout, 120.0))
+            max_tokens = _safe_int(item.get("max_tokens", 0), 0)
+            # 显式调用优先级：越小越先调用；缺省按数组顺序（位置+1）。
+            priority = _safe_int(item.get("priority", 0), 0)
+            if priority <= 0:
+                priority = len(entries) + 1
+            entries.append({
+                "name": name,
+                "protocol": protocol,
+                "model": model,
+                "api_key": api_key,
+                "base_url": base_url,
+                "timeout_seconds": timeout,
+                "max_tokens": max(1, max_tokens) if max_tokens > 0 else 0,
+                "priority": priority,
+                # 协议缓存开关：anthropic 走 cache_control；responses 走 prompt_cache_key。
+                "cache": bool(item.get("cache", True)),
+                "prompt_cache_key": str(item.get("prompt_cache_key") or "").strip(),
+                # 缓存范围：full=完整前缀缓存；system=仅系统提示词可缓存；
+                # none=不可缓存。缺省按协议在 provider 内决定。
+                "cache_scope": str(item.get("cache_scope") or "").strip().lower(),
+                # Anthropic cache_control 的 TTL：空=默认5分钟；"1h"=1小时。
+                "cache_ttl": str(item.get("cache_ttl") or "").strip().lower(),
+                # Anthropic cache_mode：auto=网关自动缓存（仅声明 TTL，请求顶层 auto_cached=true）；
+                # manual=消息内注入 cache_control 断点；off=关闭缓存。
+                "cache_mode": str(item.get("cache_mode") or "").strip().lower(),
+            })
+    if not entries:
+        model = str(llm_config.get("model") or "").strip()
+        api_key = str(llm_config.get("api_key") or "").strip()
+        base_url = str(llm_config.get("api_base") or llm_config.get("base_url") or "").strip().rstrip("/")
+        if model and api_key:
+            timeout = _safe_float(llm_config.get("request_timeout_seconds", default_timeout), default_timeout)
+            timeout = max(10.0, min(timeout, 120.0))
+            entries.append({
+                "name": "default",
+                "protocol": "openai",
+                "model": model,
+                "api_key": api_key,
+                "base_url": base_url or "https://api.deepseek.com",
+                "timeout_seconds": timeout,
+                "max_tokens": 0,
+                "cache": True,
+                "prompt_cache_key": "",
+                "cache_scope": "full",
+                "cache_mode": "auto",
+                "cache_ttl": "",
+                "priority": 1,
+            })
+    return entries
+
+
+def _normalize_time_slots(config):
+    """Expose the top-level ``time_slots`` list to LLM modules (e.g. the pool's
+    daily reset uses the start of the no-response window)."""
+    slots = config.get("time_slots") or []
+    if isinstance(slots, dict):
+        slots = [slots]
+    if not isinstance(slots, list):
+        return []
+    return [dict(item) for item in slots if isinstance(item, dict)]
+
+
 def _load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -74,6 +160,10 @@ def get_llm_config():
         "context_compression_target_tokens": max(
             5000, _safe_int(llm_config.get("context_compression_target_tokens", 160000), 160000)
         ),
+        # 聊天上下文缓存前缀预算（token）：把历史拆成「稳定前缀(缓存断点) + 动态尾部」。
+        "cache_prefix_tokens": max(
+            0, _safe_int(llm_config.get("cache_prefix_tokens", 24000), 24000)
+        ),
         # Backward-compatible aliases for modules that still read the old names.
         "max_history": max(0, max_history_chars),
         "history_expire_ms": llm_config["history_expire_ms"],
@@ -92,7 +182,43 @@ def get_llm_config():
         "original_message_max_chars": _safe_int(
             llm_config.get("original_message_max_chars", 16000), 16000
         ),
+        # Keep provider work bounded across the Worker pool and proactive
+        # timer threads. The dispatcher applies the actual semaphore.
+        "max_concurrent_requests": max(
+            1, min(_safe_int(llm_config.get("max_concurrent_requests", 1), 1), 4)
+        ),
+        "direct_request_wait_seconds": max(
+            0.0, min(_safe_float(llm_config.get("direct_request_wait_seconds", 3), 3.0), 10.0)
+        ),
+        "tool_loop_timeout_seconds": max(
+            10.0, min(_safe_float(llm_config.get("tool_loop_timeout_seconds", 45), 45.0), 120.0)
+        ),
+        "request_timeout_seconds": max(
+            10.0, min(_safe_float(llm_config.get("request_timeout_seconds", 45), 45.0), 120.0)
+        ),
+        # 缓存成本模型：命中:未命中价格比（如 DeepSeek 约 1:5.428）。
+        "cache_cost_ratio": max(1.0, _safe_float(llm_config.get("cache_cost_ratio", 5.428), 5.428)),
+        # 缓存命中率估计（用于压缩成本决策）。
+        "cache_hit_rate": min(0.99, max(0.0, _safe_float(llm_config.get("cache_hit_rate", 0.85), 0.85))),
+        # 上下文压缩回收成本的最长请求数（回本周期）。
+        "cache_break_even_horizon": max(1, _safe_int(llm_config.get("cache_break_even_horizon", 40), 40)),
     }
+
+
+    # ---- 多 LLM API 池 ----
+    request_timeout = result["request_timeout_seconds"]
+    result["apis"] = _normalize_api_entries(llm_config, request_timeout)
+    if result["apis"]:
+        # 向后兼容：主入口指向优先级最高的 API（priority 越小越先）。
+        _primary = sorted(result["apis"], key=lambda e: int(e.get("priority") or 0))[0]
+        result["api_key"] = _primary["api_key"]
+        result["api_base"] = _primary["base_url"]
+        result["model"] = _primary["model"]
+    else:
+        result["api_key"] = ""
+        result["api_base"] = ""
+    # 每日重置时刻依赖顶部 time_slots（bot 不响应时间段起点）。
+    result["time_slots"] = _normalize_time_slots(config)
 
     learning = llm_config.get("learning")
     if not isinstance(learning, dict):
@@ -181,6 +307,17 @@ def get_llm_config():
     if not isinstance(auto_reply, dict):
         auto_reply = {"enabled": prefix_mode == "mixed"}
     result["auto_reply"] = dict(auto_reply)
+    result["auto_reply"]["reply_trigger_mode"] = str(
+        auto_reply.get("reply_trigger_mode", "conversation_pulse") or "conversation_pulse"
+    ).strip().lower()
+    if result["auto_reply"]["reply_trigger_mode"] not in {"frequency", "reply_necessity", "conversation_pulse"}:
+        result["auto_reply"]["reply_trigger_mode"] = "conversation_pulse"
+    try:
+        result["auto_reply"]["reply_necessity_threshold"] = max(
+            0, min(200, int(auto_reply.get("reply_necessity_threshold", 35)))
+        )
+    except (TypeError, ValueError):
+        result["auto_reply"]["reply_necessity_threshold"] = 35
 
     intercept_auto_plugins = llm_config.get("intercept_auto_plugins", [])
     if isinstance(intercept_auto_plugins, str):
@@ -267,14 +404,13 @@ def get_llm_config():
 
 
 def get_api_key():
-    config = _load_config()
-    llm_config = config.get("llm")
-
-    if not isinstance(llm_config, dict):
-        raise ValueError("Missing llm config")
-
-    api_key = str(llm_config.get("api_key") or "").strip()
+    """Return the highest-priority LLM API entry's key (backward compatible)."""
+    llm_config = get_llm_config()
+    apis = llm_config.get("apis") or []
+    if not apis:
+        raise ValueError("Missing llm api entries")
+    primary = sorted(apis, key=lambda e: int(e.get("priority") or 0))[0]
+    api_key = str(primary.get("api_key") or "").strip()
     if not api_key:
         raise ValueError("Missing llm api_key")
-
     return api_key

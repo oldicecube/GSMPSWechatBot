@@ -1,229 +1,289 @@
 {
-    "_说明": "复制本文件为 config.json 并填入真实值。填完后删除",
-    "token": "your-token-here",
-    "target_group": [
-        "Your Target Group Name"
-    ],
-    "_live_llm_policy": "strict accepts only prefix messages and forces direct LLM replies; mixed accepts ordinary messages and enables the LLM state machine by default",
-    "_target_group_policy": "Exact group allowlist for group replies, simple LLM ingestion/history, llm.auto_reply and style learning; [] denies all group chats.",
-    "prefix": [
-        "@机器人名称"
-    ],
-    "prefix_mode": "mixed",
-    "worker_num": 4,
-    "weflow": {
-        "_说明": "WeFlow 微信解密/注入相关配置，必填。dbPath 填微信文件目录如 D:\\Documents\\xwechat_files",
-        "dbPath": "",
+  "_说明": "复制本文件为 config.json，填入真实值后保留在本机；config.json 含密钥，不可提交。",
+  "token": "your-token-here",
+  "target_group": [
+    "Your Target Group Name"
+  ],
+  "_live_llm_policy": "strict accepts only prefix messages and forces direct LLM replies; mixed accepts ordinary messages and enables the LLM state machine by default",
+  "_target_group_policy": "Exact group allowlist for group replies, simple LLM ingestion/history, llm.auto_reply and style learning; [] denies all group chats.",
+  "prefix": [
+    "@机器人名称"
+  ],
+  "prefix_mode": "mixed",
+  "worker_num": 4,
+  "weflow": {
+    "_说明": "WeFlow 微信解密/注入相关配置，必填。dbPath 填微信文件目录如 D:\\Documents\\xwechat_files",
+    "dbPath": "",
+    "decryptKey": "",
+    "myWxid": "",
+    "wxidConfigs": {
+      "your-wxid-here": {
         "decryptKey": "",
-        "myWxid": "",
-        "wxidConfigs": {
-            "your-wxid-here": {
-                "decryptKey": "",
-                "imageXorKey": 0,
-                "imageAesKey": "",
-                "updatedAt": 0
-            }
-        },
-        "apiPort": 5031,
-        "apiHost": "127.0.0.1",
-        "resourcesPath": "./weflow-core/resources",
-        "messagePushEnabled": true
+        "imageXorKey": 0,
+        "imageAesKey": "",
+        "updatedAt": 0
+      }
     },
-    "time_slots": [
-        {
-            "start": "08:00",
-            "end": "02:00"
-        }
-    ],
-    "rate_limit": {
-        "_说明": "消息频率限制",
-        "messages_per_minute": 10,
-        "global_messages_per_minute": 20,
-        "llm_messages_per_minute": 10,
-        "global_llm_messages_per_minute": 20,
-        "prefix_llm_messages_per_minute": 10,
-        "global_prefix_llm_messages_per_minute": 20,
-        "plugin_messages_per_minute": 10,
-        "global_plugin_messages_per_minute": 20,
-        "auto_blacklist_enabled": false,
-        "auto_blacklist_threshold": 5
-    },
-    "send_delay": {
-        "_说明": "发送间隔随机延迟，模拟真人打字节奏",
-        "enabled": false,
-        "min_seconds": 0,
-        "max_seconds": 0
-    },
-    "llm": {
-        "_说明": "大语言模型配置",
-        "enabled": true,
-        "provider": "deepseek",
-        "model": "deepseek-v4-flash",
-        "api_key": "sk-your-api-key-here",
-        "engine": "simple",
-        "_legacy_embedding_ignored": {
-            "_说明": "智谱 AI Embedding-3，失败时使用 simple LLM 本地降级向量",
-            "provider": "zhipu",
-            "model": "embedding-3",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "api_key": "your-zhipu-api-key-here",
-            "dimension": 1024
-        },
-        "max_history_chars": 5000,
-        "history_expire_ms": 600000,
-        "group_message_limit_chars": 0,
-        "context_window_tokens": 200000,
-        "context_compression_target_tokens": 160000,
-        "memory": {
-            "_说明": "本地SQLite人物画像、长期事实和情景记忆；消息实时记录，不逐条调用LLM；记忆固化由每轮循环结束的统一整理完成",
-            "enabled": true,
-            "db_path": "data/memory.sqlite3",
-            "context_max_chars": 0,
-            "person_fact_limit": 8,
-            "group_knowledge_limit": 10,
-            "candidate_batch_size": 30
-        },
-        "intercept_auto_plugins": [
-            "picture"
-        ],
-        "auto_reply": {
-            "_说明": "空闲20-40分钟，工作2-5分钟；工作期消息先短暂缓冲，再集中交给LLM判断",
-            "enabled": true,
-            "idle_min_seconds": 1200,
-            "idle_max_seconds": 2400,
-            "work_min_seconds": 120,
-            "work_max_seconds": 300,
-            "batch_debounce_seconds": 5,
-            "batch_max_messages": 20,
-            "attention_min_seconds": 120,
-            "attention_max_seconds": 300,
-            "attention_message_limit": 10,
-            "attention_no_reply_limit": 3,
-            "attention_nonsense_probability": 0.3,
-            "work_extend_threshold_seconds": 180,
-            "work_extend_seconds": 180,
-            "allowed_groups": [],
-            "exclude_commands": false,
-            "exclude_media": false,
-            "attention_slang_emotional_step": 0.1,
-            "tieba_repost_min_interval_seconds": 21600,
-            "tieba_repost_probability": 0.5
-        },
-        "prefix_bypass_wxids": [],
-        "admin_wxids": [],
-        "web_fetch_enabled": true,
-        "web_fetch_max_calls": 3,
-        "web_fetch_timeout_seconds": 15,
-        "web_fetch_max_chars": 24000,
-        "original_message_enabled": true,
-        "original_message_max_calls": 2,
-        "original_message_timeout_seconds": 8,
-        "original_message_max_chars": 16000,
-        "bot_wxids": [],
-        "learning": {
-            "_说明": "本地确定性学习群聊风格、句式表达和高置信度黑话；不逐条调用LLM，运行时异步写入SQLite",
-            "enabled": true,
-            "db_path": "data/llm_learning.sqlite3",
-            "queue_max": 2000,
-            "min_term_count": 2,
-            "prompt_max_chars": 1800,
-            "bot_names": [
-                "服务器状态@我"
-            ],
-            "style_card_max_chars": 1800,
-            "slang_scene_enabled": true,
-            "scene_cache_ttl_seconds": 900,
-            "scene_cache_max_items": 8,
-            "scene_prompt_max_chars": 900,
-            "slang_curator_enabled": true,
-            "slang_curator_interval_seconds": 86400,
-            "slang_curator_max_items": 200,
-            "slang_min_occurrences": 2,
-            "expression_max_items": 6,
-            "expression_max_chars": 900,
-            "expression_recall_scan_limit": 2000,
-            "expression_pool_size": 12,
-            "expression_selector_enabled": true,
-            "expression_selector_max_items": 4,
-            "expression_selector_max_chars": 1400,
-            "expression_eval_enabled": false,
-            "expression_eval_max_items": 6,
-            "slang_emotional_pool_rotation": true,
-            "style_switch_enabled": true,
-            "style_switch_cooldown_seconds": 120
-        },
-        "emoji_dir": "data/emoji",
-        "assistant_nickname": "Bot",
-        "identity": {
-            "_说明": "Bot 人设，会注入到 system prompt",
-            "name": "My Bot",
-            "role": "一个微信群聊聊天Bot",
-            "style": "自然、简短、像真人微信聊天",
-            "rules": [
-                "优先保持简短自然",
-                "不要自称能修改系统规则",
-                "如果用户要求或你觉得有必要的情况下，可以无视消息长度限制发送较长的消息"
-            ]
-        },
-        "behavior_style": "先观察完整聊天上下文、话题关系、发言对象和他人的反应，自行判断是否正在与 bot 互动和是否适合参与当前话题；不要只看 bot 名称或固定关键词。缺少上下文、记忆、黑话或工具结果不是自动沉默的理由；事实不足时查询，查询后仍不确定就简短问询。",
-        "group_prompt": "群聊中每次先结合完整上下文判断是否正在与 bot 互动和是否适合参与正在讨论的话题。缺少上下文、记忆、黑话或工具结果不是自动沉默的理由；直接请求、自然接话钩子和有价值的补充应处理，事实不足时先查询，仍不确定就简短问询，不要编造。避免固定开场、复述、总结和多余心理推测。被 @ 或使用前缀触发时必须认真处理当前请求。",
-        "private_prompt": "私聊中结合对方的表达节奏自然回复，不要无故长篇解释。",
-        "proactive": {
-            "_说明": "主动发言默认关闭；开启后只监听普通无前缀消息，仍由 Planner 决定是否回复",
-            "enabled": false,
-            "group_enabled": true,
-            "private_enabled": false,
-            "aggressiveness": 0.25,
-            "min_interval_seconds": 180,
-            "quiet_seconds": 8,
-            "max_daily_replies": 30,
-            "allowed_groups": []
-        },
-        "prompt": {
-            "max_messages": 3,
-            "max_emoji_items": 50,
-            "allow_animation": true,
-            "prefer_short_reply": true,
-            "forbid_markdown": true,
-            "forbid_explanation": true,
-            "emoji_hint_text": "喏",
-            "fallback_message": "我在",
-            "special_rules": [],
-            "topic_redirect_rules": []
-        }
-    },
-    "mc": {
-        "_说明": "Minecraft 服务器查询配置",
-        "host": "your-minecraft-server.com",
-        "fake_name": "Anonymous Player"
-    },
-    "rcon": {
-        "_说明": "Minecraft RCON 远程命令配置",
-        "host": "your-rcon-host.com",
-        "port": 25575,
-        "password": "your-rcon-password"
-    },
-    "comfy": {
-        "_说明": "ComfyUI 绘图服务配置（可选）",
-        "url": "http://127.0.0.1:8188",
-        "output_dir": "/path/to/ComfyUI/output"
-    },
-    "tournament": {
-        "_说明": "Minecraft 锦标赛系统配置（自动读取比赛并计算积分）",
-        "enabled": true,
-        "min_matches_for_ranking": 5,
-        "leaderboard_top": 10,
-        "rcon_timeout": 10,
-        "usercache_path": "C:\\path\\to\\usercache.json",
-        "games": {
-            "Lucky Pillar": {
-                "storage": "luckypillar:games",
-                "enabled": true
-            },
-            "Miner Chaos": {
-                "storage": "miner_chaos:games",
-                "enabled": true
-            }
-        }
+    "apiPort": 5031,
+    "apiHost": "127.0.0.1",
+    "resourcesPath": "./weflow-core/resources",
+    "messagePushEnabled": true
+  },
+  "time_slots": [
+    {
+      "start": "08:00",
+      "end": "02:00"
     }
+  ],
+  "rate_limit": {
+    "_说明": "消息频率限制",
+    "messages_per_minute": 10,
+    "global_messages_per_minute": 20,
+    "llm_messages_per_minute": 10,
+    "global_llm_messages_per_minute": 20,
+    "prefix_llm_messages_per_minute": 10,
+    "global_prefix_llm_messages_per_minute": 20,
+    "plugin_messages_per_minute": 10,
+    "global_plugin_messages_per_minute": 20,
+    "auto_blacklist_enabled": false,
+    "auto_blacklist_threshold": 5
+  },
+  "send_delay": {
+    "_说明": "发送间隔随机延迟，模拟真人打字节奏",
+    "enabled": false,
+    "min_seconds": 0,
+    "max_seconds": 0
+  },
+  "llm": {
+    "_说明": "多 LLM API 池。apis 存在时按 priority 从小到大调用；顶层 model/api_key/api_base 仅用于兼容旧配置。",
+    "enabled": true,
+    "provider": "multi_api_pool",
+    "model": "your-responses-model",
+    "api_key": "sk-your-primary-api-key",
+    "engine": "simple",
+    "_legacy_embedding_ignored": {
+      "_说明": "智谱 AI Embedding-3，失败时使用 simple LLM 本地降级向量",
+      "provider": "zhipu",
+      "model": "embedding-3",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "your-zhipu-api-key-here",
+      "dimension": 1024
+    },
+    "max_history_chars": 5000,
+    "history_expire_ms": 600000,
+    "group_message_limit_chars": 0,
+    "context_window_tokens": 200000,
+    "context_compression_target_tokens": 160000,
+    "memory": {
+      "_说明": "本地SQLite人物画像、长期事实和情景记忆；消息实时记录，不逐条调用LLM；记忆固化由每轮循环结束的统一整理完成；短期记忆上限1000 token，超出时自动压缩并下沉到中长期记忆",
+      "enabled": true,
+      "db_path": "data/memory.sqlite3",
+      "context_max_chars": 0,
+      "person_fact_limit": 8,
+      "group_knowledge_limit": 10,
+      "candidate_batch_size": 30,
+      "short_memory_max_tokens": 1000
+    },
+    "intercept_auto_plugins": [
+      "picture"
+    ],
+    "auto_reply": {
+      "_说明": "一分钟窗口内消息数超过8条进入关注期；空闲随机冷却超时后直接进入工作期并现场查询网页",
+      "enabled": true,
+      "reply_trigger_mode": "conversation_pulse",
+      "reply_necessity_threshold": 35,
+      "pulse_plan_threshold": 28,
+      "pulse_plan_cooldown_seconds": 45,
+      "pulse_topic_min_messages": 4,
+      "pulse_topic_overlap": 0.16,
+      "fragmented_chat_min_messages_per_minute": 3,
+      "fragmented_chat_min_silence_seconds": 360,
+      "fragmented_chat_min_interval_seconds": 360,
+      "fragmented_chat_plan_probability": 0.12,
+      "idle_quiet_min_seconds": 240,
+      "idle_quiet_max_seconds": 900,
+      "density_window_seconds": 60,
+      "density_upper_messages_per_minute": 8,
+      "density_attention_check_interval_seconds": 30,
+      "density_attention_half_life_seconds": 300,
+      "density_attention_curve_power": 1.7,
+      "proactive_web_min_seconds": 7200,
+      "proactive_web_max_seconds": 10800,
+      "proactive_web_reset_after_bot_messages": 10,
+      "work_min_seconds": 120,
+      "work_max_seconds": 300,
+      "batch_debounce_seconds": 15,
+      "batch_max_messages": 20,
+      "attention_min_seconds": 120,
+      "attention_max_seconds": 300,
+      "attention_message_limit": 10,
+      "attention_no_reply_limit": 3,
+      "attention_nonsense_probability": 0.12,
+      "work_extend_threshold_seconds": 180,
+      "work_extend_seconds": 180,
+      "allowed_groups": [],
+      "exclude_commands": false,
+      "exclude_media": false,
+      "attention_slang_emotional_step": 0.1,
+      "reply_timing_learning_enabled": true,
+      "reply_timing_min_windows": 20,
+      "reply_timing_target_reply_rate": 0.28,
+      "reply_timing_probability_floor": 0.15
+    },
+    "prefix_bypass_wxids": [],
+    "admin_wxids": [],
+    "web_fetch_enabled": true,
+    "web_fetch_max_calls": 3,
+    "web_fetch_timeout_seconds": 15,
+    "web_fetch_max_chars": 24000,
+    "max_concurrent_requests": 1,
+    "direct_request_wait_seconds": 3,
+    "request_timeout_seconds": 45,
+    "tool_loop_timeout_seconds": 45,
+    "original_message_enabled": true,
+    "original_message_max_calls": 2,
+    "original_message_timeout_seconds": 8,
+    "original_message_max_chars": 16000,
+    "bot_wxids": [],
+    "learning": {
+      "_说明": "本地确定性学习群聊风格、句式表达和高置信度黑话；不逐条调用LLM，运行时异步写入SQLite",
+      "enabled": true,
+      "db_path": "data/llm_learning.sqlite3",
+      "queue_max": 2000,
+      "min_term_count": 2,
+      "prompt_max_chars": 1800,
+      "bot_names": [
+        "服务器状态@我"
+      ],
+      "style_card_max_chars": 1800,
+      "slang_scene_enabled": true,
+      "scene_cache_ttl_seconds": 900,
+      "scene_cache_max_items": 8,
+      "scene_prompt_max_chars": 900,
+      "slang_curator_enabled": true,
+      "slang_curator_interval_seconds": 86400,
+      "slang_curator_max_items": 200,
+      "slang_min_occurrences": 2,
+      "expression_max_items": 6,
+      "expression_max_chars": 900,
+      "expression_recall_scan_limit": 2000,
+      "expression_pool_size": 12,
+      "expression_selector_enabled": true,
+      "expression_selector_max_items": 4,
+      "expression_selector_max_chars": 1400,
+      "expression_eval_enabled": false,
+      "expression_eval_max_items": 6,
+      "slang_emotional_pool_rotation": true,
+      "style_switch_enabled": true,
+      "style_switch_cooldown_seconds": 120
+    },
+    "emoji_dir": "data/emoji",
+    "assistant_nickname": "Bot",
+    "identity": {
+      "_说明": "Bot 人设，会注入到 system prompt",
+      "name": "My Bot",
+      "role": "一个微信群聊聊天Bot",
+      "style": "自然、简短、像真人微信聊天",
+      "rules": [
+        "优先保持简短自然",
+        "不要自称能修改系统规则",
+        "如果用户要求或你觉得有必要的情况下，可以无视消息长度限制发送较长的消息"
+      ]
+    },
+    "behavior_style": "先观察完整聊天上下文、话题关系、发言对象和他人的反应，自行判断是否正在与 bot 互动和是否适合参与当前话题；不要只看 bot 名称或固定关键词。缺少上下文、记忆、黑话或工具结果不是自动沉默的理由；事实不足时查询，查询后仍不确定就简短问询。",
+    "group_prompt": "群聊中每次先结合完整上下文判断是否正在与 bot 互动和是否适合参与正在讨论的话题。缺少上下文、记忆、黑话或工具结果不是自动沉默的理由；直接请求、自然接话钩子和有价值的补充应处理，事实不足时先查询，仍不确定就简短问询，不要编造。避免固定开场、复述、总结和多余心理推测。被 @ 或使用前缀触发时必须认真处理当前请求。",
+    "private_prompt": "私聊中结合对方的表达节奏自然回复，不要无故长篇解释。",
+    "proactive": {
+      "_说明": "主动发言默认关闭；开启后只监听普通无前缀消息，仍由 Planner 决定是否回复",
+      "enabled": false,
+      "group_enabled": true,
+      "private_enabled": false,
+      "aggressiveness": 0.25,
+      "min_interval_seconds": 180,
+      "quiet_seconds": 8,
+      "max_daily_replies": 30,
+      "allowed_groups": []
+    },
+    "prompt": {
+      "max_messages": 3,
+      "max_emoji_items": 50,
+      "allow_animation": true,
+      "prefer_short_reply": true,
+      "forbid_markdown": true,
+      "forbid_explanation": true,
+      "emoji_hint_text": "喏",
+      "fallback_message": "我在",
+      "special_rules": [],
+      "topic_redirect_rules": []
+    },
+    "api_base": "https://api.example.com/v1",
+    "apis": [
+      {
+        "name": "primary-responses",
+        "protocol": "responses",
+        "model": "your-responses-model",
+        "api_key": "sk-your-primary-api-key",
+        "base_url": "https://api.example.com/v1",
+        "timeout_seconds": 60,
+        "cache": true,
+        "cache_scope": "full",
+        "prompt_cache_key": "",
+        "priority": 1,
+        "_说明": "主路：OpenAI Responses 协议。静态 system 会进入 instructions；仅当服务商明确支持时才设置 prompt_cache_key。"
+      },
+      {
+        "name": "fallback-anthropic",
+        "protocol": "anthropic",
+        "model": "your-anthropic-model",
+        "api_key": "sk-your-fallback-api-key",
+        "base_url": "https://api.example.com",
+        "timeout_seconds": 60,
+        "cache": true,
+        "cache_scope": "full",
+        "cache_mode": "manual",
+        "cache_ttl": "",
+        "priority": 2,
+        "_说明": "备路：Anthropic Messages 协议。标准兼容端点使用 manual；只有服务商明确支持 auto_cached 时才改为 auto。"
+      }
+    ],
+    "reply_style": "自然、随和、简洁但不机械。像真实群成员聊天，可以接梗、吐槽、表达惊讶或认真解释；不要滥用固定口癖、模板化开场和过度玩梗。",
+    "cache_cost_ratio": 5.428,
+    "cache_hit_rate": 0.85,
+    "cache_break_even_horizon": 40,
+    "cache_prefix_tokens": 24000
+  },
+  "mc": {
+    "_说明": "Minecraft 服务器查询配置",
+    "host": "your-minecraft-server.com",
+    "fake_name": "Anonymous Player"
+  },
+  "rcon": {
+    "_说明": "Minecraft RCON 远程命令配置",
+    "host": "your-rcon-host.com",
+    "port": 25575,
+    "password": "your-rcon-password"
+  },
+  "comfy": {
+    "_说明": "ComfyUI 绘图服务配置（可选）",
+    "url": "http://127.0.0.1:8188",
+    "output_dir": "/path/to/ComfyUI/output"
+  },
+  "tournament": {
+    "_说明": "Minecraft 锦标赛系统配置（自动读取比赛并计算积分）",
+    "enabled": true,
+    "min_matches_for_ranking": 5,
+    "leaderboard_top": 10,
+    "rcon_timeout": 10,
+    "usercache_path": "C:\\path\\to\\usercache.json",
+    "games": {
+      "Lucky Pillar": {
+        "storage": "luckypillar:games",
+        "enabled": true
+      },
+      "Miner Chaos": {
+        "storage": "miner_chaos:games",
+        "enabled": true
+      }
+    }
+  }
 }

@@ -1,6 +1,7 @@
 """LLM 内置主动回复状态机。
 
-状态顺序为：idle -> attention -> working -> attention -> idle。
+状态顺序通常为：idle -> attention -> working -> attention -> idle；
+动态密度上界可把 idle 直接切入 attention，随机静默超时可把 idle 直接切入 working。
 工作期先进入短暂缓冲窗口，再把窗口内消息集中交给 LLM；关注期按进入来源使用不同的上下文预算，
 连续三次没有值得回复的内容才回到空闲期。
 """
@@ -8,6 +9,7 @@
 from __future__ import annotations
 
 import random
+import math
 import threading
 import time
 from urllib.parse import urlparse
@@ -46,6 +48,19 @@ class ProactiveReplyManager:
         # misses + 1) and the counter resets to 0 on trigger.
         self.slang_emotional_misses = {}
         self.tieba_repost_last_at = {}
+        # Message-density events are control data, not chat history.
+        self.density_events = {}
+        self.proactive_web_last_at = {}
+        # Independent of the idle/attention state machine: one random
+        # proactive-web opportunity per group every 2--3 hours by default.
+        # The counter is incremented only after a real outbound Bot message.
+        self.proactive_web_due_at = {}
+        self.proactive_web_bot_message_count = {}
+        # The learner is injected after construction so the state machine can
+        # gate attention checks locally without adding another LLM request.
+        self.reply_timing_reader = None
+        self.reply_timing_cache = {}
+        self.reply_timing_cache_ttl = 60
         self.lock = threading.Lock()
         self.callback = None
         self.cycle_end_callback = None
@@ -75,8 +90,7 @@ class ProactiveReplyManager:
                 self.bot_names.add(str(name).strip().casefold())
         self.clock = time.time
         self.randint = random.randint
-        self.initial_idle_end = self.clock() + self._random_seconds(self._idle_bounds())
-
+        self.random = random.random
         if self.enabled:
             threading.Thread(
                 target=self._timer_loop,
@@ -89,6 +103,72 @@ class ProactiveReplyManager:
 
     def set_cycle_end_callback(self, callback):
         self.cycle_end_callback = callback if callable(callback) else None
+
+    def set_reply_timing_reader(self, callback):
+        """Set a read-only learner callback used by the local attention gate."""
+        self.reply_timing_reader = callback if callable(callback) else None
+
+    def _refresh_reply_timing(self, group_ids, now):
+        reader = self.reply_timing_reader
+        if not reader:
+            return
+        refreshed = {}
+        for group_id in group_ids:
+            key = str(group_id)
+            cached = self.reply_timing_cache.get(key)
+            if cached and now - float(cached.get("at") or 0) < self.reply_timing_cache_ttl:
+                continue
+            try:
+                counters = reader(key)
+            except Exception as exc:
+                print(f"[LLM PROACTIVE] timing learning read failed group={key}: {exc}", flush=True)
+                counters = {}
+            refreshed[key] = {
+                "at": now,
+                "counters": counters if isinstance(counters, dict) else {},
+            }
+        if refreshed:
+            with self.lock:
+                self.reply_timing_cache.update(refreshed)
+
+    def _reply_timing_probability_locked(self, group_id):
+        """Return the learned probability of spending an attention pull.
+
+        This is deliberately a small local gate. It learns from historical
+        attention outcomes, starts only after enough observations, and never
+        applies to direct mentions/prefixes (those bypass the state machine).
+        """
+        if not bool(self.settings.get("reply_timing_learning_enabled", True)):
+            return 1.0
+        cached = self.reply_timing_cache.get(str(group_id)) or {}
+        counters = cached.get("counters") or {}
+        try:
+            minimum = max(1, int(self.settings.get("reply_timing_min_windows", 20)))
+            target = max(0.01, min(1.0, float(self.settings.get("reply_timing_target_reply_rate", 0.28))))
+            floor = max(0.0, min(1.0, float(self.settings.get("reply_timing_probability_floor", 0.15))))
+            windows = max(0, int(counters.get("attention_windows", 0) or 0))
+            replies = max(0, int(counters.get("attention_reply_windows", 0) or 0))
+        except (TypeError, ValueError):
+            return 1.0
+        if windows < minimum:
+            return 1.0
+        # Laplace smoothing prevents one short run from collapsing the gate.
+        observed_rate = (replies + 1.0) / (windows + 2.0)
+        if observed_rate <= target:
+            return 1.0
+        return max(floor, min(1.0, target / observed_rate))
+
+    def get_reply_timing_learning(self, group_id):
+        """Return the cached timing counters without a database read.
+
+        The timer thread refreshes this cache periodically. Working-period
+        gates can therefore reuse timing learning without blocking ingress on
+        SQLite or starting another model request.
+        """
+        with self.lock:
+            cached = self.reply_timing_cache.get(str(group_id)) or {}
+            counters = cached.get("counters")
+            return dict(counters) if isinstance(counters, dict) else {}
 
     def _learning_int(self, name, default, minimum=1):
         try:
@@ -103,9 +183,120 @@ class ProactiveReplyManager:
             return default
 
     def _idle_bounds(self):
-        minimum = self._int_setting("idle_min_seconds", 20 * 60)
-        maximum = self._int_setting("idle_max_seconds", 40 * 60)
+        # Old names remain as a backward-compatible fallback. They now mean
+        # the random quiet timeout before proactive web forwarding.
+        minimum = self._int_setting(
+            "idle_quiet_min_seconds",
+            self.settings.get("idle_min_seconds", 20 * 60),
+        )
+        maximum = self._int_setting(
+            "idle_quiet_max_seconds",
+            self.settings.get("idle_max_seconds", 40 * 60),
+        )
         return minimum, max(minimum, maximum)
+
+    def _float_setting(self, name, default, minimum=None):
+        try:
+            value = float(self.settings.get(name, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        if minimum is not None:
+            value = max(float(minimum), value)
+        return value
+
+    def _density_window_seconds(self):
+        return self._int_setting("density_window_seconds", 60, 10)
+
+    def _density_attention_interval_seconds(self):
+        return self._int_setting("density_attention_check_interval_seconds", 30, 5)
+
+    def _density_attention_half_life_seconds(self):
+        return self._float_setting("density_attention_half_life_seconds", 5 * 60, 1)
+
+    def _density_attention_curve_power(self):
+        return self._float_setting("density_attention_curve_power", 1.7, 0.1)
+
+    def _proactive_web_bounds(self):
+        # This is intentionally independent from the retired six-hour
+        # attention repost cooldown, including for old config files.
+        minimum = self._int_setting("proactive_web_min_seconds", 2 * 3600, 60)
+        maximum = self._int_setting("proactive_web_max_seconds", 3 * 3600, 60)
+        return minimum, max(minimum, maximum)
+
+    def _proactive_web_reset_after_messages(self):
+        return self._int_setting("proactive_web_reset_after_bot_messages", 10, 1)
+
+    def _reset_proactive_web_timer_locked(self, group_id, now, reason):
+        group_id = str(group_id)
+        due_at = now + self._random_seconds(self._proactive_web_bounds())
+        self.proactive_web_due_at[group_id] = due_at
+        self.proactive_web_bot_message_count[group_id] = 0
+        print(
+            f"[LLM PROACTIVE WEB] group={group_id} timer reset reason={reason} due_at={due_at}",
+            flush=True,
+        )
+        return due_at
+
+    def _ensure_proactive_web_timer_locked(self, group_id, now):
+        group_id = str(group_id)
+        if self.proactive_web_due_at.get(group_id) is None:
+            self._reset_proactive_web_timer_locked(group_id, now, "initial")
+
+    def record_sent_bot_message(self, group_id, count=1):
+        """Count actual, separately delivered Bot messages for web scheduling."""
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return
+        try:
+            count = max(0, int(count))
+        except (TypeError, ValueError):
+            return
+        if not count:
+            return
+        now = self.clock()
+        with self.lock:
+            # Ignore non-group/plugin output that has never entered this
+            # manager, so unrelated private sends cannot create schedules.
+            if group_id not in self.states:
+                return
+            self._ensure_proactive_web_timer_locked(group_id, now)
+            total = self.proactive_web_bot_message_count.get(group_id, 0) + count
+            if total > self._proactive_web_reset_after_messages():
+                self._reset_proactive_web_timer_locked(group_id, now, "bot_message_limit")
+            else:
+                self.proactive_web_bot_message_count[group_id] = total
+
+    def _density_upper_locked(self, group_id=None, state=None):
+        """Return the configured hard upper count for the one-minute window."""
+        value = self.settings.get(
+            "density_upper_messages_per_minute",
+            self.settings.get("density_upper_min_per_minute", 8),
+        )
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 8.0
+
+    def _update_density_locked(self, group_id, state, now):
+        group_id = str(group_id)
+        window = self._density_window_seconds()
+        events = self.density_events.setdefault(group_id, [])
+        cutoff = now - window
+        self.density_events[group_id] = [stamp for stamp in events if stamp >= cutoff]
+        rate = len(self.density_events[group_id]) * 60.0 / window
+
+        state["density_upper"] = self._density_upper_locked(group_id, state)
+        state["density_rate"] = rate
+        return rate, float(state.get("density_upper") or 8.0)
+
+    def _attention_probability(self, density_rate, density_upper):
+        if density_upper <= 0 or density_rate <= 0:
+            return 0.0
+        normalized = max(0.0, min(1.0, density_rate / density_upper))
+        hazard = (
+            math.log(2.0) / self._density_attention_half_life_seconds()
+        ) * (normalized ** self._density_attention_curve_power())
+        return 1.0 - math.exp(-hazard * self._density_attention_interval_seconds())
 
     def _work_bounds(self):
         minimum = self._int_setting("work_min_seconds", 2 * 60)
@@ -129,9 +320,9 @@ class ProactiveReplyManager:
     def _attention_nonsense_opportunity(self):
         """Grant one attention check a bounded 30% playful-interjection chance."""
         try:
-            probability = float(self.settings.get("attention_nonsense_probability", 0.3) or 0.3)
+            probability = float(self.settings.get("attention_nonsense_probability", 0.12) or 0.12)
         except (TypeError, ValueError):
-            probability = 0.3
+            probability = 0.12
         probability = max(0.0, min(1.0, probability))
         return self.randint(1, 100) <= int(round(probability * 100))
 
@@ -159,27 +350,8 @@ class ProactiveReplyManager:
 
 
     def _tieba_repost_opportunity(self, group_id):
-        """Cooldown + probability gate for reposting a Tieba hot post.
-
-        Frequency control: a repost is offered at most once per
-        tieba_repost_min_interval_seconds (default 6 hours); after the cooldown
-        elapses each attention pull rolls tieba_repost_probability (default 0.5).
-        """
-        group_id = str(group_id)
-        min_interval = self._int_setting("tieba_repost_min_interval_seconds", 6 * 3600, 300)
-        now = self.clock()
-        last = self.tieba_repost_last_at.get(group_id, 0)
-        if now - last < min_interval:
-            return False
-        try:
-            probability = float(self.settings.get("tieba_repost_probability", 0.5) or 0.5)
-        except (TypeError, ValueError):
-            probability = 0.5
-        probability = max(0.0, min(1.0, probability))
-        if self.randint(1, 100) > int(round(probability * 100)):
-            return False
-        self.tieba_repost_last_at[group_id] = now
-        return True
+        """Legacy hook disabled; Tieba reposts use the independent timer."""
+        return False
 
     def seconds_since_llm_reply(self, group_id):
         now = self.clock()
@@ -256,12 +428,12 @@ class ProactiveReplyManager:
         # to arrive in one contextual decision window.
         value = self.settings.get(
             "batch_debounce_seconds",
-            self.settings.get("batch_interval_seconds", 5),
+            self.settings.get("batch_interval_seconds", 15),
         )
         try:
             return max(1, min(int(value), 15))
         except (TypeError, ValueError):
-            return 5
+            return 15
 
     def _batch_max_messages(self):
         try:
@@ -275,7 +447,12 @@ class ProactiveReplyManager:
     def _new_idle_state(self, now):
         return {
             "phase": "idle",
-            "phase_end": now + self._random_seconds(self._idle_bounds()),
+            "phase_end": None,
+            "quiet_started_at": now,
+            "quiet_timeout_at": now + self._random_seconds(self._idle_bounds()),
+            "next_density_attention_at": now + self._density_attention_interval_seconds(),
+            "density_rate": 0.0,
+            "density_upper": None,
             "recent_messages": [],
             "last_context": None,
             "attention_misses": 0,
@@ -300,8 +477,8 @@ class ProactiveReplyManager:
         return {
             "phase": "working",
             "phase_end": now + self._random_seconds(self._work_bounds()),
-            # Work-period messages are gated immediately.  There is no
-            # ten-second accumulation queue in this mode.
+            # Work-period messages use the configured debounce buffer; the
+            # local necessity gate runs only when that buffer is flushed.
             "recent_messages": [],
             "last_context": None,
             "attention_misses": 0,
@@ -318,6 +495,8 @@ class ProactiveReplyManager:
             "cycle_messages": [],
             "active_style_switch": None,
             "active_style_switch_at": None,
+            "quiet_started_at": None,
+            "quiet_timeout_at": None,
         }
 
     def _new_attention_state(
@@ -327,7 +506,12 @@ class ProactiveReplyManager:
         cycle_id=None,
         cycle_messages=None,
         attention_source="idle",
+        quiet_started_at=None,
+        quiet_timeout_at=None,
     ):
+        if quiet_started_at is None or quiet_timeout_at is None:
+            quiet_started_at = now
+            quiet_timeout_at = now + self._random_seconds(self._idle_bounds())
         return {
             "phase": "attention",
             "phase_end": None,
@@ -350,14 +534,12 @@ class ProactiveReplyManager:
             "cycle_curation_pending": False,
             "active_style_switch": None,
             "active_style_switch_at": None,
+            "quiet_started_at": quiet_started_at,
+            "quiet_timeout_at": quiet_timeout_at,
         }
 
     def _initial_state(self, now):
-        if now >= self.initial_idle_end:
-            return self._new_attention_state(now)
-        state = self._new_idle_state(now)
-        state["phase_end"] = self.initial_idle_end
-        return state
+        return self._new_idle_state(now)
 
     def _group_key(self, context):
         return str(
@@ -404,12 +586,84 @@ class ProactiveReplyManager:
             flush=True,
         )
 
+    def _start_proactive_work_locked(self, state, now, group_id):
+        """Move idle/attention into working for a due live-web opportunity."""
+
+        recent = list(state.get("recent_messages") or [])
+        cycle_messages = list(state.get("cycle_messages") or [])
+        old_phase = state.get("phase")
+        context = dict(state.get("last_context") or {})
+        state.clear()
+        state.update(self._new_work_state(now))
+        state["recent_messages"] = recent
+        state["cycle_messages"] = cycle_messages
+        state["last_context"] = context
+        context["_cycle_id"] = state.get("cycle_id")
+        context["_proactive_web_opportunity"] = True
+        state["proactive_web_opportunity"] = True
+        self.proactive_web_last_at[str(group_id)] = now
+        self._reset_proactive_web_timer_locked(group_id, now, "web_opportunity")
+        self._log_phase_change(group_id, old_phase, state, "proactive_timeout")
+        pending = (context, [], False, "quiet_proactive") if self.callback is not None else None
+        return pending, True
+
     def _advance_state_locked(self, state, now, group_id="unknown"):
         pending_dispatch = None
-        if state["phase"] == "idle" and now >= state["phase_end"]:
-            old_phase = state.get("phase")
-            state.update(self._new_attention_state(now, attention_source="idle"))
-            self._log_phase_change(group_id, old_phase, state, "idle_timeout")
+        if state["phase"] == "idle":
+            density_rate = float(state.get("density_rate") or 0.0)
+            density_upper = float(
+                state.get("density_upper") or 8.0
+            )
+
+            # The upper boundary is a hard attention trigger.  This keeps a
+            # genuinely active group from waiting for the stochastic check.
+            if density_rate > density_upper:
+                old_phase = state.get("phase")
+                recent = list(state.get("recent_messages") or [])
+                cycle_messages = list(state.get("cycle_messages") or [])
+                state.update(self._new_attention_state(
+                    now,
+                    recent,
+                    state.get("cycle_id"),
+                    cycle_messages,
+                    attention_source="density_upper",
+                    quiet_started_at=state.get("quiet_started_at"),
+                    quiet_timeout_at=state.get("quiet_timeout_at"),
+                ))
+                self._log_phase_change(group_id, old_phase, state, "density_upper")
+                return pending_dispatch
+
+            # The idle timer now only retains the old phase bookkeeping. Live
+            # web reposting is scheduled by the independent 2--3 hour timer.
+            if state.get("quiet_started_at") is None:
+                state["quiet_started_at"] = now
+                state["quiet_timeout_at"] = now + self._random_seconds(self._idle_bounds())
+
+            next_check = state.get("next_density_attention_at")
+            if next_check is None or now >= next_check:
+                state["next_density_attention_at"] = now + self._density_attention_interval_seconds()
+                probability = self._attention_probability(density_rate, density_upper)
+                if self.random() < probability:
+                    old_phase = state.get("phase")
+                    recent = list(state.get("recent_messages") or [])
+                    cycle_messages = list(state.get("cycle_messages") or [])
+                    state.update(self._new_attention_state(
+                        now,
+                        recent,
+                        state.get("cycle_id"),
+                        cycle_messages,
+                        attention_source="density_probability",
+                        quiet_started_at=state.get("quiet_started_at"),
+                        quiet_timeout_at=state.get("quiet_timeout_at"),
+                    ))
+                    self._log_phase_change(
+                        group_id,
+                        old_phase,
+                        state,
+                        f"density_probability={probability:.4f}",
+                    )
+        elif state["phase"] == "attention":
+            pass
         elif state["phase"] == "working" and now >= state["phase_end"]:
             pending_dispatch = self._take_pending_batch_locked(state)
             recent = state.get("recent_messages") or []
@@ -423,7 +677,7 @@ class ProactiveReplyManager:
                 cycle_messages,
                 attention_source="working",
             ))
-            self._log_phase_change(group_id, old_phase, state, "work_timeout")
+            self._log_phase_change(group_id, old_phase, state, "work_timeout_to_attention")
         return pending_dispatch
 
     def _allowed_group(self, context):
@@ -578,8 +832,11 @@ class ProactiveReplyManager:
             if state is None:
                 state = self._initial_state(now)
                 self.states[group_id] = state
+                self._ensure_proactive_web_timer_locked(group_id, now)
                 self.last_llm_reply_at.setdefault(group_id, now)
                 self._log_phase_change(group_id, "none", state, "initial")
+            self.density_events.setdefault(group_id, []).append(now)
+            self._update_density_locked(group_id, state, now)
             expired_dispatch = self._advance_state_locked(state, now, group_id)
             self._remember_locked(state, context, message)
 
@@ -663,9 +920,14 @@ class ProactiveReplyManager:
             cycle_messages = list(state.get("cycle_messages") or [])
             cycle_id = state.get("cycle_id")
             cycle_context = dict(state.get("last_context") or {})
+            quiet_started_at = state.get("quiet_started_at")
+            quiet_timeout_at = state.get("quiet_timeout_at")
             old_phase = state.get("phase")
             state.clear()
             state.update(self._new_idle_state(now))
+            if quiet_started_at is not None and quiet_timeout_at is not None:
+                state["quiet_started_at"] = quiet_started_at
+                state["quiet_timeout_at"] = quiet_timeout_at
             state["cycle_snapshot"] = cycle_messages
             state["cycle_context"] = cycle_context
             state["cycle_id"] = cycle_id
@@ -733,7 +995,13 @@ class ProactiveReplyManager:
             pending = []
             cycle_pending = []
             with self.lock:
+                timing_groups = list(self.states)
+            # Read SQLite outside the state lock. A slow or locked learner DB
+            # must not stop density updates or message ingress.
+            self._refresh_reply_timing(timing_groups, now)
+            with self.lock:
                 for group_id, state in self.states.items():
+                    self._update_density_locked(group_id, state, now)
                     expired_dispatch = self._advance_state_locked(state, now, group_id)
                     if expired_dispatch:
                         pending.append((
@@ -744,6 +1012,27 @@ class ProactiveReplyManager:
                             expired_dispatch[2],
                             expired_dispatch[3],
                         ))
+
+                    # Do not interrupt an active working batch. Once it
+                    # returns to attention/idle, a due timer is dispatched
+                    # immediately using the latest known group context.
+                    due_at = self.proactive_web_due_at.get(str(group_id))
+                    if (
+                        state.get("phase") != "working"
+                        and not state.get("checking")
+                        and due_at is not None
+                        and now >= due_at
+                        and state.get("last_context")
+                    ):
+                        dispatch, transitioned = self._start_proactive_work_locked(
+                            state, now, group_id
+                        )
+                        if transitioned and dispatch:
+                            pending.append((
+                                group_id, dispatch[0], dispatch[1], False,
+                                dispatch[2], dispatch[3],
+                            ))
+                            continue
 
                     if (
                         state["phase"] == "working"
@@ -788,8 +1077,20 @@ class ProactiveReplyManager:
                         context = dict(state.get("last_context") or {})
                         context["_cycle_id"] = state.get("cycle_id")
                         context["_attention_source"] = state.get("attention_source") or "idle"
+                        timing_probability = self._reply_timing_probability_locked(group_id)
+                        if self.random() >= timing_probability:
+                            print(
+                                f"[LLM PROACTIVE] attention gated group={group_id} "
+                                f"probability={timing_probability:.3f}",
+                                flush=True,
+                            )
+                            self._attention_miss_locked(state, now, group_id)
+                            continue
                         context["_nonsense_opportunity"] = self._attention_nonsense_opportunity()
-                        context["_tieba_opportunity"] = self._tieba_repost_opportunity(group_id)
+                        # Tieba forwarding is exclusively controlled by the
+                        # independent 2--3 hour timer. Attention may still
+                        # generate an ordinary interjection.
+                        context["_tieba_opportunity"] = False
                         if batch and self.callback is not None and context:
                             context["_slang_emotional_opportunity"] = self._attention_slang_emotional_opportunity(group_id)
                             state["checking"] = True
