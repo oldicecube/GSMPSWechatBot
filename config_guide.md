@@ -104,7 +104,7 @@
 | original_message_max_calls | integer，1–4 | 2 | 一轮请求最多读取原消息次数。 |
 | original_message_timeout_seconds | number | 8 | 原消息接口超时秒数。 |
 | original_message_max_chars | integer | 16000 | 单次原消息读取最大字符数。 |
-| intercept_auto_plugins | string 或 string[] | [] | 命中这些自动插件名时交给 LLM 决定，例如 ["picture"]。 |
+| intercept_auto_plugins | string 或 string[] | [] | 指定需要参与 LLM 放行判断的 auto 插件名。插件必须声明 `INTERCEPT_LLM = True` 并实现 `allow_llm(context)`；任一指定插件拒绝时，本条消息不转发给 LLM。该字段不负责注册或触发 auto 插件。 |
 | prefix_bypass_wxids | string 或 string[] | [] | 这些 wxid 无前缀也可直达 LLM；只填受信任账号。 |
 | admin_wxids | string 或 string[] | [] | 管理命令授权 wxid，供 ban、echo、points、rcon、prompt 等插件使用。 |
 | bot_wxids | string 或 string[] | [] | 额外识别为 Bot 的 wxid；weflow.myWxid 会自动加入。 |
@@ -113,7 +113,7 @@
 
 ### 5.2 API 池（llm.apis）
 
-apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败后会在同一请求中立即尝试下一路。某 API 在一个响应期累计失败 3 次后，会禁用至下一不响应期；没有 time_slots 时为次日 00:00。
+apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败后会在同一请求中立即尝试下一路。某 API 连续请求失败 3 次后，仍保留在 API 池中，但会临时调整到队末 30 分钟；该 API 任一次请求成功后清零连续失败计数并恢复原优先级；不再按不响应期边界自动重置。
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---:|---|
@@ -127,8 +127,8 @@ apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败
 | max_tokens | 正整数或 0 | 0 | 输出 token 上限；0 表示由客户端/服务端决定。 |
 | cache | boolean | true | 是否允许协议客户端使用提示词缓存。 |
 | cache_scope | "full"、"system"、"none" 或空 | 客户端决定 | 可缓存范围；none 明确关闭缓存。 |
-| prompt_cache_key | string | 空 | Responses 客户端会在非空时传给服务端；仅服务端明确支持时填写。 |
-| responses_explicit_cache_breakpoint | boolean | false | Responses ?????????/??????????? instructions ??????????????????? `input_text.prompt_cache_breakpoint` ???? true?RightAPI ???????????? false? |
+| prompt_cache_key | string | 空 | Responses 的可选固定路由键。通常留空：客户端会自动生成按“群 + 回复流”隔离、且不含原始群名/用户/消息内容的运行时键。填写后会覆盖运行时键；仅服务商文档明确要求固定键时使用，且不要放入敏感数据。 |
+| responses_explicit_cache_breakpoint | boolean | false | 仅 Responses。true 时在稳定历史边界写 `input_text.prompt_cache_breakpoint`。默认 false，优先让服务端自动寻找最长公共前缀；只有服务商文档明确要求显式断点时才开启。 |
 | cache_mode | "auto"、"manual"、"off" | "auto" | Anthropic Messages 专用。manual 写 cache_control 断点；auto 请求 auto_cached:true；off 关闭缓存。网关不支持 auto_cached 时用 manual。 |
 | cache_ttl | 空 string 或 "1h" | 空（通常服务端默认 5 分钟） | Anthropic 缓存 TTL；当前客户端将 "1h" 解释为一小时。其他值取决于网关兼容性，不建议猜测。 |
 
@@ -165,14 +165,16 @@ apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败
 | fragmented_chat_min_silence_seconds | integer，30–86400 | 360 | 零散聊天触发前需要的静默时间。 |
 | fragmented_chat_min_interval_seconds | integer，30–86400 | 360 | 零散聊天计划之间最小间隔。 |
 | fragmented_chat_plan_probability | number，0–1 | 0.12 | 满足零散聊天条件后实际计划的概率。 |
-| idle_quiet_min_seconds / idle_quiet_max_seconds | integer，≥1 | 1200 / 2400 | 空闲随机等待区间，超时后进入工作期。旧别名 idle_min_seconds、idle_max_seconds 可回退。 |
+| idle_quiet_min_seconds / idle_quiet_max_seconds | integer, >=1 | 600 / 1800 | Random idle wait window (10-30 minutes); after timeout the manager enters working state. Legacy aliases idle_min_seconds and idle_max_seconds are accepted. |
+| conversation_lease_seconds | integer/number, >=15 | 90 | Short lease after an ordinary reply for the same sender; it only bypasses local frequency suppression and does not force a reply. |
+| conversation_lease_direct_seconds | integer/number, >=15 | 180 | Lease after explicit @/prefix/reply-to-bot or uncertain follow-up signals. |
 | density_window_seconds | integer，≥10 | 60 | 计算消息密度的窗口。 |
 | density_upper_messages_per_minute | integer，≥1 | 8 | 达到该密度时进入关注逻辑。旧别名 density_upper_min_per_minute 可回退。 |
 | density_attention_check_interval_seconds | integer，≥5 | 30 | 关注期检查间隔。 |
 | density_attention_half_life_seconds | number，≥1 | 300 | 密度影响衰减半衰期。 |
 | density_attention_curve_power | number，≥0.1 | 1.7 | 密度到关注概率的曲线指数。 |
-| proactive_web_min_seconds / proactive_web_max_seconds | integer，≥60 | 7200 / 10800 | 独立网页主动机会的随机间隔。 |
-| proactive_web_reset_after_bot_messages | integer | 10 | Bot 发出该数量真实消息后重置网页主动机会。 |
+| adaptive_idle_content_enabled | boolean | true | Enables earned idle-content candidate windows. The gate uses completed-cycle member activity, cadence, two-person dominance and prior feedback; it is not a daily budget and the model may still remain silent. |
+| proactive_web_min_seconds / proactive_web_max_seconds / proactive_web_reset_after_bot_messages | legacy integer fields | ignored | Retained only so older configs load. They no longer schedule a global repost timer. |
 | work_min_seconds / work_max_seconds | integer | 120 / 300 | 工作期持续范围。 |
 | batch_debounce_seconds | number | 15 | 消息批处理防抖时间。旧别名 batch_interval_seconds 可回退。 |
 | batch_max_messages | integer，2–100 | 20 | 单批最多普通消息数。 |
@@ -234,14 +236,15 @@ apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败
 |---|---|---:|---|
 | enabled | boolean | true | 是否记录、学习群聊风格和高置信度表达。 |
 | db_path | path string | "data/llm_learning.sqlite3" | 学习数据库位置。 |
-| queue_max | integer，≥100 | 2000 | 异步学习队列容量。 |
+| queue_max | integer，≥100 | 2000 | 兼容字段。消息观察会同步去重并持久化到 SQLite，因此内存队列已满不会静默丢失学习证据。 |
 | min_term_count | integer，≥2 | 2 | 确定性统计的最低词项出现次数。 |
 | prompt_max_chars | integer，≥400 | 1800 | 注入学习结果的字符预算。 |
 | style_card_max_chars | integer，≥600 | 1800 | 风格卡最大字符数。 |
 | bot_names | string 或 string[] | [] | 需要识别为 Bot 的额外昵称；wxid 会从 WeFlow 自动合并。 |
 | expression_recall_scan_limit | integer，≥200 | 2000 | 召回句式时扫描的候选上限。 |
 | expression_pool_size | integer，4–24 | 12 | 句式候选池大小。 |
-| expression_selector_enabled | boolean | true | 是否从候选池选择当前语境适合的句式。 |
+| expression_selector_enabled | boolean | false | 是否额外调用 LLM 从句式候选中选择表达。默认 `false`：本地排序更快，也不会增加一次额外请求。 |
+| expression_prompt_max_items | integer，1–4 | 3 | 每次回复最多注入的本地排序高置信度句式数。它们仅作为可选表达参考，不强制复用。 |
 | expression_selector_max_items | integer，1–8 | 4 | 本轮最多选择的候选句式数。 |
 | expression_selector_max_chars | integer，400–4000 | 1400 | 候选句式注入字符预算。 |
 | expression_eval_enabled | boolean | false | 是否启用句式效果评估。 |
@@ -249,6 +252,10 @@ apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败
 | slang_emotional_pool_rotation | boolean | true | 是否轮换情绪黑话候选池。 |
 | style_switch_enabled | boolean | true | 是否允许一轮主动回复中选定风格/黑话/句式。 |
 | style_switch_cooldown_seconds | integer，≥0 | 120 | 风格切换冷却秒数。 |
+| idle_content_cache_max_age_seconds | integer，≥900 | 43200 | 闲时内容候选的最大新鲜度（秒）。超过期限的候选不会进入 Planner。 |
+| idle_content_prefetch_min_interval_seconds | integer，≥300 | 1800 | 后台刷新内容源缓存的最小间隔（秒）。该参数只影响抓取成本，不构成跨群发送计时器或每日发送预算。 |
+| idle_content_prefetch_min_items | integer，1–12 | 6 | 刷新时希望维持的新鲜去重候选数。抓取在群聊周期完成后异步执行，本身不会发送消息。 |
+| idle_content_shadow_mode | boolean | true | 闲时内容 Planner 的安全开关。为 `true` 时只记录模型选中的已缓存候选并阻止发送，且不消耗候选；确认群聊节奏与内容质量正常后才改为 `false`。 |
 
 ### 5.5 上下文压缩成本参数
 
@@ -296,21 +303,7 @@ apis 是数组。每次请求按 priority 从小到大尝试；当前 API 失败
 | usercache_path | path string | 空 | Minecraft usercache.json 路径，用于 UUID 与玩家名映射。 |
 | games | object | 内置两种游戏 | 键为游戏展示名称，值为 {"storage":"命名空间","enabled":true/false}；只有同时启用且填写 storage 的项会被读取。 |
 
-## 7. 已确认无运行效果、可删除的旧字段
-
-下列字段不会改变当前仓库的运行结果；新的 sample_config.json 已不再包含它们。旧 config.json 中同名字段可删除：
-
-- 任意 _说明、_live_llm_policy、_target_group_policy 等人工备注字段。
-- llm.engine。
-- llm._legacy_embedding_ignored 整段。
-- llm.proactive 整段；实际自动回复读取的是 llm.auto_reply。
-- llm.behavior_style、llm.group_prompt、llm.private_prompt、llm.reply_style；当前系统提示词不读取这些字段，应统一维护 prompt.txt、llm.identity 和 llm.prompt。
-- llm.memory.curator_enabled、curator_interval_seconds、active_update_enabled、daily_cleanup_enabled、daily_cleanup_hour、daily_cleanup_min_candidates。
-- llm.learning.slang_scene_enabled、scene_cache_ttl_seconds、scene_cache_max_items、scene_prompt_max_chars、slang_curator_enabled、slang_curator_interval_seconds、slang_curator_max_items、slang_min_occurrences、expression_max_items、expression_max_chars。
-
-如果已使用 llm.apis，顶层 llm.model、llm.api_key、llm.api_base 仅是旧单 API 回退项，建议移除，避免两套凭据混淆。llm.provider 也不再选择协议。
-
-## 8. 修改后的检查步骤
+## 7. 修改后的检查步骤
 
 1. 检查 JSON 语法：
 

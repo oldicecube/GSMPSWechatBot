@@ -59,7 +59,22 @@
     },
     "learning": {
       "enabled": true,
-      "bot_names": []
+      "bot_names": [],
+      "expression_prompt_max_items": 3,
+      "expression_selector_enabled": false,
+      "idle_content_shadow_mode": true,
+      "idle_content_cache_max_age_seconds": 43200,
+      "idle_content_prefetch_min_interval_seconds": 1800,
+      "idle_content_prefetch_min_items": 6
+    },
+    "auto_reply": {
+      "enabled": false,
+      "reply_trigger_mode": "conversation_pulse",
+      "idle_min_seconds": 600,
+      "idle_max_seconds": 1800,
+      "conversation_lease_seconds": 90,
+      "conversation_lease_direct_seconds": 180,
+      "adaptive_idle_content_enabled": false
     }
   }
 }

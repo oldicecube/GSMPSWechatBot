@@ -177,6 +177,7 @@ class Dispatcher:
         # =====================================================
         auto_results = []
         auto_target = context.get("auto_target")
+        auto_command_handled = False
 
         for name, module in self.modules.items():
             if getattr(module, "FALLBACK_ONLY", False):
@@ -187,6 +188,9 @@ class Dispatcher:
                         continue
                 elif name != auto_target:
                     continue
+            auto_commands = getattr(module, "AUTO_COMMANDS", ()) or ()
+            if command and command in {str(item).strip() for item in auto_commands}:
+                auto_command_handled = True
             if hasattr(module, "handle_auto"):
                 try:
                     res = module.handle_auto(context)
@@ -211,6 +215,7 @@ class Dispatcher:
                         force_reply=bool(auto_result.get("force_reply")),
                         trigger_source=auto_result.get("trigger_source"),
                         cycle_id=auto_result.get("cycle_id"),
+                        conversation_priority=auto_result.get("conversation_priority"),
                     )
                 if isinstance(auto_result, dict) and auto_result.get("forward_to_llm"):
                     return self._dispatch_llm(context)
@@ -226,6 +231,7 @@ class Dispatcher:
                         trigger_source=proactive_result.get("trigger_source"),
                         attention_check=bool(proactive_result.get("attention_check")),
                         cycle_id=proactive_result.get("cycle_id"),
+                        conversation_priority=proactive_result.get("conversation_priority"),
                     )
 
                 # When non-prefix autonomous mode is enabled, the proactive
@@ -254,6 +260,11 @@ class Dispatcher:
         # 4. 未找到 command → fallback auto
         # =====================================================
         if not plugin:
+            # Auto command-like plugins may consume a command to create a
+            # follow-up state. Do not turn that interception into an unknown
+            # command reply.
+            if auto_command_handled:
+                return auto_results[-1] if auto_results else None
             return auto_results[-1] if auto_results else f"未知命令: {command}"
 
         # =====================================================
@@ -403,11 +414,13 @@ class Dispatcher:
         trigger_source=None,
         attention_check=False,
         cycle_id=None,
+        conversation_priority=None,
     ):
         # Attention and ordinary autonomous pulls are cheap to skip when a
         # request is already using the provider. Direct prefix/@ requests get
         # a short wait so user-visible interactions retain priority.
-        direct = batch_messages is None or bool(force_reply)
+        priority = str(conversation_priority or context.get("_conversation_priority") or context.get("conversation_priority") or "MAY_REPLY").upper()
+        direct = batch_messages is None or bool(force_reply) or priority in {"MUST_REPLY", "SHOULD_REPLY", "UNCERTAIN_DIRECT"}
         wait_seconds = self._llm_direct_wait_seconds if direct else 0.0
         acquired = self._llm_slots.acquire(timeout=wait_seconds)
         if not acquired:
@@ -425,6 +438,7 @@ class Dispatcher:
                 trigger_source=trigger_source,
                 attention_check=attention_check,
                 cycle_id=cycle_id,
+                conversation_priority=priority,
             )
         finally:
             self._llm_slots.release()
@@ -437,6 +451,7 @@ class Dispatcher:
         trigger_source=None,
         attention_check=False,
         cycle_id=None,
+        conversation_priority=None,
     ):
         try:
             if batch_messages is not None:
@@ -454,6 +469,10 @@ class Dispatcher:
                     slang_emotional_opportunity=bool(context.get("_slang_emotional_opportunity")),
                     tieba_opportunity=bool(context.get("_tieba_opportunity")),
                     proactive_web_opportunity=bool(context.get("_proactive_web_opportunity")),
+                    idle_content_opportunity=bool(context.get("_idle_content_opportunity")),
+                    idle_content_probability=context.get("_idle_content_probability", 0.0),
+                    idle_content_reason=context.get("_idle_content_reason") or "",
+                    conversation_priority=conversation_priority or context.get("_conversation_priority") or "MAY_REPLY",
                 )
             else:
                 result = self.llm_service.handle_message(
@@ -481,6 +500,11 @@ class Dispatcher:
                 )
             except Exception as e:
                 print("[LLM PROACTIVE RESULT ERROR]", e)
+        else:
+            try:
+                self.llm_service.proactive_reply.record_conversation_reply(context, result)
+            except Exception as e:
+                print("[LLM CONVERSATION LEASE ERROR]", e)
 
         return {
             "target": context.get("group") or context.get("user"),

@@ -31,6 +31,53 @@ _EXPRESSION_UNSAFE_MARKERS = (
     "诈骗", "騙", "色情", "裸聊", "裸照", "自杀", "自殺", "毒品", "爆炸",
 )
 
+
+# A small, high-confidence but deliberately low-frequency expression category.
+# These are expression-layer references only; they are never a global persona.
+_META_EXPRESSION_CATEGORIES = {
+    "meta_humor", "teasing", "absurd_reaction", "dramatic_reaction",
+    "sudden_realization", "identity_confusion", "emotional_overreaction",
+    "context_reversal",
+}
+_EXPRESSION_CATEGORIES = {"general", *_META_EXPRESSION_CATEGORIES}
+_META_CONTEXT_SIGNALS = (
+    "\u6574\u6d3b", "\u73a9\u6897", "\u6897", "\u7b11\u6b7b", "\u54c8\u54c8", "\u7ef7\u4e0d\u4f4f", "\u79bb\u8c31", "\u62bd\u8c61", "\u9006\u5929",
+    "\u8282\u76ee\u6548\u679c", "\u5267\u60c5", "\u4f26\u7406", "\u4f60\u7238", "\u6211\u662f\u4f60", "\u53cd\u8f6c", "\u4ec0\u4e48\u9b3c", "\u8349", "\u4e50",
+    "\u4e50\u5b50", "\u7834\u9632", "\u597d\u597d\u597d", "\u554a\u8fd9", "\u54c8\u54c8\u54c8", "\U0001f923", "\U0001f602", "\U0001f605",
+)
+_META_CONTEXT_BLOCKERS = (
+    "\u4ee3\u7801", "\u62a5\u9519", "\u914d\u7f6e", "\u63a5\u53e3", "api", "\u6280\u672f", "\u5b66\u4e60", "\u8003\u8bd5", "\u6587\u6863", "\u89e3\u91ca",
+    "\u5206\u6790", "\u670d\u52a1\u5668", "\u7f16\u7a0b", "python", "\u6570\u636e\u5e93", "\u8bf7\u6c42", "\u6a21\u578b", "\u4f5c\u4e1a", "\u8bba\u6587",
+)
+_META_SEED_PATTERNS = (
+    "\u7b49\u7b49\uff0c\u6240\u4ee5\u4f60\u771f\u7684\u662f\u2026\u2026\uff1f", "\u597d\u7684\uff0c\u6211\u73b0\u5728\u662f\u4f60\u7684 X \u4e86\u3002",
+    "\u597d\u7684\uff0c\u4e8b\u60c5\u5f00\u59cb\u53d8\u5f97\u4e0d\u5bf9\u52b2\u4e86\u3002", "\u7b49\u7b49\uff0c\u8fd9\u4e2a\u5267\u60c5\u662f\u4e0d\u662f\u53d1\u5c55\u9519\u4e86\uff1f",
+    "\u6211\u5bfb\u601d\u7740\u4e5f\u6ca1\u4eba\u544a\u8bc9\u6211\u4e8b\u60c5\u4f1a\u53d8\u6210\u8fd9\u6837\u554a\u3002", "\u5f88\u597d\uff0c\u73b0\u5728\u95ee\u9898\u5df2\u7ecf\u4ece A \u53d8\u6210 B \u4e86\u3002",
+    "\u6211\u64cd\uff0c\u4e8b\u60c5\u7a81\u7136\u4e25\u91cd\u8d77\u6765\u4e86\u3002", "\u7b49\u7b49\uff0c\u6211\u662f\u4e0d\u662f\u7406\u89e3\u4e86\u4e00\u4e2a\u4e0d\u5f97\u4e86\u7684\u4e1c\u897f\uff1f",
+)
+
+
+def _clean_expression_category(value) -> str:
+    category = str(value or "general").strip().lower()[:48]
+    return category if category in _EXPRESSION_CATEGORIES else "general"
+
+
+def _clean_expression_confidence(value, default=0.45) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(value))), 3)
+    except (TypeError, ValueError):
+        return round(float(default), 3)
+
+
+def _is_meta_expression_context(context: str) -> bool:
+    text = str(context or "").casefold()
+    if not text:
+        return False
+    # Professional/technical contexts should not be contaminated by joke patterns.
+    if any(marker in text for marker in _META_CONTEXT_BLOCKERS):
+        return False
+    return any(marker in text for marker in _META_CONTEXT_SIGNALS)
+
 # Explicit general-language/system terms are never injected as group slang.
 # Keep this conservative: frequency alone must not remove expressions such as
 # "串子" or "吓哭了" that may have a group-specific meaning.
@@ -122,6 +169,9 @@ class ProfileStore:
                     updated_at INTEGER NOT NULL DEFAULT 0,
                     last_seen INTEGER NOT NULL DEFAULT 0,
                     last_active_time INTEGER NOT NULL DEFAULT 0,
+                    category TEXT NOT NULL DEFAULT 'general',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'learned',
                     PRIMARY KEY (group_id, situation)
                 )
                 """
@@ -179,6 +229,19 @@ class ProfileStore:
                 "CREATE INDEX IF NOT EXISTS idx_cycle_curation_runs_group "
                 "ON cycle_curation_runs(group_id, finished_at DESC)"
             )
+            # Compact per-group rhythm profile for *opportunity* gating. This
+            # is not a daily send quota: it only records observed cycle cadence
+            # and previous idle-content feedback so each group can earn or lose
+            # opportunities independently.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_activity_profiles (
+                    group_id TEXT PRIMARY KEY,
+                    profile_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
             # Uncertain slang is evidence for a later cycle, not a usable
             # slang record. Keep only compact identifiers/counters here;
             # never copy the source message body into this queue.
@@ -221,15 +284,89 @@ class ProfileStore:
                 "CREATE INDEX IF NOT EXISTS idx_pending_slang_review "
                 "ON pending_slang_terms(group_id, last_seen DESC)"
             )
+            # Durable learning/cycle delivery.  The outbox is deliberately
+            # compact and stores only structured observations, never API keys
+            # or full prompt text.  It survives queue pressure and restarts.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    group_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    lease_until INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_outbox_claim "
+                "ON learning_outbox(status, next_attempt_at, lease_until, id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_cursors (
+                    group_id TEXT PRIMARY KEY,
+                    cursor_timestamp INTEGER NOT NULL DEFAULT 0,
+                    cursor_source_id TEXT NOT NULL DEFAULT '',
+                    cycle_id TEXT NOT NULL DEFAULT '',
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS idle_content_pool (
+                    content_hash TEXT PRIMARY KEY,
+                    source TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    fetched_at INTEGER NOT NULL DEFAULT 0,
+                    last_used_at INTEGER NOT NULL DEFAULT 0,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
             for table, column, definition in (
                 ("style_expressions", "last_active_time", "INTEGER NOT NULL DEFAULT 0"),
+                ("style_expressions", "category", "TEXT NOT NULL DEFAULT 'general'"),
+                ("style_expressions", "confidence", "REAL NOT NULL DEFAULT 0"),
+                ("style_expressions", "source", "TEXT NOT NULL DEFAULT 'learned'"),
+                ("slang_terms", "comprehension_level", "INTEGER NOT NULL DEFAULT 1"),
+                ("slang_terms", "active_use_level", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_terms", "reliability_score", "REAL NOT NULL DEFAULT 0"),
+                ("slang_terms", "freshness_until", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "comprehension_level", "INTEGER NOT NULL DEFAULT 1"),
+                ("slang_scenarios", "active_use_level", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "reliability_score", "REAL NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "freshness_until", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 columns = {
                     str(row[1])
                     for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
                 }
+                # PRAGMA returns no columns for tables that are first created by
+                # the schema script below.  Skip their additive migration on a
+                # fresh database; the post-schema migration handles them after
+                # creation.
+                if not columns:
+                    continue
                 if column not in columns:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            placeholders = ",".join("?" for _ in _META_SEED_PATTERNS)
+            connection.execute(
+                f"UPDATE style_expressions SET category='meta_humor', confidence=0.96, source='seed' "
+                f"WHERE pattern IN ({placeholders})",
+                _META_SEED_PATTERNS,
+            )
             if self._schema_is_ready(connection):
                 # These tables belonged to the removed overlap/dedup pipeline.
                 connection.execute("DROP TABLE IF EXISTS slang_relations")
@@ -311,6 +448,9 @@ class ProfileStore:
                     updated_at INTEGER NOT NULL DEFAULT 0,
                     last_seen INTEGER NOT NULL DEFAULT 0,
                     last_active_time INTEGER NOT NULL DEFAULT 0,
+                    category TEXT NOT NULL DEFAULT 'general',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'learned',
                     PRIMARY KEY (group_id, situation)
                 );
                 CREATE INDEX IF NOT EXISTS idx_style_expressions_prompt
@@ -377,6 +517,14 @@ class ProfileStore:
                 ("slang_scenarios", "shared_subphrase_count", "INTEGER NOT NULL DEFAULT 0"),
                 ("slang_scenarios", "covered_by_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("slang_scenarios", "overlap_updated_at", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_terms", "comprehension_level", "INTEGER NOT NULL DEFAULT 1"),
+                ("slang_terms", "active_use_level", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_terms", "reliability_score", "REAL NOT NULL DEFAULT 0"),
+                ("slang_terms", "freshness_until", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "comprehension_level", "INTEGER NOT NULL DEFAULT 1"),
+                ("slang_scenarios", "active_use_level", "INTEGER NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "reliability_score", "REAL NOT NULL DEFAULT 0"),
+                ("slang_scenarios", "freshness_until", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 columns = {
                     str(row[1])
@@ -458,6 +606,7 @@ class ProfileStore:
             "learning_samples", "style_cards", "slang_scenarios", "maintenance_runs",
             "style_expressions", "behavior_patterns", "cycle_curation_runs",
             "pending_slang_terms", "pending_slang_evidence", "pending_slang_speakers",
+            "learning_outbox", "learning_cursors", "idle_content_pool",
         }
         rows = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -469,12 +618,15 @@ class ProfileStore:
                 "slang_type", "emotion", "emotion_intensity", "llm_confidence",
                 "local_confidence", "algorithm_confidence", "overlap_ratio",
                 "independent_occurrence_count", "shared_subphrase_count", "covered_by_json",
-                "overlap_updated_at", "examples_json",
+                "overlap_updated_at", "examples_json", "comprehension_level",
+                "active_use_level", "reliability_score", "freshness_until",
             },
             "slang_scenarios": {
                 "slang_type", "emotion", "emotion_intensity", "llm_confidence",
                 "algorithm_confidence", "overlap_ratio", "independent_occurrence_count",
                 "shared_subphrase_count", "covered_by_json", "overlap_updated_at",
+                "comprehension_level", "active_use_level", "reliability_score",
+                "freshness_until",
             },
         }
         for table, columns in required_columns.items():
@@ -501,6 +653,8 @@ class ProfileStore:
             connection.execute("DELETE FROM pending_slang_evidence WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM pending_slang_speakers WHERE group_id = ?", (group_id,))
             connection.execute("DELETE FROM pending_slang_terms WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM learning_outbox WHERE group_id = ?", (group_id,))
+            connection.execute("DELETE FROM learning_cursors WHERE group_id = ?", (group_id,))
 
     @_maintenance_serialized
     def replace_profile(
@@ -635,6 +789,159 @@ class ProfileStore:
         return dict(learning) if isinstance(learning, dict) else {}
 
     @_maintenance_serialized
+    def enqueue_outbox(self, *, event_key, group_id, kind, payload, now=None) -> int:
+        """Persist one idempotent learning/cycle event before attempting work."""
+        event_key = str(event_key or "").strip()
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        kind = str(kind or "message_observation").strip() or "message_observation"
+        if not event_key:
+            return 0
+        now = int(float(now or time.time()))
+        encoded = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, separators=(",", ":"))
+        with self._managed_connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO learning_outbox(event_key, group_id, kind, payload_json, "
+                "status, attempts, next_attempt_at, lease_until, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', 0, 0, 0, ?, ?)",
+                (event_key, group_id, kind, encoded[:200000], now, now),
+            )
+            row = connection.execute("SELECT id FROM learning_outbox WHERE event_key=?", (event_key,)).fetchone()
+        return int(row[0]) if row else 0
+
+    @_maintenance_serialized
+    def claim_outbox(self, *, kinds=None, group_id=None, limit=16, lease_seconds=120) -> list[dict]:
+        now = int(time.time())
+        limit = max(1, min(int(limit or 16), 100))
+        kind_values = [str(item) for item in (kinds or []) if str(item).strip()]
+        with self._managed_connection() as connection:
+            where = "((status='pending' AND next_attempt_at<=?) OR (status='inflight' AND lease_until<=?))"
+            params = [now, now]
+            if kind_values:
+                where += " AND kind IN (" + ",".join("?" for _ in kind_values) + ")"
+                params.extend(kind_values)
+            if group_id:
+                where += " AND group_id=?"
+                params.append(str(group_id))
+            rows = connection.execute(
+                f"SELECT * FROM learning_outbox WHERE {where} ORDER BY id LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+            ids = [int(row["id"]) for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"UPDATE learning_outbox SET status='inflight', lease_until=?, updated_at=? WHERE id IN ({placeholders})",
+                    (now + max(10, int(lease_seconds or 120)), now, *ids),
+                )
+        return [dict(row) for row in rows]
+
+    @_maintenance_serialized
+    def ack_outbox(self, row_id) -> bool:
+        with self._managed_connection() as connection:
+            cur = connection.execute("DELETE FROM learning_outbox WHERE id=?", (int(row_id),))
+        return bool(cur.rowcount)
+
+    @_maintenance_serialized
+    def fail_outbox(self, row_id, error="", *, max_attempts=5, retry_delay=30) -> bool:
+        """Release a failed outbox row with bounded exponential backoff.
+
+        ``max_attempts=None`` (or a non-positive value) keeps the event pending
+        indefinitely.  Cycle curation uses that mode: an LLM outage must not
+        silently discard a complete cycle of learning evidence.  Ordinary local
+        observation jobs retain the finite default so malformed payloads cannot
+        retry forever.
+        """
+        now = int(time.time())
+        try:
+            attempt_limit = int(max_attempts) if max_attempts is not None else 0
+        except (TypeError, ValueError):
+            attempt_limit = 0
+        with self._managed_connection() as connection:
+            row = connection.execute("SELECT attempts FROM learning_outbox WHERE id=?", (int(row_id),)).fetchone()
+            if not row:
+                return False
+            attempts = int(row[0] or 0) + 1
+            status = "dead" if attempt_limit > 0 and attempts >= attempt_limit else "pending"
+            delay = max(5, int(retry_delay or 30)) * min(16, 2 ** max(0, attempts - 1))
+            connection.execute(
+                "UPDATE learning_outbox SET status=?, attempts=?, next_attempt_at=?, lease_until=0, "
+                "last_error=?, updated_at=? WHERE id=?",
+                (status, attempts, now + delay, str(error or "")[:500], now, int(row_id)),
+            )
+        return True
+
+    def pending_outbox_count(self, *, kind=None, group_id=None) -> int:
+        clauses, params = ["status IN ('pending','inflight')"], []
+        if kind:
+            clauses.append("kind=?"); params.append(str(kind))
+        if group_id:
+            clauses.append("group_id=?"); params.append(str(group_id))
+        with self._managed_connection() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM learning_outbox WHERE " + " AND ".join(clauses), params).fetchone()
+        return int(row[0] or 0)
+
+    def get_learning_cursor(self, group_id) -> dict:
+        with self._managed_connection() as connection:
+            row = connection.execute("SELECT * FROM learning_cursors WHERE group_id=?", (str(group_id),)).fetchone()
+        return dict(row) if row else {"group_id": str(group_id), "cursor_timestamp": 0, "cursor_source_id": "", "cycle_id": ""}
+
+    @_maintenance_serialized
+    def advance_learning_cursor(self, group_id, *, timestamp=0, source_id="", cycle_id="") -> bool:
+        now = int(time.time())
+        group_id = str(group_id or "unknown")
+        timestamp = int(timestamp or 0)
+        with self._managed_connection() as connection:
+            old = connection.execute("SELECT cursor_timestamp, cursor_source_id FROM learning_cursors WHERE group_id=?", (group_id,)).fetchone()
+            if old and (timestamp, str(source_id or "")) < (int(old[0] or 0), str(old[1] or "")):
+                return False
+            connection.execute(
+                "INSERT INTO learning_cursors(group_id,cursor_timestamp,cursor_source_id,cycle_id,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(group_id) DO UPDATE SET cursor_timestamp=excluded.cursor_timestamp, cursor_source_id=excluded.cursor_source_id, cycle_id=excluded.cycle_id, updated_at=excluded.updated_at",
+                (group_id, timestamp, str(source_id or "")[:200], str(cycle_id or "")[:120], now),
+            )
+        return True
+
+    @_maintenance_serialized
+    def cache_idle_content(self, *, content_hash, source="", title="", content="", url="", metadata=None, fetched_at=None) -> bool:
+        value = str(content_hash or "").strip()
+        if not value or not str(content or "").strip():
+            return False
+        now = int(float(fetched_at or time.time()))
+        with self._managed_connection() as connection:
+            connection.execute(
+                "INSERT INTO idle_content_pool(content_hash,source,title,content,url,fetched_at,metadata_json) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(content_hash) DO UPDATE SET title=excluded.title, content=excluded.content, url=excluded.url, fetched_at=excluded.fetched_at, metadata_json=excluded.metadata_json",
+                (value, str(source or "")[:80], str(title or "")[:300], str(content or "")[:3000], str(url or "")[:500], now, json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))),
+            )
+        return True
+
+    def get_idle_content_pool(self, *, limit=20, max_age_seconds=7*86400) -> list[dict]:
+        cutoff = int(time.time()) - max(0, int(max_age_seconds or 0))
+        with self._managed_connection() as connection:
+            rows = connection.execute("SELECT * FROM idle_content_pool WHERE fetched_at>=? ORDER BY fetched_at DESC LIMIT ?", (cutoff, max(1, min(int(limit or 20), 100)))).fetchall()
+        return [dict(row) for row in rows]
+
+    @_maintenance_serialized
+    def mark_idle_content_used(self, content_hash) -> bool:
+        with self._managed_connection() as connection:
+            cur = connection.execute("UPDATE idle_content_pool SET last_used_at=?, use_count=use_count+1 WHERE content_hash=?", (int(time.time()), str(content_hash)))
+        return bool(cur.rowcount)
+
+    @_maintenance_serialized
+    def record_bot_interruption_outcome(self, group_id, *, outcome="unknown") -> None:
+        group_id = str(group_id or "unknown")
+        now = int(time.time())
+        outcome = str(outcome or "unknown")
+        with self._managed_connection() as connection:
+            row = connection.execute("SELECT profile_json FROM group_activity_profiles WHERE group_id=?", (group_id,)).fetchone()
+            profile = _load_json(row[0], {}) if row else {}
+            if not isinstance(profile, dict): profile = {}
+            key = {"accepted": "bot_reply_accepted", "interrupted": "bot_reply_interrupted", "ignored": "bot_reply_ignored"}.get(outcome, "bot_reply_unknown")
+            profile[key] = int(profile.get(key, 0) or 0) + 1
+            total = sum(int(profile.get(k, 0) or 0) for k in ("bot_reply_accepted", "bot_reply_interrupted", "bot_reply_ignored"))
+            profile["bot_reply_success_rate"] = round(int(profile.get("bot_reply_accepted", 0) or 0) / max(1, total), 3)
+            connection.execute("INSERT INTO group_activity_profiles(group_id,profile_json,updated_at) VALUES(?,?,?) ON CONFLICT(group_id) DO UPDATE SET profile_json=excluded.profile_json,updated_at=excluded.updated_at", (group_id, json.dumps(profile, ensure_ascii=False, separators=(",", ":")), now))
+
     def record_curation_run(
         self,
         group_id,
@@ -963,6 +1270,214 @@ class ProfileStore:
         text = "\n".join(lines)
         return text[:max_chars]
 
+    @staticmethod
+    def _activity_number(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @_maintenance_serialized
+    def update_cycle_activity(self, group_id, messages, *, cycle_end_at=None, cycle_id=None) -> dict:
+        """Update a compact EMA rhythm profile at the existing cycle boundary.
+
+        It deliberately consumes only the cycle snapshot; no periodic learner
+        or message-count threshold is introduced. A subsequent idle window can
+        use the profile to decide whether a light content opportunity is even
+        worth presenting to the reply model.
+        """
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        now = int(float(cycle_end_at or time.time()))
+        users = {}
+        timestamps = []
+        human_events = []
+        bot_events = []
+        for item in messages or []:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            try:
+                event_timestamp = float(item.get("timestamp"))
+            except (TypeError, ValueError):
+                event_timestamp = 0.0
+            if item.get("is_bot") or str(item.get("role") or "") == "assistant":
+                if content and event_timestamp > 0:
+                    bot_events.append((event_timestamp, content))
+                continue
+            if not content or content.startswith("/"):
+                continue
+            user = str(item.get("wxid") or item.get("sender_wxid") or item.get("sender_id") or item.get("sender") or item.get("speaker") or item.get("nickname") or "unknown").strip()
+            users[user] = users.get(user, 0) + 1
+            try:
+                timestamp = float(item.get("timestamp"))
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            if timestamp > 0:
+                timestamps.append(timestamp)
+                human_events.append((timestamp, content, user))
+        message_count = sum(users.values())
+        if not message_count:
+            return self.get_activity_profile(group_id)
+        timestamps.sort()
+        gaps = [right - left for left, right in zip(timestamps, timestamps[1:]) if 0 <= right - left <= 3600]
+        mean_gap = sum(gaps) / len(gaps) if gaps else 0.0
+        p75_gap = sorted(gaps)[int((len(gaps) - 1) * 0.75)] if gaps else mean_gap
+        effective_members = sum(min(1.0, count / 2.0) for count in users.values())
+        messages_per_member = message_count / max(1.0, effective_members)
+        two_person_share = sum(sorted(users.values(), reverse=True)[:2]) / max(1, message_count)
+        topic_duration = max(0.0, timestamps[-1] - timestamps[0]) if len(timestamps) >= 2 else 0.0
+        multi_participant_share = min(1.0, len(users) / max(2.0, effective_members + 0.5))
+        # Weak, local interruption signal: a fast reply that switches all
+        # lightweight topic tokens is more likely to have cut across the flow;
+        # it is never used as a hard prohibition.
+        bot_outcomes = {"accepted": 0, "interrupted": 0, "ignored": 0}
+        for bot_time, bot_text in bot_events:
+            followers = [(ts, text, speaker) for ts, text, speaker in human_events if ts >= bot_time and ts <= bot_time + 180]
+            if not followers:
+                if now >= bot_time + 180:
+                    bot_outcomes["ignored"] += 1
+                continue
+            first_ts, first_text, _ = followers[0]
+            overlap = _topic_tokens(bot_text) & _topic_tokens(first_text)
+            if first_ts - bot_time <= 15 and not overlap and len(followers) <= 1:
+                bot_outcomes["interrupted"] += 1
+            else:
+                bot_outcomes["accepted"] += 1
+        with self._managed_connection() as connection:
+            row = connection.execute(
+                "SELECT profile_json FROM group_activity_profiles WHERE group_id=?", (group_id,)
+            ).fetchone()
+            profile = _load_json(row["profile_json"], {}) if row else {}
+            if not isinstance(profile, dict):
+                profile = {}
+            cycle_key = str(cycle_id or "").strip()
+            # A cycle-end callback may be retried after a transient provider or
+            # dispatcher failure. Count the same named cycle at most once.
+            if cycle_key and str(profile.get("last_cycle_id") or "") == cycle_key:
+                return profile
+            # Lightweight outcome signal: after an idle-content post, a new
+            # human message in the next three minutes counts as weak acceptance;
+            # silence through that window counts as ignored. It never forces a
+            # send, only adjusts later opportunity probability.
+            last_idle_content_at = self._activity_number(profile.get("last_idle_content_at"))
+            feedback_recorded_at = self._activity_number(profile.get("last_idle_content_feedback_recorded_at"))
+            if last_idle_content_at and last_idle_content_at > feedback_recorded_at:
+                replied_after_post = any(
+                    last_idle_content_at <= value <= last_idle_content_at + 180
+                    for value in timestamps
+                )
+                if replied_after_post:
+                    profile["idle_content_accepted"] = int(profile.get("idle_content_accepted", 0) or 0) + 1
+                    profile["last_idle_content_feedback_recorded_at"] = last_idle_content_at
+                elif now >= last_idle_content_at + 180:
+                    profile["idle_content_ignored"] = int(profile.get("idle_content_ignored", 0) or 0) + 1
+                    profile["last_idle_content_feedback_recorded_at"] = last_idle_content_at
+            previous_cycles = int(profile.get("cycles", 0) or 0)
+            alpha = 0.35 if previous_cycles < 6 else 0.18
+            def ema(name, value):
+                old = self._activity_number(profile.get(name), value)
+                return round(value if previous_cycles <= 0 else old * (1 - alpha) + value * alpha, 3)
+            profile.update({
+                "cycles": previous_cycles + 1,
+                "ema_effective_members": ema("ema_effective_members", effective_members),
+                "ema_messages_per_member": ema("ema_messages_per_member", messages_per_member),
+                "ema_message_count": ema("ema_message_count", message_count),
+                "ema_mean_gap_seconds": ema("ema_mean_gap_seconds", mean_gap),
+                "ema_p75_gap_seconds": ema("ema_p75_gap_seconds", p75_gap),
+                "ema_two_person_share": ema("ema_two_person_share", two_person_share),
+                "ema_topic_duration_seconds": ema("ema_topic_duration_seconds", topic_duration),
+                "ema_multi_participant_share": ema("ema_multi_participant_share", multi_participant_share),
+                "bot_reply_accepted": int(profile.get("bot_reply_accepted", 0) or 0) + bot_outcomes["accepted"],
+                "bot_reply_interrupted": int(profile.get("bot_reply_interrupted", 0) or 0) + bot_outcomes["interrupted"],
+                "bot_reply_ignored": int(profile.get("bot_reply_ignored", 0) or 0) + bot_outcomes["ignored"],
+                "last_cycle_at": now,
+                "last_cycle_id": cycle_key,
+                "last_cycle_user_messages": message_count,
+                "last_cycle_members": len(users),
+            })
+            bot_total = sum(int(profile.get(key, 0) or 0) for key in ("bot_reply_accepted", "bot_reply_interrupted", "bot_reply_ignored"))
+            profile["bot_reply_success_rate"] = round(int(profile.get("bot_reply_accepted", 0) or 0) / max(1, bot_total), 3)
+            profile["bot_reply_interrupt_rate"] = round(int(profile.get("bot_reply_interrupted", 0) or 0) / max(1, bot_total), 3)
+            connection.execute(
+                "INSERT INTO group_activity_profiles(group_id, profile_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(group_id) DO UPDATE SET profile_json=excluded.profile_json, updated_at=excluded.updated_at",
+                (group_id, json.dumps(profile, ensure_ascii=False, separators=(",", ":")), now),
+            )
+        return profile
+
+    def get_activity_profile(self, group_id) -> dict:
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        with self._managed_connection() as connection:
+            row = connection.execute(
+                "SELECT profile_json FROM group_activity_profiles WHERE group_id=?", (group_id,)
+            ).fetchone()
+        profile = _load_json(row["profile_json"], {}) if row else {}
+        return profile if isinstance(profile, dict) else {}
+
+    @_maintenance_serialized
+    def record_idle_content_attempt(self, group_id, *, sent_at=None) -> bool:
+        group_id = str(group_id or "unknown").strip() or "unknown"
+        now = int(float(sent_at or time.time()))
+        with self._managed_connection() as connection:
+            row = connection.execute("SELECT profile_json FROM group_activity_profiles WHERE group_id=?", (group_id,)).fetchone()
+            profile = _load_json(row["profile_json"], {}) if row else {}
+            if not isinstance(profile, dict):
+                profile = {}
+            profile["idle_content_attempts"] = int(profile.get("idle_content_attempts", 0) or 0) + 1
+            profile["last_idle_content_at"] = now
+            connection.execute(
+                "INSERT INTO group_activity_profiles(group_id, profile_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(group_id) DO UPDATE SET profile_json=excluded.profile_json, updated_at=excluded.updated_at",
+                (group_id, json.dumps(profile, ensure_ascii=False, separators=(",", ":")), now),
+            )
+        return True
+
+    def decide_idle_content_opportunity(self, group_id, *, now=None, silence_seconds=0.0) -> dict:
+        """Return a conservative, per-window opportunity rather than a quota."""
+        now = float(now or time.time())
+        profile = self.get_activity_profile(group_id)
+        cycles = int(profile.get("cycles", 0) or 0)
+        members = self._activity_number(profile.get("ema_effective_members"))
+        volume = self._activity_number(profile.get("ema_messages_per_member"))
+        p75_gap = max(15.0, self._activity_number(profile.get("ema_p75_gap_seconds"), 45.0))
+        two_person = self._activity_number(profile.get("ema_two_person_share"), 1.0)
+        last_sent = self._activity_number(profile.get("last_idle_content_at"))
+        attempts = int(profile.get("idle_content_attempts", 0) or 0)
+        accepted = int(profile.get("idle_content_accepted", 0) or 0)
+        ignored = int(profile.get("idle_content_ignored", 0) or 0)
+        if cycles < 3 or members < 1.6:
+            return {"eligible": False, "probability": 0.0, "reason": "insufficient_group_rhythm", "profile": profile}
+        # Cooldown scales with the group itself, not a global daily allowance.
+        cooldown = max(20 * 60.0, min(4 * 3600.0, p75_gap * max(18.0, volume * 5.0)))
+        if last_sent and now - last_sent < cooldown:
+            return {"eligible": False, "probability": 0.0, "reason": "recent_idle_content", "profile": profile}
+        silence_fit = max(0.0, min(1.0, float(silence_seconds or 0.0) / max(45.0, p75_gap * 2.0)))
+        member_fit = max(0.0, min(1.0, (members - 1.4) / 3.5))
+        conversation_fit = max(0.0, min(1.0, volume / 7.0))
+        acceptance = (accepted + 1.0) / max(2.0, attempts + 2.0)
+        bot_accepted = int(profile.get("bot_reply_accepted", 0) or 0)
+        bot_interrupted = int(profile.get("bot_reply_interrupted", 0) or 0)
+        bot_ignored = int(profile.get("bot_reply_ignored", 0) or 0)
+        bot_total = bot_accepted + bot_interrupted + bot_ignored
+        # Avoid overfitting a few ambiguous replies. Once enough local
+        # feedback exists, poor acceptance or topic-cutting only gently lowers
+        # future opportunities for this group.
+        if bot_total >= 4:
+            bot_success = bot_accepted / bot_total
+            bot_interrupt = bot_interrupted / bot_total
+            reply_fit = max(0.30, min(1.0, 0.55 + 0.55 * bot_success - 0.45 * bot_interrupt))
+        else:
+            reply_fit = 1.0
+        two_person_penalty = max(0.15, 1.0 - max(0.0, two_person - 0.78) * 2.8)
+        probability = round(min(0.22, 0.015 + 0.18 * member_fit * conversation_fit * silence_fit * acceptance * reply_fit * two_person_penalty), 4)
+        return {
+            "eligible": probability > 0.0,
+            "probability": probability,
+            "reason": "adaptive_group_idle_window",
+            "cooldown_seconds": int(cooldown),
+            "profile": profile,
+        }
+
     @_maintenance_serialized
     def record_message(self, observation: dict, terms: list[dict], min_term_count: int = 3):
         group_id = str(observation.get("group_id") or "unknown").strip() or "unknown"
@@ -1022,78 +1537,9 @@ class ProfileStore:
 
             # The local learner records samples and style only. It must never
             # turn extracted n-grams into slang database rows.
-            # Slang persistence is exclusively handled by daily LLM curation.
+            # Slang persistence is exclusively handled by cycle-end LLM curation.
             self._refresh_top_terms(connection, group_id)
             return True
-            terms = []
-            for term in terms:
-                normalized = str(term.get("normalized_phrase") or "").strip()
-                phrase = str(term.get("phrase") or normalized).strip()
-                if not normalized or not phrase:
-                    continue
-                if _is_generic_slang_phrase(normalized):
-                    continue
-                existing = connection.execute(
-                    "SELECT occurrence_count, first_seen, examples_json FROM slang_terms "
-                    "WHERE group_id = ? AND normalized_phrase = ?",
-                    (group_id, normalized),
-                ).fetchone()
-                occurrence = int(existing["occurrence_count"] if existing else 0) + 1
-                first_seen = int(existing["first_seen"] if existing else now)
-                examples = _load_json(existing["examples_json"], []) if existing else []
-                if content and content not in examples:
-                    examples = (examples + [content[:160]])[-3:]
-                connection.execute(
-                    """
-                    INSERT INTO slang_terms(
-                        group_id, normalized_phrase, phrase, occurrence_count, speaker_count,
-                        first_seen, last_seen, confidence, safe_to_use, examples_json
-                    ) VALUES (?, ?, ?, ?, 0, ?, ?, 0, 0, ?)
-                    ON CONFLICT(group_id, normalized_phrase) DO UPDATE SET
-                        phrase=excluded.phrase,
-                        occurrence_count=excluded.occurrence_count,
-                        last_seen=excluded.last_seen,
-                        examples_json=excluded.examples_json
-                    """,
-                    (
-                        group_id, normalized, phrase, occurrence, first_seen, now,
-                        json.dumps(examples, ensure_ascii=False, separators=(",", ":")),
-                    ),
-                )
-                connection.execute(
-                    "INSERT OR IGNORE INTO term_speakers(group_id, normalized_phrase, speaker) VALUES (?, ?, ?)",
-                    (group_id, normalized, speaker),
-                )
-                speaker_count = connection.execute(
-                    "SELECT COUNT(*) FROM term_speakers WHERE group_id = ? AND normalized_phrase = ?",
-                    (group_id, normalized),
-                ).fetchone()[0]
-                confidence, safe = _term_confidence(
-                    occurrence, int(speaker_count), min_term_count
-                )
-                connection.execute(
-                    "UPDATE slang_terms SET speaker_count = ?, confidence = ?, local_confidence = ?, safe_to_use = ? "
-                    "WHERE group_id = ? AND normalized_phrase = ?",
-                    (speaker_count, confidence, confidence, int(safe), group_id, normalized),
-                )
-                self._sync_slang_scenario_candidate_locked(
-                    connection,
-                    group_id,
-                    {
-                        "normalized_phrase": normalized,
-                        "phrase": phrase,
-                        "occurrence_count": occurrence,
-                        "speaker_count": speaker_count,
-                        "confidence": confidence,
-                        "safe_to_use": safe,
-                        "last_seen": now,
-                        "examples": examples,
-                    },
-                    now,
-                )
-
-            self._refresh_top_terms(connection, group_id)
-        return True
 
     @_maintenance_serialized
     def record_messages(self, items: list[tuple[dict, list[dict], int]]) -> int:
@@ -1518,10 +1964,23 @@ class ProfileStore:
                     slang_type, emotion, emotion_intensity, llm_confidence, now,
                 ),
             )
+            reliability_score = round(min(0.99, local_confidence * 0.82 + min(1.0, occurrence / max(2.0, minimum * 3.0)) * 0.18), 3)
+            comprehension_level = 2 if safe else 1
+            # A phrase can be kept for comprehension before the bot earns the
+            # right to reuse it.  Active reuse needs repeated, multi-speaker,
+            # locally grounded evidence; the model's confidence is not a gate.
+            active_use_level = int(bool(safe and occurrence >= minimum + 1 and int(speaker_count) >= 2 and reliability_score >= 0.68))
+            freshness_until = now + 14 * 86400 if active_use_level else 0
             connection.execute(
-                "UPDATE slang_terms SET slang_type=?, emotion=?, emotion_intensity=?, llm_confidence=? "
+                "UPDATE slang_terms SET slang_type=?, emotion=?, emotion_intensity=?, llm_confidence=?, "
+                "comprehension_level=?, active_use_level=?, reliability_score=?, freshness_until=? "
                 "WHERE group_id=? AND normalized_phrase=?",
-                (slang_type, emotion, emotion_intensity, llm_confidence, group_id, normalized),
+                (slang_type, emotion, emotion_intensity, llm_confidence, comprehension_level, active_use_level, reliability_score, freshness_until, group_id, normalized),
+            )
+            connection.execute(
+                "UPDATE slang_scenarios SET comprehension_level=?, active_use_level=?, reliability_score=?, freshness_until=? "
+                "WHERE group_id=? AND normalized_phrase=?",
+                (comprehension_level, active_use_level, reliability_score, freshness_until, group_id, normalized),
             )
         return True
 
@@ -1536,7 +1995,7 @@ class ProfileStore:
                 "SELECT phrase, normalized_phrase, meaning, scenes_json, avoid_scenes_json, "
                 "examples_json, confidence, speaker_count, occurrence_count, last_seen, "
                 "slang_type, emotion, emotion_intensity "
-                "FROM slang_scenarios WHERE group_id = ? AND safe_to_use = 1 AND status = 'active' "
+                "FROM slang_scenarios WHERE group_id = ? AND safe_to_use = 1 AND status = 'active' AND active_use_level >= 1 "
                 "ORDER BY confidence DESC, occurrence_count DESC, last_seen DESC LIMIT 80",
                 (group_id,),
             ).fetchall()
@@ -1548,7 +2007,8 @@ class ProfileStore:
             overlap = len(query_tokens & searchable)
             if query_tokens and overlap == 0:
                 continue
-            score = overlap * 4 + float(row["confidence"]) * 2 + min(2.0, int(row["occurrence_count"]) / 10)
+            freshness = 0.45 if int(row["freshness_until"] or 0) >= int(time.time()) else 0.0
+            score = overlap * 4 + float(row["confidence"]) * 2 + float(row["reliability_score"] or 0) + freshness + min(2.0, int(row["occurrence_count"]) / 10)
             ranked.append((score, row, scenes))
         ranked.sort(key=lambda entry: entry[0], reverse=True)
         result = []
@@ -1569,6 +2029,8 @@ class ProfileStore:
             if used + len(encoded) + 1 > budget:
                 continue
             result.append(item)
+            if category in _META_EXPRESSION_CATEGORIES:
+                meta_added = True
             used += len(encoded) + 1
             if len(result) >= limit:
                 break
@@ -2199,7 +2661,7 @@ class ProfileStore:
         if not normalized:
             return None
         rows = connection.execute(
-            "SELECT situation, pattern, count, status, keywords_json, examples_json "
+            "SELECT situation, pattern, count, status, keywords_json, examples_json, category, confidence, source "
             "FROM style_expressions WHERE group_id = ? ORDER BY count DESC, updated_at DESC LIMIT 200",
             (str(group_id or "unknown").strip() or "unknown",),
         ).fetchall()
@@ -2268,8 +2730,15 @@ class ProfileStore:
                     delta = max(0, min(200, int(action.get("occurrence_delta") or 1)))
                 except (TypeError, ValueError):
                     delta = 1
+                category = _clean_expression_category(action.get("category"))
+                confidence = _clean_expression_confidence(action.get("confidence"), 0.45)
+                source = _clean_text(action.get("source"), 48) or "cycle_learning"
                 existing = self._find_expression_locked(connection, group_id, situation)
                 if existing is not None:
+                    # Omitted metadata must not erase a trusted seed/category.
+                    category = _clean_expression_category(action.get("category")) if action.get("category") is not None else _clean_expression_category(existing.get("category"))
+                    confidence = _clean_expression_confidence(action.get("confidence"), existing.get("confidence", 0.45)) if action.get("confidence") is not None else _clean_expression_confidence(existing.get("confidence"), 0.45)
+                    source = _clean_text(action.get("source"), 48) or str(existing.get("source") or "learned")
                     merged_keywords = _clean_text_list(
                         _load_json(existing["keywords_json"], []) + keywords, 8, 24
                     )
@@ -2278,24 +2747,26 @@ class ProfileStore:
                     )
                     connection.execute(
                         "UPDATE style_expressions SET pattern=?, count=count+?, status='active', "
-                        "keywords_json=?, examples_json=?, updated_at=?, last_seen=? "
+                        "keywords_json=?, examples_json=?, category=?, confidence=?, source=?, updated_at=?, last_seen=? "
                         "WHERE group_id=? AND situation=?",
                         (
                             pattern, delta,
                             json.dumps(merged_keywords, ensure_ascii=False, separators=(",", ":")),
                             json.dumps(merged_examples, ensure_ascii=False, separators=(",", ":")),
+                            category, confidence, source,
                             now, now, group_id, existing["situation"],
                         ),
                     )
                 else:
                     connection.execute(
                         "INSERT INTO style_expressions("
-                        "group_id, situation, pattern, count, status, keywords_json, examples_json, updated_at, last_seen) "
-                        "VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+                        "group_id, situation, pattern, count, status, keywords_json, examples_json, category, confidence, source, updated_at, last_seen) "
+                        "VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
                         (
                             group_id, situation, pattern, delta,
                             json.dumps(keywords, ensure_ascii=False, separators=(",", ":")),
                             json.dumps(examples, ensure_ascii=False, separators=(",", ":")),
+                            category, confidence, source,
                             now, now,
                         ),
                     )
@@ -2308,14 +2779,14 @@ class ProfileStore:
         with self._managed_connection() as connection:
             if status:
                 rows = connection.execute(
-                    "SELECT situation, pattern, count, status, keywords_json, examples_json "
+                    "SELECT situation, pattern, count, status, keywords_json, examples_json, category, confidence, source "
                     "FROM style_expressions WHERE group_id=? AND status=? "
                     "ORDER BY count DESC, updated_at DESC LIMIT ?",
                     (group_id, status, limit),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT situation, pattern, count, status, keywords_json, examples_json "
+                    "SELECT situation, pattern, count, status, keywords_json, examples_json, category, confidence, source "
                     "FROM style_expressions WHERE group_id=? "
                     "ORDER BY count DESC, updated_at DESC LIMIT ?",
                     (group_id, limit),
@@ -2328,14 +2799,19 @@ class ProfileStore:
                 "status": row["status"],
                 "keywords": _load_json(row["keywords_json"], [])[:6],
                 "examples": _load_json(row["examples_json"], [])[:2],
+                "category": _clean_expression_category(row["category"]),
+                "confidence": _clean_expression_confidence(row["confidence"], 0.45),
+                "source": str(row["source"] or "learned"),
             }
             for row in rows
         ]
 
+
+
     def get_context_expressions(self, group_id, messages, max_items=6, max_chars=900) -> list[dict]:
         """Return a small expression set whose situation matches the current context.
 
-        Lightweight local recall (??): keyword substring hits plus situation-token
+        Lightweight local recall: keyword substring hits plus situation-token
         overlap with the current non-bot user messages. The full library never
         enters a prompt; the LLM still decides whether to actually use a pattern.
         """
@@ -2355,13 +2831,17 @@ class ProfileStore:
         context_tokens = _topic_tokens(" ".join(context_texts))
         with self._managed_connection() as connection:
             rows = connection.execute(
-                "SELECT situation, pattern, count, keywords_json, examples_json "
+                "SELECT situation, pattern, count, keywords_json, examples_json, category, confidence, source "
                 "FROM style_expressions WHERE group_id=? AND status='active' "
                 "ORDER BY count DESC, updated_at DESC LIMIT 200",
                 (group_id,),
             ).fetchall()
         ranked = []
+        playful_context = _is_meta_expression_context(context)
         for row in rows:
+            category = _clean_expression_category(row["category"])
+            if category in _META_EXPRESSION_CATEGORIES and not playful_context:
+                continue
             situation = str(row["situation"] or "")
             keywords = _load_json(row["keywords_json"], [])
             if not keywords:
@@ -2371,21 +2851,32 @@ class ProfileStore:
             if hits == 0 and overlap == 0:
                 continue
             score = hits * 3 + overlap * 2 + min(2.0, int(row["count"] or 0) / 20.0)
+            if category in _META_EXPRESSION_CATEGORIES:
+                score += _clean_expression_confidence(row["confidence"], 0.45)
             ranked.append((score, row))
         ranked.sort(key=lambda entry: entry[0], reverse=True)
         result = []
         used = 0
+        meta_added = False
         for _, row in ranked:
+            category = _clean_expression_category(row["category"])
+            if category in _META_EXPRESSION_CATEGORIES and meta_added:
+                continue
             item = {
                 "situation": str(row["situation"] or "")[:140],
                 "pattern": str(row["pattern"] or "")[:220],
                 "count": int(row["count"] or 0),
                 "examples": _load_json(row["examples_json"], [])[:2],
+                "category": category,
+                "confidence": _clean_expression_confidence(row["confidence"], 0.45),
+                "source": str(row["source"] or "learned"),
             }
             encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             if used + len(encoded) + 1 > budget:
                 continue
             result.append(item)
+            if category in _META_EXPRESSION_CATEGORIES:
+                meta_added = True
             used += len(encoded) + 1
             if len(result) >= limit:
                 break
@@ -2393,9 +2884,12 @@ class ProfileStore:
 
 
     def build_expression_pool(self, group_id, messages, pool_size=12, max_chars=2400, scan_limit=2000) -> list[dict]:
-        """Build a maibot-style candidate pool: context hits plus count-weighted
-        and recency-weighted samples, so low-frequency expressions also get
-        exposure instead of being permanently starved by top-count ranking."""
+        """Build a compact expression candidate pool without vector retrieval.
+
+        General expressions use context/frequency/recency recall. High-confidence
+        meta reactions are an at-most-one branch and only appear in an explicitly
+        playful context; their stored count is never treated as frequency.
+        """
         group_id = str(group_id or "unknown").strip() or "unknown"
         limit = max(4, min(int(pool_size or 12), 24))
         budget = max(600, min(int(max_chars or 2400), 4800))
@@ -2409,24 +2903,23 @@ class ProfileStore:
                 context_texts.append(text)
         context = "".join(context_texts)
         context_tokens = _topic_tokens(" ".join(context_texts)) if context_texts else set()
+        playful_context = _is_meta_expression_context(context)
         now = int(time.time())
         with self._managed_connection() as connection:
             rows = connection.execute(
-                "SELECT situation, pattern, count, keywords_json, examples_json, last_seen, last_active_time "
-                "FROM style_expressions WHERE group_id=? AND status='active' "
+                "SELECT situation, pattern, count, keywords_json, examples_json, last_seen, last_active_time, "
+                "category, confidence, source FROM style_expressions WHERE group_id=? AND status='active' "
                 "ORDER BY count DESC, updated_at DESC LIMIT ?",
                 (group_id, scan_limit),
             ).fetchall()
-        hits = []
-        rest = []
+        general_rows, meta_rows = [], []
         for row in rows:
+            (meta_rows if _clean_expression_category(row["category"]) in _META_EXPRESSION_CATEGORIES else general_rows).append(row)
+        hits, rest = [], []
+        for row in general_rows:
             situation = str(row["situation"] or "")
-            keywords = _load_json(row["keywords_json"], [])
-            if not keywords:
-                keywords = list(_topic_tokens(situation))[:6]
-            keyword_hits = sum(
-                1 for keyword in keywords if keyword and _normalize_match_text(keyword) in context
-            )
+            keywords = _load_json(row["keywords_json"], []) or list(_topic_tokens(situation))[:6]
+            keyword_hits = sum(1 for keyword in keywords if keyword and _normalize_match_text(keyword) in context)
             overlap = len(_topic_tokens(situation) & context_tokens) if context_tokens else 0
             count = int(row["count"] or 0)
             if keyword_hits or overlap:
@@ -2434,65 +2927,58 @@ class ProfileStore:
             else:
                 rest.append(row)
         hits.sort(key=lambda entry: entry[0], reverse=True)
-        picked = []
-        picked_keys = set()
-        used_budget = 0
-
-        def take(row, source, score):
+        picked, picked_keys, used_budget = [], set(), 0
+        def take(row, recall_source, score):
             nonlocal used_budget
             situation = str(row["situation"] or "")
             if situation in picked_keys:
-                return
+                return False
             item = {
-                "situation": situation,
-                "pattern": str(row["pattern"] or "")[:220],
-                "count": int(row["count"] or 0),
-                "examples": _load_json(row["examples_json"], [])[:2],
-                "source": source,
+                "situation": situation, "pattern": str(row["pattern"] or "")[:220],
+                "count": int(row["count"] or 0), "examples": _load_json(row["examples_json"], [])[:2],
+                "category": _clean_expression_category(row["category"]),
+                "confidence": _clean_expression_confidence(row["confidence"], 0.45),
+                "source": str(row["source"] or "learned"), "recall_source": recall_source,
                 "score": round(float(score or 0), 4),
             }
             encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             if used_budget + len(encoded) + 1 > budget:
-                return
-            picked.append(item)
-            picked_keys.add(situation)
-            used_budget += len(encoded) + 1
-
-        for _, row in hits:
-            take(row, "hit", 0)
-            if len(picked) >= limit:
+                return False
+            picked.append(item); picked_keys.add(situation); used_budget += len(encoded) + 1
+            return True
+        general_target = limit - (1 if playful_context and meta_rows else 0)
+        for score, row in hits:
+            take(row, "context_hit", score)
+            if len(picked) >= general_target:
                 break
-        high_count = sorted(rest, key=lambda row: int(row["count"] or 0), reverse=True)
-        high_budget = max(2, (limit - len(picked)) // 2 + 1)
-        for row in high_count:
-            if high_budget <= 0:
+        high_budget = min(3, max(1, (general_target - len(picked)) // 2 + 1))
+        for row in sorted(rest, key=lambda value: int(value["count"] or 0), reverse=True):
+            if high_budget <= 0 or len(picked) >= general_target:
                 break
-            before = len(picked)
-            take(row, "high", 0)
-            if len(picked) > before:
+            if take(row, "general_high_frequency", 0):
                 high_budget -= 1
-            if len(picked) >= limit:
-                break
         if len(picked) < limit:
             remaining = [row for row in rest if str(row["situation"] or "") not in picked_keys]
             random.shuffle(remaining)
+            target = general_target
             for row in remaining:
                 weight = 1.0 + min(4.0, int(row["count"] or 0) / 20.0)
-                try:
-                    last = int(row["last_active_time"] or 0)
-                except (TypeError, ValueError):
-                    last = 0
-                if not last:
-                    try:
-                        last = int(row["last_seen"] or 0)
-                    except (TypeError, ValueError):
-                        last = 0
-                if last and now - last <= 30 * 86400:
-                    weight *= 1.5
-                take(row, "random", weight)
-                if len(picked) >= limit:
+                try: last = int(row["last_active_time"] or row["last_seen"] or 0)
+                except (TypeError, ValueError): last = 0
+                if last and now - last <= 30 * 86400: weight *= 1.5
+                take(row, "exploration", weight)
+                if len(picked) >= target: break
+        if playful_context and meta_rows and len(picked) < limit:
+            ranked_meta = sorted(meta_rows, key=lambda row: (_clean_expression_confidence(row["confidence"], 0.45), int(row["last_seen"] or 0)), reverse=True)
+            for row in ranked_meta:
+                if take(row, "meta_context", _clean_expression_confidence(row["confidence"], 0.45)):
+                    # Keep at most two ordinary references ahead of it so a
+                    # 3-item prompt budget can still see this optional pattern.
+                    meta_item = picked.pop()
+                    picked.insert(min(2, len(picked)), meta_item)
                     break
         return picked
+
 
     def record_expression_selection(self, group_id, situations) -> int:
         """Mark expressions as injected into a reply prompt (recency + counter)."""
@@ -2626,6 +3112,7 @@ class ProfileStore:
         if mid:
             return top + [random.choice(mid)]
         return top + (rest[:1] if rest else [])
+
 
 
 

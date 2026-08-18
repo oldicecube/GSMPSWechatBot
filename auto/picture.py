@@ -13,6 +13,8 @@ from core.weflow_media import download_image
 
 SAVE_DIR = os.path.join("data", "pics")
 INTERCEPT_LLM = True
+# Command-like entry handled by this auto plugin before normal command lookup.
+AUTO_COMMANDS = {"/对称"}
 
 
 # =========================================================
@@ -31,6 +33,13 @@ def start(sender):
 # 统一取文本
 # =========================================================
 def _get_text(context):
+    # Command messages are split by Router into command + args; reconstruct the
+    # original text so this auto plugin can recognize /?? even though
+    # context["content"] only contains the arguments.
+    command = str(context.get("command") or "").strip()
+    if command.startswith("/"):
+        args = str(context.get("args") or "").strip()
+        return f"{command} {args}".strip()
     return (
         context.get("text")
         or context.get("content")

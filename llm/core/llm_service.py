@@ -17,6 +17,7 @@ from llm.core.response_parser import (
 )
 from llm.memory import LongTermMemory, MemoryManager
 from llm.learning import StyleLearner
+from llm.learning.message_units import build_learning_units
 from llm.learning.profile_store import _is_generic_slang_phrase
 from llm.conversation_pulse import ConversationPulse
 from llm.proactive_reply import ProactiveReplyManager
@@ -42,6 +43,7 @@ from llm.web_tools import (
     TIABA_HOT_TOOL,
     WEB_FETCH_TOOL,
     execute_tool,
+    fetch_tieba_hot_post,
 )
 
 
@@ -75,6 +77,12 @@ class LLMService:
         # later incremental requests preserve and reuse the same boundary.
         self._history_cache_breakpoints = {}
         self._history_cache_breakpoints_lock = threading.RLock()
+        # Idle content is fetched into a small shared cache only after a real
+        # cycle boundary. It is not a global send quota: each group still
+        # independently decides whether it has earned a share opportunity.
+        self._idle_content_prefetch_lock = threading.RLock()
+        self._idle_content_prefetch_running = False
+        self._idle_content_prefetch_started_at = 0.0
         self._balance_warning_sent = False
         self.assistant_nickname = self.config.get("assistant_nickname", "LLM")
         self.emoji_list = []
@@ -99,6 +107,9 @@ class LLMService:
         if self.style_learner:
             self.proactive_reply.set_reply_timing_reader(
                 self.style_learner.get_response_learning
+            )
+            self.proactive_reply.set_activity_profile_reader(
+                self.style_learner.get_activity_profile
             )
 
     def _get_memory_context(self, group_id, wxid, query):
@@ -166,37 +177,32 @@ class LLMService:
         return "".join(char for char in str(value or "").casefold() if char.isalnum())
 
     @staticmethod
-    def _extract_local_slang_candidates(cycle_messages, known_phrases=None, max_candidates=30, max_messages=150):
-        """Find frequent phrase candidates from this cycle's non-bot messages.
+    def _extract_local_slang_candidates(learning_units, known_phrases=None, max_candidates=30, max_messages=150):
+        """Find frequent candidates from complete, boundary-verified learning units.
 
-        Candidate n-grams (2-6 chars) must appear in at least 2 distinct
-        messages or be spoken by at least 2 distinct speakers. Longest-first
-        dedup drops shorter substrings of an accepted candidate, so "吓哭了"
-        suppresses fake fragments like "吓哭"/"哭了". These are review-only
-        suggestions: the LLM still decides whether they enter the library.
+        A raw WeChat delivery may split one sentence into several events. Only
+        units explicitly marked ``candidate_allowed`` are considered here, so a
+        dangling half sentence can remain curation context without becoming a
+        slang candidate. Longest-first dedup prevents a full phrase from creating fake substring terms.
         """
-        if not cycle_messages:
+        units = [
+            item for item in (learning_units or [])
+            if isinstance(item, dict) and item.get("candidate_allowed") and item.get("complete")
+        ]
+        if not units:
             return []
-        # Bound cost: only the most recent messages matter for slang evidence.
-        if len(cycle_messages) > max(1, int(max_messages or 1)):
-            cycle_messages = list(cycle_messages)[-max(1, int(max_messages or 1)):]
-        known = set()
-        for phrase in known_phrases or []:
-            key = LLMService._slang_evidence_key(phrase)
-            if len(key) >= 2:
-                known.add(key)
-        records = []
-        seen_messages = set()
-        for index, item in enumerate(cycle_messages):
-            if not isinstance(item, dict) or item.get("is_bot") or str(item.get("role") or "") == "assistant":
-                continue
-            source_id = str(item.get("source_id") or "").strip() or f"_m{index}"
-            if source_id in seen_messages:
-                continue
+        if len(units) > max(1, int(max_messages or 1)):
+            units = units[-max(1, int(max_messages or 1)):]
+        known = {
+            LLMService._slang_evidence_key(phrase)
+            for phrase in (known_phrases or [])
+            if len(LLMService._slang_evidence_key(phrase)) >= 2
+        }
+        counts = {}
+        for index, item in enumerate(units):
             content = str(item.get("content") or "").strip()
             if (
-                not content
-                or content.startswith("/")
+                not content or content.startswith("/")
                 or re.search(r"https?://", content, flags=re.IGNORECASE)
                 or content.isdigit()
             ):
@@ -204,39 +210,30 @@ class LLMService:
             normalized = LLMService._slang_evidence_key(content)
             if len(normalized) < 2:
                 continue
-            speaker = str(
-                item.get("wxid") or item.get("sender_id") or item.get("sender")
-                or item.get("speaker") or item.get("nickname") or ""
-            ).strip()[:120]
-            records.append((source_id, normalized, speaker))
-            seen_messages.add(source_id)
-        if len(records) < 2:
-            return []
-        counts = {}
-        for source_id, normalized, speaker in records:
-            text_len = len(normalized)
-            for size in range(2, min(6, text_len) + 1):
-                for start in range(0, text_len - size + 1):
-                    gram = normalized[start:start + size]
+            source_ids = [str(source).strip() for source in (item.get("source_ids") or []) if str(source).strip()]
+            source_id = source_ids[0] if source_ids else f"_unit{index}"
+            speaker = str(item.get("speaker_id") or "").strip()[:120]
+            for size in range(2, min(6, len(normalized)) + 1):
+                for offset in range(0, len(normalized) - size + 1):
+                    gram = normalized[offset:offset + size]
                     if gram.isdigit() or len(set(gram)) == 1:
                         continue
-                    entry = counts.setdefault(gram, {"messages": set(), "speakers": set()})
+                    entry = counts.setdefault(gram, {"messages": set(), "speakers": set(), "source_ids": set()})
                     entry["messages"].add(source_id)
+                    entry["source_ids"].update(source_ids or [source_id])
                     if speaker:
                         entry["speakers"].add(speaker)
 
-        def _usable(gram):
-            if _is_generic_slang_phrase(gram):
-                return False
-            if gram in known:
-                return False
-            if any(len(k) > len(gram) and gram in k for k in known):
-                return False
-            return True
+        def usable(gram):
+            return not (
+                _is_generic_slang_phrase(gram)
+                or gram in known
+                or any(len(existing) > len(gram) and gram in existing for existing in known)
+            )
 
         passing = [
             gram for gram, entry in counts.items()
-            if (len(entry["messages"]) >= 2 or len(entry["speakers"]) >= 2) and _usable(gram)
+            if (len(entry["messages"]) >= 2 or len(entry["speakers"]) >= 2) and usable(gram)
         ]
         passing.sort(key=lambda gram: (-len(gram), gram))
         accepted = []
@@ -252,6 +249,7 @@ class LLMService:
                 "normalized_phrase": gram,
                 "message_count": len(counts[gram]["messages"]),
                 "speaker_count": len(counts[gram]["speakers"]),
+                "source_ids": sorted(counts[gram]["source_ids"])[:8],
             }
             for gram in accepted
         ]
@@ -290,67 +288,49 @@ class LLMService:
             longest_keys.append(key)
         return blocked
 
-    def _ground_slang_action_in_cycle(self, action, cycle_messages):
-        """Accept slang writes only when their phrase appears in current user context."""
+    def _ground_slang_action_in_cycle(self, action, learning_units):
+        """Ground slang writes only in complete, local learning units.
+
+        ``cycle_messages`` still give the curator conversational context, but
+        incomplete units never qualify as phrase evidence. This prevents a
+        model from learning an accidental prefix or a phrase created by joining
+        two unrelated deliveries.
+        """
         if not isinstance(action, dict):
             return None, "invalid_action"
         phrase = str(action.get("phrase") or action.get("normalized_phrase") or "").strip()
         phrase_key = self._slang_evidence_key(phrase)
         if len(phrase_key) < 2:
             return None, "missing_phrase"
-        sources = {}
-        matches = []
-        for item in cycle_messages or []:
-            if not isinstance(item, dict) or item.get("is_bot") or str(item.get("role") or "") == "assistant":
+        sources, matches = {}, []
+        for unit in learning_units or []:
+            if not isinstance(unit, dict) or not unit.get("complete") or not unit.get("candidate_allowed"):
                 continue
-            source_id = str(item.get("source_id") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if not source_id or not content:
+            content = str(unit.get("content") or "").strip()
+            if not content or phrase_key not in self._slang_evidence_key(content):
                 continue
-            sources[source_id] = {
-                "content": content,
-                "speaker": str(
-                    item.get("wxid") or item.get("sender_id") or item.get("sender")
-                    or item.get("speaker") or item.get("nickname") or ""
-                ).strip()[:120],
-            }
-            if phrase_key in self._slang_evidence_key(content):
+            speaker = str(unit.get("speaker_id") or "").strip()[:120]
+            for source_id in unit.get("source_ids") or []:
+                source_id = str(source_id).strip()
+                if not source_id:
+                    continue
+                sources[source_id] = {"content": content, "speaker": speaker}
                 matches.append(source_id)
+        matches = list(dict.fromkeys(matches))
         requested = action.get("source_ids")
         if isinstance(requested, str):
             requested = [requested]
-        requested = list(dict.fromkeys(
-            str(item).strip() for item in (requested or []) if str(item).strip()
-        ))[:8]
+        requested = list(dict.fromkeys(str(item).strip() for item in (requested or []) if str(item).strip()))[:8]
         if requested:
-            requested = [item for item in requested if item in sources]
-            source_ids = [item for item in requested if item in matches]
+            source_ids = [source_id for source_id in requested if source_id in matches]
             if not source_ids:
-                if matches:
-                    # Cited source ids are invalid or do not contain the exact
-                    # phrase. Fall back to locally verified occurrences so a
-                    # grounded phrase is not dropped just because provenance
-                    # ids drifted; the phrase still must appear in this cycle.
-                    print(
-                        f"[SLANG GROUND FALLBACK] phrase={phrase} requested={requested} "
-                        f"local_matches={len(matches)}",
-                        flush=True,
-                    )
-                    source_ids = matches[:3]
-                else:
-                    return None, (
-                        "unknown_source" if not requested
-                        else "source_does_not_contain_phrase"
-                    )
+                return None, "source_not_in_complete_learning_unit"
         elif matches:
-            # Backward-compatible local grounding for an otherwise valid
-            # response from a model that did not yet emit source_ids.
             source_ids = matches[:3]
         else:
-            return None, "phrase_not_in_cycle_context"
+            return None, "phrase_not_in_complete_learning_unit"
         source_speakers = list(dict.fromkeys(
-            sources[source_id]["speaker"]
-            for source_id in source_ids
+            sources[source_id]["speaker"] for source_id in source_ids
             if sources.get(source_id, {}).get("speaker")
         ))[:20]
         return dict(action, phrase=phrase, source_ids=source_ids, source_speakers=source_speakers), "ok"
@@ -400,18 +380,41 @@ class LLMService:
         return context
 
     def _get_context_slang_context(self, group_id, messages):
+        """Recall literal hits first, then a tiny scene-matched safe pool.
+
+        This stays fully local (keywords/scenes/examples/meaning) rather than
+        introducing a vector dependency.  A scene candidate is only a reference:
+        the model may use none of them, and only active-use slang is eligible.
+        """
         if not self.style_learner:
             return "[]"
         try:
-            candidates = self.style_learner.store.get_context_slang(
-                group_id,
-                messages,
-                max_items=8,
-                max_chars=1200,
+            store = self.style_learner.store
+            literal = store.get_context_slang(group_id, messages, max_items=6, max_chars=900)
+            topic = " ".join(
+                str(item.get("content") or "")
+                for item in (messages or [])[-12:]
+                if isinstance(item, dict) and not item.get("is_bot") and item.get("role") != "assistant"
             )
+            intent = "question" if "?" in topic or "?" in topic else "statement"
+            scene = store.get_slang_scene_candidates(
+                group_id, topic=topic, intent=intent, max_items=2, max_chars=360
+            ) if topic.strip() else []
+            seen = {str(item.get("normalized_phrase") or item.get("phrase") or "") for item in literal if isinstance(item, dict)}
+            candidates = list(literal)
+            for item in scene:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("normalized_phrase") or item.get("phrase") or "")
+                if not key or key in seen:
+                    continue
+                enriched = dict(item)
+                enriched["recall"] = "scene"
+                candidates.append(enriched)
+                seen.add(key)
         except Exception:
             candidates = []
-        return json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(candidates[:8], ensure_ascii=False, separators=(",", ":"))
 
     def _fit_group_messages_for_prompt(self, messages):
         """Bound only the prompt copy of history; never discard stored records."""
@@ -508,12 +511,24 @@ class LLMService:
         inject_limit = max_items or int(
             (self.config.get("learning") or {}).get("expression_selector_max_items", 4) or 4
         )
-        selector_enabled = bool((self.config.get("learning") or {}).get("expression_selector_enabled", True))
+        # A second selector request is costly and makes the per-reply prompt
+        # less predictable. The local pool already ranks by situation, recent
+        # use and frequency; keep an optional selector for installations that
+        # explicitly want it, but default to the deterministic local path.
+        selector_enabled = bool((self.config.get("learning") or {}).get("expression_selector_enabled", False))
+        selected = None
         if selector_enabled and len(pool) > inject_limit:
             selected = self._select_expression_candidates(group_id, messages or [], pool, inject_limit)
-            if selected is not None:
-                return selected
-        return pool[:inject_limit]
+        result = selected if selected is not None else pool[:inject_limit]
+        if result:
+            try:
+                self.style_learner.record_expression_selection(
+                    group_id,
+                    [item.get("situation") for item in result if isinstance(item, dict)],
+                )
+            except Exception:
+                pass
+        return result
 
     def _select_expression_candidates(self, group_id, messages, pool, max_items=4):
         """maibot-style lightweight selector: pick the few expressions that best
@@ -727,26 +742,61 @@ class LLMService:
             return True, f"cost-effective(breakeven={breakeven:.1f}<={horizon})"
         return False, f"keep-cached(breakeven={breakeven:.1f}>{horizon})"
 
-    def _history_cache_breakpoint_id(self, group_id, messages, namespace):
-        """Return a durable history-record id for one group/LLM flow.
+    def _clear_history_cache_breakpoints(self, group_id, namespaces=None):
+        """Forget cache anchors whose stable pre-history context was replaced.
 
-        The first request writes a checkpoint at its current history tail. Later
-        calls retain that exact record while appending new history after it, which
-        lets Responses reuse the cached prefix instead of moving the marker with
-        every latest message.
+        A cycle curation can change long/medium/short memory, and context
+        compression can replace the stored transcript. In either case an old
+        anchor is no longer the longest reusable prefix. The next request writes
+        one fresh anchor at that cycle's first history tail.
+        """
+        group_key = str(group_id or "global")
+        wanted = {
+            str(value or "").strip().lower()
+            for value in (namespaces or [])
+            if str(value or "").strip()
+        }
+        with self._history_cache_breakpoints_lock:
+            for key in list(self._history_cache_breakpoints):
+                flow, stored_group = key
+                if stored_group != group_key:
+                    continue
+                if wanted and flow not in wanted:
+                    continue
+                self._history_cache_breakpoints.pop(key, None)
+
+    def _history_cache_breakpoint_id(self, group_id, messages, namespace, cycle_id=None):
+        """Return the immutable history tail selected for this group cycle.
+
+        The first request in a cycle anchors its full stable memory + accumulated
+        history prefix. Later requests append records after that anchor, so
+        Responses automatic caching sees a byte-identical prefix. A named new
+        cycle deliberately gets a new anchor because cycle-scoped memory/style
+        state may have changed before the next request.
         """
         records = [item for item in (messages or []) if isinstance(item, dict)]
         if not records:
             return ""
         flow = str(namespace or "chat").strip().lower() or "chat"
         key = (flow, str(group_id or "global"))
+        current_cycle = str(cycle_id or "").strip()
         available = {group_message_identity(item) for item in records}
         with self._history_cache_breakpoints_lock:
             current = self._history_cache_breakpoints.get(key)
-            if current in available:
-                return current
+            # Backwards-compatible handling for anchors stored by older process
+            # code. New entries carry both id and cycle id.
+            if isinstance(current, str):
+                current = {"id": current, "cycle_id": ""}
+            if isinstance(current, dict):
+                current_id = str(current.get("id") or "")
+                previous_cycle = str(current.get("cycle_id") or "")
+                if current_id in available and (not current_cycle or previous_cycle == current_cycle):
+                    return current_id
             selected = group_message_identity(records[-1])
-            self._history_cache_breakpoints[key] = selected
+            self._history_cache_breakpoints[key] = {
+                "id": selected,
+                "cycle_id": current_cycle,
+            }
             return selected
 
     @staticmethod
@@ -823,6 +873,7 @@ class LLMService:
                 compact,
                 preserve_unseen_from=messages,
             )
+            self._clear_history_cache_breakpoints(group_id)
             print(
                 f"[LLM CONTEXT COMPRESSION] group={group_id} before={len(messages)} after={len(compact)} "
                 f"tokens={stored_tokens} reason={reason}",
@@ -981,6 +1032,60 @@ class LLMService:
                     merged["style_action"] = data["style_action"]
         return merged
 
+    @staticmethod
+    def _learning_cursor_key(item, index=0):
+        """Return a conservative ordering key for persisted cycle progress."""
+        item = item if isinstance(item, dict) else {}
+        try:
+            timestamp = int(float(item.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            timestamp = 0
+        source_id = str(item.get("source_id") or "").strip()
+        if not source_id:
+            source_id = group_message_identity(item)
+        return timestamp, source_id or f"unidentified-{index}"
+
+    @classmethod
+    def _messages_after_learning_cursor(cls, messages, cursor):
+        """Keep only unseen cycle evidence while retaining unorderable events.
+
+        Timestamps are the primary cursor because WeFlow IDs are not guaranteed
+        to be globally sortable. For a same-timestamp tie we use the stable
+        source id when available; unknown timestamps are kept rather than
+        risking loss of valid learning material.
+        """
+        cursor = cursor if isinstance(cursor, dict) else {}
+        try:
+            cursor_timestamp = int(cursor.get("cursor_timestamp") or 0)
+        except (TypeError, ValueError):
+            cursor_timestamp = 0
+        cursor_source = str(cursor.get("cursor_source_id") or "").strip()
+        if cursor_timestamp <= 0:
+            return [item for item in (messages or []) if isinstance(item, dict)]
+        filtered = []
+        for index, item in enumerate(messages or []):
+            if not isinstance(item, dict):
+                continue
+            timestamp, source_id = cls._learning_cursor_key(item, index)
+            if timestamp <= 0 or timestamp > cursor_timestamp:
+                filtered.append(item)
+                continue
+            if timestamp < cursor_timestamp:
+                continue
+            if not cursor_source:
+                filtered.append(item)
+                continue
+            if source_id == cursor_source:
+                continue
+            # Numeric source IDs are normally monotonic. Other IDs may be
+            # opaque, so retain them at a shared timestamp to avoid loss.
+            if source_id.isdigit() and cursor_source.isdigit():
+                if int(source_id) > int(cursor_source):
+                    filtered.append(item)
+            elif not source_id.startswith("unidentified-"):
+                filtered.append(item)
+        return filtered
+
     def curate_cycle(
         self,
         group_id,
@@ -993,7 +1098,9 @@ class LLMService:
         ) and not self.style_learner:
             return False
         group_id = str(group_id or "unknown")
+        context = context if isinstance(context, dict) else {}
         cycle_messages = [item for item in (cycle_messages or []) if isinstance(item, dict)]
+        curation_outbox_ids = []
         if cycle_messages and self.memory_manager:
             # The proactive state machine snapshots inbound messages. Bot
             # replies are persisted in the canonical transcript, so merge
@@ -1027,8 +1134,82 @@ class LLMService:
                 if timestamp >= first_timestamp and (not identity or identity not in known_ids):
                     cycle_messages.append(item)
             cycle_messages.sort(key=lambda item: int(item.get("timestamp") or 0))
+        # Keep the incoming cycle separate from recovered outbox work. A failed
+        # curation may be retried together with later cycles, but group-rhythm
+        # statistics must count each named cycle exactly once rather than count
+        # every recovered message again under the newest cycle ID.
+        activity_cycle_messages = list(cycle_messages)
+        if self.style_learner and cycle_messages:
+            # The outbox remains the recovery source for provider failures;
+            # the cursor simply suppresses already-curated history when an
+            # upstream cycle callback is replayed.
+            cursor = self.style_learner.get_learning_cursor(group_id)
+            before_cursor_filter = len(cycle_messages)
+            cycle_messages = self._messages_after_learning_cursor(cycle_messages, cursor)
+            if len(cycle_messages) < before_cursor_filter:
+                print(
+                    f"[LLM CYCLE CURATION] group={group_id} cursor_filtered="
+                    f"{before_cursor_filter - len(cycle_messages)}",
+                    flush=True,
+                )
+        # Persist the full cycle before asking an LLM.  The next cycle can
+        # reclaim this job after a provider error or process restart instead of
+        # dropping the material.  Old jobs are merged only at this boundary;
+        # they are never used to stitch incomplete message fragments together.
+        if self.style_learner and cycle_messages:
+            cycle_id = str(context.get("cycle_id") or context.get("_cycle_id") or "").strip()
+            identity = cycle_id or hashlib.sha1(
+                json.dumps(cycle_messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+            ).hexdigest()[:24]
+            payload = {
+                "context": {key: context.get(key) for key in ("cycle_id", "_cycle_id", "_cycle_end_at", "sessionId", "wxid")},
+                "cycle_messages": cycle_messages,
+            }
+            self.style_learner.store.enqueue_outbox(
+                event_key=f"cycle_curation:{group_id}:{identity}",
+                group_id=group_id,
+                kind="cycle_curation",
+                payload=payload,
+            )
+            pending_jobs = self.style_learner.store.claim_outbox(
+                kinds=["cycle_curation"], group_id=group_id, limit=3, lease_seconds=600
+            )
+            combined, seen = [], set()
+            for job in pending_jobs:
+                try:
+                    job_payload = json.loads(job.get("payload_json") or "{}")
+                    job_messages = job_payload.get("cycle_messages") if isinstance(job_payload, dict) else []
+                    if not isinstance(job_messages, list):
+                        job_messages = []
+                    for index, message in enumerate(job_messages):
+                        if not isinstance(message, dict):
+                            continue
+                        source = next((str(message.get(key) or "").strip() for key in ("message_id", "local_id", "server_id", "source_id") if str(message.get(key) or "").strip()), "")
+                        dedupe = source or hashlib.sha1(json.dumps(message, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")).hexdigest()
+                        if dedupe in seen:
+                            continue
+                        seen.add(dedupe)
+                        combined.append(message)
+                    curation_outbox_ids.append(int(job["id"]))
+                except Exception as exc:
+                    self.style_learner.store.fail_outbox(job["id"], repr(exc), max_attempts=8, retry_delay=30)
+            if combined:
+                cycle_messages = sorted(combined, key=lambda item: int(item.get("timestamp") or 0))
         if not cycle_messages:
             return False
+        if self.style_learner:
+            # This is local, cycle-bound learning. Do it before provider
+            # initialization/backoff so a failed curation request cannot drop
+            # the group's observed rhythm. The store makes named cycles idempotent.
+            try:
+                self.style_learner.update_cycle_activity(
+                    group_id,
+                    activity_cycle_messages,
+                    cycle_end_at=context.get("_cycle_end_at"),
+                    cycle_id=context.get("cycle_id") or context.get("_cycle_id"),
+                )
+            except Exception as exc:
+                print(f"[LLM ACTIVITY PROFILE ERROR] group={group_id} {exc}", flush=True)
         if time.time() < self._memory_curator_backoff_until:
             print(f"[LLM CYCLE CURATION] backoff group={group_id}", flush=True)
             return False
@@ -1038,11 +1219,13 @@ class LLMService:
             if self.style_learner:
                 self.style_learner.resolve_slang_usage_feedback(group_id)
             if self.long_term_memory and self.long_term_memory.enabled:
-                # 整理前先执行短期记忆硬上限：保证整理请求读到的
-                # short_memory 不超过上限，并让历史超限数据在本轮落库收敛。
-                self.long_term_memory.enforce_short_memory_budget(group_id)
+                # Legacy state or abnormal writes can leave short memory over budget.
+                # If the hard limit changes the stable memory head, invalidate the
+                # history anchor so the next Responses call builds a byte-stable prefix.
+                truncated = self.long_term_memory.enforce_short_memory_budget(group_id)
+                if truncated:
+                    self._clear_history_cache_breakpoints(group_id)
             self._ensure_provider()
-            context = context if isinstance(context, dict) else {}
             wxid = str(context.get("wxid") or "")
             query = "\n".join(str(item.get("content") or "") for item in cycle_messages)
             cycle_context = self._get_cycle_context(group_id, str(context.get("cycle_id") or "direct"), wxid, query)
@@ -1088,8 +1271,13 @@ class LLMService:
                 )
                 copied["source_id"] = source_id or f"cycle-message-{index}"
                 prompt_cycle_messages.append(copied)
+            learning_units = build_learning_units(prompt_cycle_messages)
+            complete_learning_units = [
+                item for item in learning_units
+                if item.get("complete") and item.get("candidate_allowed")
+            ]
             local_slang_candidates = self._extract_local_slang_candidates(
-                prompt_cycle_messages,
+                complete_learning_units,
                 known_phrases=[
                     str(item.get("phrase") or "")
                     for item in slang_records
@@ -1107,6 +1295,10 @@ class LLMService:
                 "identity": self.config.get("identity") or {},
                 "prefixes": self.config.get("prefixes") or [],
                 "cycle_messages": prompt_cycle_messages,
+                # These units are the *only* valid evidence source for new
+                # slang. Raw cycle messages remain available as context for
+                # memory/style decisions, including unresolved fragments.
+                "learning_units": learning_units,
                 "memory_state": state,
                 **cycle_context,
                 "slang_context": json.dumps(slang_records, ensure_ascii=False, separators=(",", ":")),
@@ -1187,7 +1379,7 @@ class LLMService:
                 if action_group != group_id or not self.style_learner:
                     slang_stats["rejected"]["wrong_group_or_disabled"] = slang_stats["rejected"].get("wrong_group_or_disabled", 0) + 1
                     continue
-                action, reason = self._ground_slang_action_in_cycle(raw_action, prompt_cycle_messages)
+                action, reason = self._ground_slang_action_in_cycle(raw_action, learning_units)
                 if action is None:
                     slang_stats["rejected"][reason] = slang_stats["rejected"].get(reason, 0) + 1
                     continue
@@ -1294,8 +1486,14 @@ class LLMService:
                 context_cleared = True
             with self._cycle_context_cache_lock:
                 self._proactive_context_cache.pop(group_id, None)
-            with self._cycle_context_cache_lock:
                 self._cycle_context_cache.pop(group_id, None)
+            # A successful cycle curation is the explicit stable-prefix boundary.
+            # New requests in the next cycle create fresh history anchors after
+            # any memory compaction or updates have been applied.
+            self._clear_history_cache_breakpoints(
+                group_id,
+                namespaces=("direct-reply", "proactive-reply"),
+            )
             user_cycle_messages = [
                 item for item in prompt_cycle_messages
                 if not item.get("is_bot") and str(item.get("role") or "") != "assistant"
@@ -1312,6 +1510,25 @@ class LLMService:
                     slang_applied_count=slang_applied,
                     slang_rejected=slang_stats["rejected"],
                 )
+            if self.style_learner:
+                for outbox_id in curation_outbox_ids:
+                    self.style_learner.store.ack_outbox(outbox_id)
+                last_item = max(
+                    user_cycle_messages,
+                    key=self._learning_cursor_key,
+                    default={},
+                )
+                if last_item:
+                    cursor_timestamp, cursor_source = self._learning_cursor_key(last_item)
+                    self.style_learner.advance_learning_cursor(
+                        group_id,
+                        timestamp=cursor_timestamp,
+                        source_id=cursor_source,
+                        cycle_id=context.get("cycle_id") or context.get("_cycle_id") or "",
+                    )
+            # Fetching only fills a source-backed cache for future eligible
+            # idle windows. It is asynchronous and never sends a group message.
+            self._schedule_idle_content_prefetch()
             print(
                 f"[LLM CYCLE CURATION] group={group_id} memory={memory_result} slang={slang_applied} "
                 f"expressions={expression_applied} behaviors={behavior_applied} style={style_applied} "
@@ -1331,6 +1548,13 @@ class LLMService:
             ):
                 self._memory_curator_backoff_until = time.time() + 600
             if self.style_learner:
+                for outbox_id in curation_outbox_ids:
+                    # Curation is LLM-dependent. Preserve the cycle until it
+                    # succeeds instead of eventually turning a provider outage
+                    # into a permanently dead learning task.
+                    self.style_learner.store.fail_outbox(
+                        outbox_id, str(exc), max_attempts=None, retry_delay=30
+                    )
                 self.style_learner.record_curation_run(
                     group_id,
                     cycle_id=(context or {}).get("cycle_id") if isinstance(context, dict) else "",
@@ -1456,6 +1680,11 @@ class LLMService:
             result,
             attention_check=attention_check,
         )
+        # The reply was generated for a real group batch.  Remember its sender
+        # briefly so a natural follow-up is never rejected by autonomous
+        # frequency scoring before the model can see the context.
+        if not attention_check:
+            self.proactive_reply.record_conversation_reply(context, result)
 
     def _get_active_style_switch(self, group_id):
         """Read the current cycle's LLM-chosen style selection for injection."""
@@ -1594,9 +1823,14 @@ class LLMService:
                 group_id,
                 group_messages,
             )
-            # Style expressions are queried by the main LLM on demand through
-            # lookup_group_expressions, alongside slang and memory tools.
-            expression_list = []
+            # Inject a tiny locally-ranked pool. It appears after immutable
+            # history in the prompt, therefore a changing expression choice
+            # cannot invalidate the cycle's cached memory/history prefix.
+            expression_list = self._get_context_expressions(
+                group_id,
+                group_messages,
+                max_items=max(1, min(int((self.config.get("learning") or {}).get("expression_prompt_max_items", 3) or 3), 4)),
+            )
             memory_state = self._get_group_memory_state(group_id)
             style_context = self.style_learner.get_prompt_context(group_id) if self.style_learner else ""
             emoji_list = list(self.emoji_list)
@@ -1610,7 +1844,10 @@ class LLMService:
             prompt_data = {
                 "group_messages": group_messages,
                 "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
-                    group_id, group_messages, "direct-reply"
+                    group_id,
+                    group_messages,
+                    "direct-reply",
+                    cycle_id=current_message.get("_cycle_id"),
                 ),
                 "emoji_list": emoji_list,
                 "identity": self.config.get("identity") or {},
@@ -1686,6 +1923,130 @@ class LLMService:
             group_id, [item.get("id") for item in records if isinstance(item, dict)]
         )
         return {"ok": True, "group_id": group_id, "records": records}
+
+    def _idle_content_cache_settings(self):
+        learning = self.config.get("learning") or {}
+        try:
+            max_age = max(15 * 60, int(learning.get("idle_content_cache_max_age_seconds", 12 * 3600)))
+        except (TypeError, ValueError):
+            max_age = 12 * 3600
+        try:
+            prefetch_interval = max(5 * 60, int(learning.get("idle_content_prefetch_min_interval_seconds", 30 * 60)))
+        except (TypeError, ValueError):
+            prefetch_interval = 30 * 60
+        try:
+            min_items = max(1, min(12, int(learning.get("idle_content_prefetch_min_items", 6))))
+        except (TypeError, ValueError):
+            min_items = 6
+        return max_age, prefetch_interval, min_items
+
+    def _cache_idle_content_posts(self, payload, *, source="tieba"):
+        """Persist de-duplicated, source-backed idle-content candidates."""
+        if not self.style_learner or not isinstance(payload, dict):
+            return 0
+        posts = payload.get("posts") or payload.get("records") or []
+        if not isinstance(posts, list):
+            return 0
+        cached = 0
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            title = str(post.get("title") or "").strip()
+            excerpt = str(post.get("excerpt") or post.get("content") or "").strip()
+            if not (title or excerpt):
+                continue
+            digest = hashlib.sha1(
+                (title + "\n" + excerpt).casefold().encode("utf-8", errors="ignore")
+            ).hexdigest()
+            if self.style_learner.cache_idle_content(
+                content_hash=digest,
+                source=source,
+                title=title,
+                content=excerpt or title,
+                url=str(post.get("url") or ""),
+                metadata={"reply_count": post.get("reply_count")},
+            ):
+                cached += 1
+        return cached
+
+    def _prefetch_idle_content(self):
+        """Fetch a small candidate pool outside reply/curation critical paths."""
+        try:
+            result = fetch_tieba_hot_post(max_items=6, timeout=10.0)
+            cached = self._cache_idle_content_posts(result, source="tieba")
+            if cached:
+                print(f"[LLM IDLE CONTENT CACHE] refreshed={cached}", flush=True)
+            elif isinstance(result, dict) and not result.get("ok", True):
+                print(f"[LLM IDLE CONTENT CACHE] refresh skipped: {str(result.get('error') or 'unavailable')[:160]}", flush=True)
+        except Exception as exc:
+            print(f"[LLM IDLE CONTENT CACHE] refresh failed: {exc}", flush=True)
+        finally:
+            with self._idle_content_prefetch_lock:
+                self._idle_content_prefetch_running = False
+
+    def _schedule_idle_content_prefetch(self):
+        """Refresh after a cycle without adding a learner timer or LLM call."""
+        if not self.style_learner or not bool((self.config.get("auto_reply") or {}).get("adaptive_idle_content_enabled", True)):
+            return False
+        max_age, interval, min_items = self._idle_content_cache_settings()
+        try:
+            fresh = self.style_learner.get_idle_content_pool(
+                limit=min_items, max_age_seconds=max_age
+            )
+        except Exception:
+            fresh = []
+        now = time.time()
+        with self._idle_content_prefetch_lock:
+            if self._idle_content_prefetch_running or len(fresh) >= min_items:
+                return False
+            if now - self._idle_content_prefetch_started_at < interval:
+                return False
+            self._idle_content_prefetch_running = True
+            self._idle_content_prefetch_started_at = now
+        threading.Thread(
+            target=self._prefetch_idle_content,
+            daemon=True,
+            name="llm-idle-content-prefetch",
+        ).start()
+        return True
+
+    @staticmethod
+    def _idle_content_plan_is_allowed(plan, candidates) -> bool:
+        """A share must name one candidate injected into this exact request."""
+        if not isinstance(plan, dict) or str(plan.get("action") or "").strip().lower() != "share":
+            return False
+        selected = str(plan.get("content_hash") or "").strip()
+        if not selected:
+            return False
+        allowed = {
+            str(item.get("content_hash") or "").strip()
+            for item in (candidates or [])
+            if isinstance(item, dict) and str(item.get("content_hash") or "").strip()
+        }
+        return selected in allowed
+
+    def _idle_content_candidates(self, group_id, limit=4):
+        """Return only compact, fresh, de-duplicated content for an idle planner."""
+        if not self.style_learner or not group_id:
+            return []
+        max_age, _, _ = self._idle_content_cache_settings()
+        rows = self.style_learner.get_idle_content_pool(
+            limit=limit,
+            max_age_seconds=max_age,
+        )
+        candidates = []
+        for row in rows:
+            content_hash = str(row.get("content_hash") or "").strip()
+            content = str(row.get("content") or "").strip()
+            if not content_hash or not content:
+                continue
+            candidates.append({
+                "content_hash": content_hash[:80],
+                "title": str(row.get("title") or "")[:180],
+                "excerpt": content[:320],
+                "source": str(row.get("source") or "")[:40],
+            })
+        return candidates
 
     def _complete_with_tools(self, messages, allowed_hosts=None, current_session_id=None, memory_group_id=None, allow_memory_update=False, memory_observations=None, tieba_opportunity=False, behavior_lookup_enabled=False, cache_namespace="generic"):
         """Run DeepSeek's assistant/tool/assistant loop and return final JSON."""
@@ -1831,6 +2192,11 @@ class LLMService:
                         }
                     ) if self.long_term_memory and memory_group_id else None,
                 )
+                if name == TIABA_HOT_TOOL["function"]["name"]:
+                    try:
+                        self._cache_idle_content_posts(load_json_lenient(content), source="tieba")
+                    except Exception:
+                        pass
                 conversation.append({
                     "role": "tool",
                     "tool_call_id": getattr(tool_call, "id", ""),
@@ -1863,9 +2229,17 @@ class LLMService:
         slang_emotional_opportunity=False,
         tieba_opportunity=False,
         proactive_web_opportunity=False,
+        idle_content_opportunity=False,
+        idle_content_probability=0.0,
+        idle_content_reason="",
+        conversation_priority="MAY_REPLY",
     ):
         """Judge a ten-second message batch for proactive group replies."""
-        effective_force_reply = bool(force_reply)
+        conversation_priority = str(conversation_priority or "MAY_REPLY").upper()
+        if conversation_priority not in {"MUST_REPLY", "SHOULD_REPLY", "UNCERTAIN_DIRECT", "MAY_REPLY", "DO_NOT_REPLY"}:
+            conversation_priority = "MAY_REPLY"
+        frequency_exempt = conversation_priority in {"MUST_REPLY", "SHOULD_REPLY", "UNCERTAIN_DIRECT"}
+        effective_force_reply = bool(force_reply or conversation_priority == "MUST_REPLY")
         result_to_return = {
             "messages": [],
             "animation": None,
@@ -1898,7 +2272,8 @@ class LLMService:
 
             batch_messages = [item for item in (messages or []) if isinstance(item, dict)]
             proactive_web_opportunity = bool(proactive_web_opportunity)
-            if not batch_messages and not proactive_web_opportunity:
+            idle_content_opportunity = bool(idle_content_opportunity)
+            if not batch_messages and not (proactive_web_opportunity or idle_content_opportunity):
                 return _finish(result_to_return)
 
             attention_budget = int(
@@ -1919,7 +2294,11 @@ class LLMService:
             url_only_present = any(
                 bool(item.get("is_url_only")) for item in batch_messages
             )
-            effective_force_reply = bool(force_reply or url_only_present)
+            # MUST_REPLY survives the later batch/url normalization.  It is an
+            # explicit addressing signal, not an autonomous-frequency decision.
+            effective_force_reply = bool(
+                force_reply or url_only_present or conversation_priority == "MUST_REPLY"
+            )
             result_to_return["should_reply"] = effective_force_reply
 
             # Local scheduling only decides whether this batch deserves the
@@ -1931,7 +2310,9 @@ class LLMService:
             if (
                 not attention_check
                 and not effective_force_reply
+                and not frequency_exempt
                 and not proactive_web_opportunity
+                and not idle_content_opportunity
                 and trigger_mode in {"reply_necessity", "conversation_pulse"}
             ):
                 history = self.memory_manager.get_group_messages(group_id)
@@ -2023,9 +2404,12 @@ class LLMService:
                 group_id,
                 prompt_group_messages or batch_messages,
             )
-            # Style expressions are queried by the main LLM on demand through
-            # lookup_group_expressions, alongside slang and memory tools.
-            expression_list = []
+            # Inject a very small deterministic mix of context hits and
+            # high-frequency group expressions. The model may ignore it; this
+            # is a reference, not a forced stylistic template.
+            expression_list = self._get_context_expressions(
+                group_id, prompt_group_messages or batch_messages
+            )
 
             slang_emotional_candidates = []
             if attention_check and slang_emotional_opportunity and self.style_learner:
@@ -2038,15 +2422,25 @@ class LLMService:
                 except Exception:
                     slang_emotional_candidates = []
 
+            idle_content_candidates = (
+                self._idle_content_candidates(group_id)
+                if idle_content_opportunity else []
+            )
+            idle_content_shadow_mode = bool((self.config.get("learning") or {}).get("idle_content_shadow_mode", True))
             prompt_config = self.config.get("prompt") or {}
             system_prompt = build_system_prompt(prompt_config, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])
             prompt_data = {
                 "batch_messages": batch_messages,
                 "group_messages": prompt_group_messages,
                 "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
-                    group_id, prompt_group_messages, "proactive-reply"
+                    group_id,
+                    prompt_group_messages,
+                    "proactive-reply",
+                    cycle_id=cycle_id,
                 ),
                 "force_reply": effective_force_reply,
+                "conversation_priority": conversation_priority,
+                "frequency_exempt": frequency_exempt,
                 "trigger_source": trigger_source,
                 "attention_check": attention_check,
                 "no_llm_reply_seconds": no_llm_reply_seconds,
@@ -2055,9 +2449,16 @@ class LLMService:
                 "slang_emotional_opportunity": bool(attention_check and slang_emotional_opportunity),
                 "slang_emotional_candidates": slang_emotional_candidates,
                 "tieba_opportunity": bool(
-                    (attention_check and tieba_opportunity) or proactive_web_opportunity
+                    (attention_check and tieba_opportunity)
+                    or proactive_web_opportunity
+                    or idle_content_opportunity
                 ),
                 "proactive_web_opportunity": proactive_web_opportunity,
+                "idle_content_opportunity": idle_content_opportunity,
+                "idle_content_probability": idle_content_probability,
+                "idle_content_reason": idle_content_reason,
+                "idle_content_candidates": idle_content_candidates,
+                "idle_content_shadow_mode": idle_content_shadow_mode,
                 "conversation_pulse": conversation_pulse,
                 "slang_usage_guidance": (
                     self.style_learner.get_slang_usage_guidance(group_id)
@@ -2081,7 +2482,7 @@ class LLMService:
             print(
                 f"[LLM INPUT] {time.strftime('%Y-%m-%d %H:%M:%S')} "
                 f"group={group_id} mode=proactive count={len(batch_messages)} chars={batch_char_count} "
-                f"force={effective_force_reply} attention={attention_check} trigger={trigger_source}",
+                f"force={effective_force_reply} priority={conversation_priority} attention={attention_check} trigger={trigger_source}",
                 flush=True,
             )
             response_text = self._complete_with_tools(
@@ -2094,7 +2495,9 @@ class LLMService:
                 allow_memory_update=False,
                 memory_observations=None,
                 tieba_opportunity=bool(
-                    (attention_check and tieba_opportunity) or proactive_web_opportunity
+                    (attention_check and tieba_opportunity)
+                    or proactive_web_opportunity
+                    or idle_content_opportunity
                 ),
                 behavior_lookup_enabled=bool(not attention_check),
                 cache_namespace="proactive-reply",
@@ -2112,6 +2515,37 @@ class LLMService:
             parsed = self._suppress_recent_proactive_repeats(
                 group_id, parsed, effective_force_reply
             )
+            idle_plan = parsed.get("share_idle_content") if isinstance(parsed.get("share_idle_content"), dict) else {}
+            if idle_content_opportunity and idle_plan.get("action") == "share":
+                content_hash = str(idle_plan.get("content_hash") or "").strip()
+                # Sharing is constrained to a cached, de-duplicated candidate
+                # injected into this exact request. A model must not turn an
+                # idle opportunity into fabricated or uncached content.
+                if not self._idle_content_plan_is_allowed(idle_plan, idle_content_candidates):
+                    parsed["messages"] = []
+                    parsed["animation"] = None
+                    parsed["should_reply"] = False
+                    parsed["reply_to"] = []
+                    parsed["share_idle_content"] = {"action": "skip"}
+                    parsed["_idle_content_rejected"] = True
+                    print(
+                        f"[LLM IDLE CONTENT REJECTED] group={group_id} reason=uncached_candidate "
+                        f"content={content_hash or 'missing'}",
+                        flush=True,
+                    )
+                elif idle_content_shadow_mode:
+                    # Shadow mode observes planner choices without consuming a
+                    # candidate or allowing an idle-content post into the sender
+                    # path. Normal replies are unaffected unless the model
+                    # explicitly selected a valid cached share.
+                    parsed["messages"] = []
+                    parsed["animation"] = None
+                    parsed["should_reply"] = False
+                    parsed["reply_to"] = []
+                    parsed["_idle_content_shadow"] = True
+                    print(f"[LLM IDLE CONTENT SHADOW] group={group_id} content={content_hash}", flush=True)
+                elif self.style_learner:
+                    self.style_learner.mark_idle_content_used(content_hash)
 
             parsed["_llm_ok"] = llm_ok
             result_to_return = parsed
@@ -2122,6 +2556,18 @@ class LLMService:
                 result_to_return = self._balance_response()
 
         result_to_return = _finish(result_to_return)
+        if (
+            idle_content_opportunity
+            and self.style_learner
+            and isinstance(result_to_return.get("share_idle_content"), dict)
+            and result_to_return["share_idle_content"].get("action") == "share"
+            and not result_to_return.get("_idle_content_shadow")
+            and result_to_return.get("should_reply")
+            and result_to_return.get("messages")
+        ):
+            # Count only an actual planned share, never an unrelated reply that
+            # happened to occur during an idle opportunity.
+            self.style_learner.record_idle_content_attempt(group_id)
         if self.style_learner and not result_to_return.get("_balance_error"):
             self.style_learner.record_response_decision(
                 group_id,

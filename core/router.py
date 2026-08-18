@@ -84,11 +84,7 @@ class Router:
         group = msg.get("group")
         session_id = msg.get("sessionId")
 
-        # Strict mode is a hard ingress boundary: unprefixed messages do not
-        # reach follow-ups, auto plugins, commands, or LLM processing.
         has_prefix = self._has_prefix(content)
-        if self.prefix_mode == "strict" and not has_prefix:
-            return None
 
         # 对于已进入 follow-up 等待态的会话，放行下一条跟随消息，
         # 但只交给登记的目标插件处理，不恢复普通无前缀消息。
@@ -119,6 +115,11 @@ class Router:
                     "wxid": wxid,
                     "prefix_used": False
                 }
+
+        # Strict mode remains a hard boundary for ordinary messages, but not for
+        # the follow-up branch above.
+        if self.prefix_mode == "strict" and not has_prefix:
+            return None
 
         raw_targets = get_raw_message_targets()
         has_prefix = self._has_prefix(content)

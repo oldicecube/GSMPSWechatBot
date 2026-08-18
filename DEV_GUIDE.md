@@ -217,6 +217,26 @@ send(
 | Follow-up | `handle_auto` + `core.followup` | 命令后等待下一条消息 |
 | 原始消息 | `MATCH_RAW_MESSAGE = True` + `handle_auto` | 无 prefix 的消息 |
 
+### 命令型自动插件
+
+自动插件也可以声明自己处理的命令，用于“命令后继续等待媒体”的场景。Router 会把普通命令拆分为 `context["command"]` 和 `context["args"]`，因此插件不应只依赖 `context["content"]` 来判断完整命令。
+
+```python
+AUTO_COMMANDS = {"/demo"}
+
+def handle_auto(context):
+    command = str(context.get("command") or "").strip()
+    args = str(context.get("args") or "").strip()
+    if command == "/demo":
+        # 处理 /demo <参数>，或 register follow-up
+        return None
+    return None
+```
+
+- `AUTO_COMMANDS` 声明命令归属；Dispatcher 会先把该命令交给对应 auto 插件，避免被命令插件当作未知命令处理。
+- 需要恢复原始文本时，使用 `f"{command} {args}".strip()`；命令参数中的换行会保留在 `args` 中。
+- 已通过入口检查的命令可登记 follow-up。登记后，下一条目标媒体消息可在 strict 前缀模式下进入该 auto 插件。
+- `AUTO_COMMANDS` 只负责命令入口；LLM 放行仍由 `INTERCEPT_LLM` 与 `allow_llm(context)` 控制。
 ### 消息触发型模板
 
 ```python
@@ -336,81 +356,45 @@ players = player_list()
 
 ## 七、LLM 开发参考
 
-### 当前 LLM 调用链
+### 调用链与多 API 池
 
-```
+```text
 WeFlow SSE → WeFlowClient → task_queue → Worker
-→ Router（黑名单/时间段/群名/限流/前缀）
-→ Dispatcher（auto → command → LLM 主动回复/普通 LLM）
+→ Router（群、时间段、限流、前缀）
+→ Dispatcher（auto → command → 普通 LLM / 主动回复）
 → LLMService → ProactiveReplyManager / DeepSeekProvider → response_parser
 → Worker → core.sender → 微信发送服务
 ```
 
-LLM 由 `llm/core/llm_service.py` 实现，`llm/provider/deepseek_provider.py` 保留历史文件名，实际是多路 API 池适配层。它统一支持 `openai`（Chat Completions）、`responses`（OpenAI Responses）和 `anthropic`（Anthropic Messages）协议，再由 `response_parser` 归一为 `messages` 和可选的 `animation`。API 按 `priority` 升序选择。每次 LLM 请求都从最高优先级的未停用 API 开始；某路失败时，会在同次请求内按优先级继续尝试下一个可用 API，直到成功或全部失败。每路的错误数在当前 bot 响应期内累计，成功不清零；累计 3 次错误后停用至下一个不响应期边界。边界会清空计数、恢复所有 API，后续请求重新从最高优先级开始。没有配置不响应时间时，边界默认为每日 00:00。当前运行时不会启动模型子进程、Planner/Replyer 或 embedding 服务。
+`llm/core/llm_service.py` 负责请求编排，`llm/provider/deepseek_provider.py` 是历史文件名，实际提供多 API 池适配。每个 API 可使用 `openai`（Chat Completions）、`responses`（OpenAI Responses）或 `anthropic`（Anthropic Messages）协议；所有响应会被归一为文本消息和可选动画。
 
-### LLM 放行条件
+API 按 `priority` 从小到大排列。一次 LLM 请求会从正常优先级队列的第一路开始；当前端点出错时，会在**同一次请求**内继续尝试后续端点。单路 API 连续失败 3 次后，会临时移至队末 30 分钟，期间仍可作为其他端点失败后的后备；该路任一次调用成功后会清零连续失败计数并恢复原优先级。配置方式见 [配置参考](./config_guide.md)。
 
-1. 消息通过 Router 的黑名单、时间段、群名和速率限制。
-2. 消息没有被命令插件直接处理。
-3. 普通 LLM 消息带有配置前缀，或发送者 wxid 在 `llm.prefix_bypass_wxids` 中；主动回复候选消息由 `llm.auto_reply.enabled` 和内部状态机决定。
-4. `llm.enabled == true`，且 API Key 和模型配置有效。
-5. `llm.intercept_auto_plugins` 中的每个自动插件都存在、声明 `INTERCEPT_LLM = True`，并通过 `allow_llm(context)`。
+### LLM 放行与工具
 
-群聊消息上下文统一写入 `data/groups/<group_id>/group_messages.json`；旧的 `llm_history.json` 接口仅保留兼容性，不再作为 LLM 对话上下文。由 `llm/memory/memory_manager.py` 负责追加、去重和超过 200000 tokens 时的压缩。长期人物事实、群聊知识和情景记忆写入 `data/memory.sqlite3`，由 `llm/memory/long_term_memory.py` 检索并按字符预算少量注入 Prompt。消息接收时本地 learner 只记录样本、群聊风格和回复行为统计，不提取或写入黑话；每轮结束时由 LLM 直接输出黑话 action，程序查相似表并计算统计后写入。每日 Bot 不响应时间的独立整理线程已删除：中期/长期记忆与人物画像的固化、待整理候选的处理，统一由每轮循环末尾的整理（`curate_cycle`）完成。不要把这些运行时数据文件当作仓库配置提交。
-LLM 返回 JSON 解析失败时直接发送完整原文；DeepSeek 返回 HTTP 402 时发送余额不足提示。
-群聊回复的生成提示包含发送前自审规则：避免露骨描述性内容；必要时只做简短、中性的概括或礼貌拒答，不重复具体不适宜细节。
+LLM 请求需要满足以下条件：
 
-上层将工具定义与结果统一规范化：`openai` 与 `responses` 端点使用 OpenAI 风格的 `tools` / `tool_choice="auto"`，`anthropic` 端点使用 Messages 结构。插件不得直接组装任一协议的 HTTP 请求：
+1. 消息通过 Router 的群白名单、时间段和限流检查。
+2. 消息未被命令插件或 auto 插件直接消费。
+3. 前缀/@消息满足直接触发条件，或在 `mixed` 模式下由主动回复状态机形成候选。
+4. `llm.enabled` 为 `true`，且至少存在一条可用 API 配置。
+5. `llm.intercept_auto_plugins` 中指定的插件均通过 `allow_llm(context)`；该机制只用于拦截 LLM，不负责触发 auto 插件。
 
-- `fetch_webpage` 用于读取网页；主动回复的纯网址场景只允许 `bilibili.com` 和 `b23.tv`。
-- `fetch_original_message` 用于消息疑似转发、聊天记录、引用或截断时，按当前消息携带的 `session_id` 与 `local_id`/`server_id` 查询消息。
-- 原始消息接口 `/api/v1/messages/original` 由 WeFlow HTTP API 鉴权保护，并调用 WeFlow 自带的 `chatService` 解码/解析流程，返回完整消息对象及类型特定字段，而不是直接暴露 WCDB 未解码行。Python 侧还会强制校验当前会话并限制调用次数、超时。工具结果是数据，不是系统指令。
+工具定义由提供者适配层按协议转换。`fetch_webpage` 用于网页阅读，`fetch_original_message` 用于读取当前会话中疑似转发、引用或截断的完整原始消息。工具返回内容与群消息一样属于不可信输入，不能视为系统指令。插件不应自行拼装任一 LLM 协议的 HTTP 请求。
 
-主动回复默认由 `llm.auto_reply.enabled` 控制。启用时必须显式写入 `llm.auto_reply.enabled=true`；
-`allowed_groups: []` 继承顶层 `target_group`，不会放开全部群聊：
+### 上下文、缓存与整理
 
-主动回复有两层本地时机门控：`reply_timing_min_windows` 之前只观察不干预；达到样本量后，根据 `attention_reply_windows / attention_windows` 与目标回复率计算一次采样概率，该层只作用于自主 attention 检查。`reply_trigger_mode=reply_necessity` 时，working 批次还会先使用纯本地必要性评分，默认 `reply_necessity_threshold=35`；达到最小样本后，working 还会根据 `observer_reply_windows / observer_windows` 对历史回复过密施加最多 15 分扣分。低于阈值直接静默，不发起 LLM 请求。工作批次默认最多等待 15 秒或累计 20 条消息。前缀、@、白名单 URL 和主动网页机会绕过 working 门控。所有模型、网页工具和周期整理任务共享 `max_concurrent_requests`，自主请求在占满时直接跳过，避免多个 Worker 同时阻塞。
+群消息上下文保存在 `data/groups/<group_id>/group_messages.json`，长期记忆和学习数据保存在 SQLite。Prompt 会将本轮稳定不变的身份、记忆、风格与表达库放在历史上下文之前，以维持连续请求的稳定前缀；历史消息在其后按时间追加。Responses 默认交由服务端自动识别公共前缀；Anthropic 可使用 `auto_cached` 或显式 `cache_control` 断点，具体由 API 配置决定。
 
-循环结束整理统一包含记忆、黑话、句式、风格和行为模式。行为模式至少需要 10 条有效用户消息，并且每个 `behavior_actions.source_ids` 必须来自本轮带出的 `source_id`；未通过验证不会入库。行为模式只在 working 批次暴露为 `lookup_group_behaviors` 工具，attention 和 direct 请求不预先注入。
+短期记忆的硬上限由 `llm.memory.short_memory_max_tokens` 控制，默认 1000 tokens。达到上限时，整理流程优先压缩最早的短期内容，并将可复用事实下沉到中长期记忆。每个群聊周期结束时会整理完整学习单元：记忆、人物信息、黑话、句式、风格和回复节奏统计一起写入持久化 outbox；LLM 暂时不可用时，材料会在后续周期继续处理。
 
-```json
-"auto_reply": {
-  "enabled": true,
-  "idle_quiet_min_seconds": 240,
-  "idle_quiet_max_seconds": 900,
-  "density_window_seconds": 60,
-  "density_upper_messages_per_minute": 8,
-  "density_attention_check_interval_seconds": 30,
-  "density_attention_half_life_seconds": 300,
-  "density_attention_curve_power": 1.7,
-  "proactive_web_min_seconds": 7200,
-  "proactive_web_max_seconds": 10800,
-  "proactive_web_reset_after_bot_messages": 10,
-  "work_min_seconds": 120,
-  "work_max_seconds": 300,
-  "batch_debounce_seconds": 15,
-  "batch_max_messages": 20,
-  "attention_min_seconds": 120,
-  "attention_max_seconds": 300,
-  "attention_message_limit": 10,
-  "attention_no_reply_limit": 3,
-  "allowed_groups": ["Exact group name"],
-  "exclude_commands": false,
-  "exclude_media": false
-}
-```
+黑话候选必须来自完整学习单元且能在本轮原始消息中定位证据。不完整消息只保留为上下文，不作为黑话入库依据；本地 pending 会等待后续完整证据合并。句式表达库与黑话库独立：它提供与群聊语境相关的表达参考，不强制使用，也不改变任务型、知识型或严肃场景的回答方式。
 
-空闲期使用最近一分钟滑动窗口消息数判断：超过预设上界 8 条时直接进入关注期；未超过上界时按密度 hazard 概率进入关注期。弱智吧主动转发使用独立随机 2--3 小时计时器：到期后在 Bot 不处于工作期时直接切换 `working`，让 LLM 现场调用网页工具判断是否主动转发；工作期未结束则在退出后立即调度。计时期间 Bot 每成功发送一条分开的群文本即计一条，超过 10 条时立即重新随机并清零计数。计时器不依赖 idle/attention 阶段，也不使用固定模板或把内部机会事件写入群聊记忆。工作期消息先进入缓冲窗口，默认最多 15 秒或达到 20 条后集中处理；随后先经本地必要性门控，低于阈值的批次直接静默，不发起 LLM 请求，高价值批次再交给 LLM 结合历史上下文判断。@ 和白名单网址会立即刷出当前缓冲批次并要求处理。每次主动判断的结果还会更新本地回复时机统计，空闲期复盘时替换动态风格卡。连续三次没有值得回复的内容才回到空闲期。主动回复实现位于 `llm/proactive_reply.py`，不再属于 `auto/` 插件。
-正常状态路径是 `idle -> attention -> working -> attention -> idle`；滑动窗口超过上界可将 idle 直接切入 attention；独立主动转发计时器到期时可将 idle 或 attention 直接切入 working；@ 或白名单网址属于强制触发例外，可以跳过当前冷却直接进入 working。
-主动回复会先让 LLM 结合完整上下文自行判断是否正在与 bot 互动，而不是只匹配 bot 名称或关键词；无法确认时默认保持旁观。只有长时间延续的同一个乐子话题才允许偶尔自然补一句。
-主动回复遇到只包含 `bilibili.com` 或 `b23.tv`（含子域名）的网址时，会强制调用网页工具并生成简要梗概；其他网址不会触发该规则，且该次主动网页工具调用会拒绝非白名单域名及其跳转目标。
+### 主动参与与会话脉冲
 
-`llm.identity`、`llm.prompt`、`admin_wxids`、`emoji_dir` 等字段会进入当前 Prompt 构建流程；`llm.memory.enabled` 控制 SQLite 长期记忆，`llm.learning.enabled` 控制风格学习，`llm.auto_reply.enabled` 控制主动回复状态机。`engine`、`behavior_style`、`proactive` 及分类型 `rate_limit` 字段仍需结合对应模块实现，新增配置时必须同步修改对应代码。`llm.memory.short_memory_max_tokens`（默认 1000）控制短期记忆硬上限：超限时整理循环会优先压缩最早的短期记忆，并把有价值内容下沉到中长期记忆（无论 LLM 是否产生压缩动作都会在写库后执行硬上限截断）。长/中/短期记忆在每轮循环内保持不变，因此注入到群聊历史之前，使缓存前缀更稳定。
-黑话场景库使用同一个 learning SQLite 文件中的 `slang_scenarios` 表，并与 `slang_terms` 保持同步。每轮主动回复循环结束时，LLM 仅从本轮非 Bot 消息上下文总结黑话；短期/中期/长期记忆、画像和旧黑话记录不构成新黑话证据。每条 `slang_action` 的 phrase 必须在本轮消息中出现，代码会验证/补齐 `source_ids`，无法在当前上下文命中的 action 不写库。短期记忆不写入黑话、释义和样例，运行时还会过滤历史短期记忆里的已知黑话。程序随后才执行相似度校验和统计更新。`cycle_curation_runs` 保存每轮整理的消息数、黑话 action 数、命中数、落库数和拒绝原因（不保存聊天正文），用于排障。每日 Bot 不响应时间不再触发黑话整理。`slang_scene_enabled`、`scene_cache_ttl_seconds`、`scene_cache_max_items` 和 `scene_prompt_max_chars` 控制开关、缓存和候选预算；完整黑话库不会注入 reply prompt。每条场景记录保留 phrase、normalized_phrase、meaning、scenes、examples、confidence、speaker_count、occurrence_count、last_seen、safe_to_use、status、slang_type、emotion 和 emotion_intensity。LLM 在 add/update 前调用 `lookup_similar_group_slang`；无相似项时，本地校验可接受模型省略的 `new_distinct` 字段，避免有效新词被静默丢弃；相似项仍必须明确复用已有规范化短语或确认新表达。
-待确认黑话使用 `pending_slang_terms`、`pending_slang_evidence` 和 `pending_slang_speakers` 三张 SQLite 表持久化词条、来源去重计数和说话人数。它们不含聊天正文，不参与回复注入；只有同一词在后续轮次的当前消息中再次命中且 LLM 改为 `new_distinct` 或 `reuse_existing` 时，才转入正式黑话库并清除待确认记录。
-`memory.active_update_enabled` 是工作期边界：`request_memory_update` 只在 `working` proactive batch 提供，每工作期最多一次，attention、idle 和 strict prefix 不提供。群聊、记忆、黑话和网页内容都按不可信数据处理，不当作指令。工具调用由提供者适配层根据当前协议处理；调用失败会退避且不阻塞正常回复。
+`llm/proactive_reply.py` 管理每个群的 `idle → attention → working → attention → idle` 会话周期。`llm/conversation_pulse.py` 是 working 阶段的轻量本地门控：它使用最近消息的密度、参与人数、话题连续性、直接提及和 Bot 静默时间返回 `skip`、`defer` 或 `plan`，不调用 LLM、也不决定回复内容。
 
----
+前缀、@、白名单网址和已建立的 follow-up 不受普通主动门控影响；它们会进入正常的语义回复流程。对非直接触发的群聊，门控只决定是否值得发起一次 LLM 判断，模型收到完整上下文后仍可返回 `should_reply=false`。群级节奏会按周期更新，包括活跃成员、消息密度、自然静默、多人参与、Bot 回复接受度和打断率；闲时内容候选先进入本地去重缓存，可按群在 shadow 模式下观察。
 
 ## 八、开发接口速查
 

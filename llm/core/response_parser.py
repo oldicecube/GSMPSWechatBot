@@ -256,6 +256,20 @@ def _normalize_style_switch(value):
     fields["action"] = "set"
     return fields
 
+def _normalize_idle_content_plan(value):
+    """Validate the optional planner action without trusting free-form data."""
+    if not isinstance(value, dict):
+        return None
+    action = str(value.get("action") or "skip").strip().lower()
+    if action not in {"share", "skip"}:
+        return None
+    result = {"action": action}
+    content_hash = str(value.get("content_hash") or "").strip()
+    if content_hash:
+        result["content_hash"] = content_hash[:80]
+    return result
+
+
 def parse_llm_response(text: str, emoji_list: list) -> dict:
     """Parse the public response contract.
 
@@ -391,6 +405,9 @@ def parse_proactive_response(text: str, emoji_list: list, force_reply=False) -> 
         "should_reply": bool(should_reply),
         "reply_to": reply_to,
     }
+    idle_content_plan = _normalize_idle_content_plan(data.get("share_idle_content"))
+    if idle_content_plan:
+        result["share_idle_content"] = idle_content_plan
     style_switch = _normalize_style_switch(data.get("style_switch"))
     if style_switch:
         result["style_switch"] = style_switch

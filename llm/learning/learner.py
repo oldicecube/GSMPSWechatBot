@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import queue
 import threading
 import time
 
@@ -48,7 +47,6 @@ class StyleLearner:
             if str(item).strip()
         )
         self.queue_limit = max(100, _safe_int(self.settings.get("queue_max"), 2000))
-        self._queue = queue.Queue(maxsize=self.queue_limit)
         self._stop = threading.Event()
         self._thread = None
         if self.enabled and start_worker:
@@ -63,11 +61,20 @@ class StyleLearner:
         observation = observation_from_context(context)
         if not observation or not self._eligible(observation):
             return
+        # Persist first, then process.  This replaces the old bounded in-memory
+        # queue: queue.Full can no longer discard evidence, and a restart can
+        # resume the pending outbox.
         try:
-            self._queue.put_nowait(observation)
-        except queue.Full:
-            # Dropping an observation is preferable to slowing down message delivery.
-            return
+            event_key = "message:" + str(observation.get("group_id")) + ":" + str(observation.get("fingerprint"))
+            self.store.enqueue_outbox(
+                event_key=event_key,
+                group_id=observation.get("group_id"),
+                kind="message_observation",
+                payload=observation,
+            )
+            self._drain_outbox(limit=1)
+        except Exception as exc:
+            print(f"[LLM LEARNING PERSIST ERROR] {exc}", flush=True)
 
     def record_response_decision(
         self,
@@ -126,6 +133,46 @@ class StyleLearner:
             return self.store.get_response_learning(group_id)
         except Exception:
             return {}
+
+    def update_cycle_activity(self, group_id, messages, *, cycle_end_at=None, cycle_id=None) -> dict:
+        if not self.enabled or not group_id:
+            return {}
+        try:
+            return self.store.update_cycle_activity(
+                group_id,
+                messages or [],
+                cycle_end_at=cycle_end_at,
+                cycle_id=cycle_id,
+            )
+        except Exception as exc:
+            print(f"[LLM ACTIVITY PROFILE ERROR] {exc}", flush=True)
+            return {}
+
+    def get_activity_profile(self, group_id) -> dict:
+        if not self.enabled or not group_id:
+            return {}
+        try:
+            return self.store.get_activity_profile(group_id)
+        except Exception:
+            return {}
+
+    def decide_idle_content_opportunity(self, group_id, *, now=None, silence_seconds=0.0) -> dict:
+        if not self.enabled or not group_id:
+            return {"eligible": False, "probability": 0.0, "reason": "learning_disabled"}
+        try:
+            return self.store.decide_idle_content_opportunity(
+                group_id, now=now, silence_seconds=silence_seconds
+            )
+        except Exception:
+            return {"eligible": False, "probability": 0.0, "reason": "activity_profile_error"}
+
+    def record_idle_content_attempt(self, group_id, *, sent_at=None) -> bool:
+        if not self.enabled or not group_id:
+            return False
+        try:
+            return bool(self.store.record_idle_content_attempt(group_id, sent_at=sent_at))
+        except Exception:
+            return False
 
     def record_curation_run(self, group_id, **kwargs):
         if not self.enabled or not group_id:
@@ -422,6 +469,53 @@ class StyleLearner:
             lines = base_lines + fixed_lines
         return "\n".join(lines)
 
+    def record_bot_interruption_outcome(self, group_id, outcome="unknown"):
+        if self.enabled and group_id:
+            try:
+                self.store.record_bot_interruption_outcome(group_id, outcome=outcome)
+            except Exception:
+                pass
+
+    def cache_idle_content(self, **kwargs):
+        if not self.enabled:
+            return False
+        try:
+            return self.store.cache_idle_content(**kwargs)
+        except Exception:
+            return False
+
+    def get_idle_content_pool(self, **kwargs):
+        if not self.enabled:
+            return []
+        try:
+            return self.store.get_idle_content_pool(**kwargs)
+        except Exception:
+            return []
+
+    def mark_idle_content_used(self, content_hash):
+        if not self.enabled:
+            return False
+        try:
+            return self.store.mark_idle_content_used(content_hash)
+        except Exception:
+            return False
+
+    def get_learning_cursor(self, group_id):
+        if not self.enabled:
+            return {}
+        try:
+            return self.store.get_learning_cursor(group_id)
+        except Exception:
+            return {}
+
+    def advance_learning_cursor(self, group_id, **kwargs):
+        if not self.enabled:
+            return False
+        try:
+            return self.store.advance_learning_cursor(group_id, **kwargs)
+        except Exception:
+            return False
+
     def get_cycle_style_payload(self, group_id: str) -> dict:
         """Return style evidence for mandatory end-of-cycle self-learning."""
         if not self.enabled:
@@ -446,31 +540,31 @@ class StyleLearner:
         )
         return True
 
+    def _drain_outbox(self, limit=32):
+        rows = self.store.claim_outbox(kinds=["message_observation"], limit=limit, lease_seconds=120)
+        processed = 0
+        for row in rows:
+            try:
+                observation = json.loads(row.get("payload_json") or "{}")
+                if isinstance(observation, dict) and self._eligible(observation):
+                    self.store.record_message(observation, [], self.min_term_count)
+                self.store.ack_outbox(row["id"])
+                processed += 1
+            except Exception as exc:
+                self.store.fail_outbox(row["id"], repr(exc), max_attempts=8, retry_delay=15)
+                print(f"[LLM LEARNING ERROR] {exc}", flush=True)
+        return processed
+
     def _run(self):
         while not self._stop.is_set():
-            try:
-                observation = self._queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            batch = [observation]
-            while len(batch) < 32:
-                try:
-                    batch.append(self._queue.get_nowait())
-                except queue.Empty:
-                    break
-            try:
-                records = []
-                for item in batch:
-                    if not self._eligible(item):
-                        continue
-                    content = str(item.get("content") or "").strip()
-                    records.append((item, [], self.min_term_count))
-                self.store.record_messages(records)
-            except Exception as exc:
-                print(f"[LLM LEARNING ERROR] {exc}", flush=True)
-            finally:
-                for _ in batch:
-                    self._queue.task_done()
+            if not self._drain_outbox(limit=32):
+                self._stop.wait(1.0)
+
+    def flush_pending(self, limit=100):
+        """Best-effort synchronous drain used at cycle boundaries/startup."""
+        if self.enabled:
+            return self._drain_outbox(limit=limit)
+        return 0
 
     def close(self):
         self._stop.set()
