@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""点歌插件：从音乐源（网易云音乐）搜索歌曲，并将第一首歌的音源作为语音发送。
+"""点歌插件：从网易云搜索歌曲，按音源优先级解析并发送语音。
 
 支持两种用法：
     /song <歌曲名>
@@ -14,29 +14,61 @@
 （%TEMP%\\WechatRobot\\voice），由发送组件（wechat_hook_server）在发送完成后删除。
 """
 
-import requests
+import logging
+import threading
 
+from services.music.resolver import (
+    MusicConfigError,
+    MusicResolutionError,
+    MusicResolver,
+)
+from services.music.source import MusicSourceError
+from services.music.sources import build_sources
 from core.sender import send
 from core.wechat_sender.file_down import download_voice_file
 
 COMMAND = "/song"
 ALIASES = ["/music"]
 
-SEARCH_URL = "https://music.163.com/api/search/get/web"
-STREAM_URL = "https://music.163.com/song/media/outer/url"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Referer": "https://music.163.com/",
-}
-TIMEOUT = 20
-
 # 微信语音最长约 60 秒；歌曲语音默认只取前 59.5 秒，给录音留少量余量
 DEFAULT_SPAN_SECONDS = 59.5
 
+_music_resolver = None
+_netease_source = None
+_music_init_error = None
+_music_init_lock = threading.RLock()
+_logger = logging.getLogger(__name__)
+
 
 def init(config):
-    """插件初始化（无特殊配置）。"""
-    pass
+    """初始化音乐源解析器；旧配置缺少 music 时使用默认链路。"""
+    global _music_resolver, _netease_source, _music_init_error
+
+    with _music_init_lock:
+        try:
+            music_config = (config or {}).get("music", {}) or {}
+            sources, source_order = build_sources(music_config)
+            _music_resolver = MusicResolver.from_config(
+                config or {},
+                sources=sources,
+                source_order=source_order,
+            )
+            _netease_source = sources["netease"]
+            _music_init_error = None
+        except Exception as exc:
+            _music_resolver = None
+            _netease_source = None
+            _music_init_error = exc
+            raise
+
+
+def _get_music_components():
+    with _music_init_lock:
+        if _music_init_error is not None:
+            raise _music_init_error
+        if _music_resolver is None or _netease_source is None:
+            init({})
+        return _music_resolver, _netease_source
 
 
 def _get_target(context):
@@ -112,52 +144,12 @@ def _apply_caps(start, end, song_duration=None):
 
 
 def _search_song(keyword):
-    """搜索网易云音乐，返回第一首歌的信息 dict；未找到返回 None。"""
-    params = {
-        "csrf_token": "",
-        "s": keyword,
-        "type": 1,
-        "offset": 0,
-        "total": True,
-        "limit": 1,
-    }
-    resp = requests.get(SEARCH_URL, params=params, headers=HEADERS, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    result = data.get("result") or {}
-    songs = result.get("songs") or []
-    if not songs:
-        return None
-    song = songs[0]
-    artists = song.get("artists") or []
-    album = song.get("album") or {}
-    duration_ms = song.get("duration")
-    try:
-        duration_sec = float(duration_ms) / 1000.0 if duration_ms else 0.0
-    except (TypeError, ValueError):
-        duration_sec = 0.0
-    return {
-        "id": song.get("id"),
-        "name": song.get("name") or "未知歌曲",
-        "artist": artists[0].get("name") if artists else "未知歌手",
-        "album": album.get("name") or "",
-        "duration": duration_sec,
-    }
-
-
-def _resolve_stream_url(song_id):
-    """通过 outer/url 接口获取真实 mp3 地址（302 跳转）。"""
-    resp = requests.get(
-        f"{STREAM_URL}?id={song_id}.mp3",
-        headers=HEADERS,
-        allow_redirects=False,
-        timeout=TIMEOUT,
+    """搜索网易云第一首结果，返回统一的 SongInfo。"""
+    resolver, netease_source = _get_music_components()
+    return netease_source.search(
+        keyword,
+        timeout=resolver.resolve_timeout_seconds,
     )
-    resp.raise_for_status()
-    location = resp.headers.get("Location")
-    if not location:
-        raise RuntimeError("未获取到音源地址")
-    return location
 
 
 def handle(content, context):
@@ -169,7 +161,16 @@ def handle(content, context):
         return "用法：/song <歌曲名>，或 /song <歌曲名>\n<起始秒> <终止秒>，例如：\n/song 晴天\n30 40"
 
     try:
+        resolver, _ = _get_music_components()
+    except MusicConfigError as e:
+        return f"音乐源配置错误：{e}"
+    except Exception as e:
+        return f"音乐源初始化失败：{e}"
+
+    try:
         song = _search_song(keyword)
+    except MusicSourceError as e:
+        return f"歌曲搜索失败：{e.reason}"
     except Exception as e:
         return f"歌曲搜索失败：{e}"
 
@@ -177,17 +178,58 @@ def handle(content, context):
         return f"未找到与「{keyword}」相关的歌曲"
 
     # 应用终止秒约束（歌曲时长 / 59.5 秒上限）
-    song_duration = song.get("duration") or 0.0
+    song_duration = song.duration or 0.0
     start, end = _apply_caps(start, end, song_duration or None)
     if song_duration > 0 and start >= song_duration:
         return f"起始秒超出歌曲时长：{start:.2f}s"
 
+    local_path = None
+    download_errors = []
+    resolution_errors = []
+    resolution_error = None
     try:
-        stream_url = _resolve_stream_url(song["id"])
-        # 下载到统一语音临时目录，发送完成后由发送组件删除
-        local_path = download_voice_file(stream_url, prefix="song_%s" % song["id"])
-    except Exception as e:
-        return f"音源下载失败：{e}"
+        for candidate in resolver.iter_candidates(song):
+            _logger.info(
+                "[MUSIC RESOLVE] success source=%s url=%s",
+                candidate.source_id,
+                candidate.url[:120],
+            )
+            try:
+                # 下载到统一语音临时目录，发送完成后由发送组件删除。
+                local_path = download_voice_file(
+                    candidate.url,
+                    prefix="song_%s" % song.song_id,
+                    headers=candidate.download_headers,
+                    timeout=resolver.download_timeout_seconds,
+                    source_id=candidate.source_id,
+                )
+                break
+            except Exception as e:
+                download_errors.append(f"{candidate.source_name}: {e}")
+                print(
+                    f"[MUSIC DOWNLOAD ERROR] {candidate.source_id}: {e}",
+                    flush=True,
+                )
+    except MusicResolutionError as e:
+        resolution_error = e
+        resolution_errors = [
+            f"{source_id}: {reason}" for source_id, reason in e.errors
+        ]
+        for source_id, reason in e.errors:
+            _logger.warning(
+                "[MUSIC RESOLVE] failed source=%s reason=%s",
+                source_id,
+                reason,
+            )
+
+    if not local_path:
+        if not download_errors and resolution_error is not None:
+            return f"音源解析失败：{resolution_error}"
+        if resolution_errors and not download_errors:
+            return f"音源解析失败：{'；'.join(resolution_errors)}"
+        if resolution_error is not None:
+            download_errors.append(f"解析阶段：{resolution_error}")
+        return f"音源下载失败：{'；'.join(download_errors) or '没有可用音源'}"
 
     target = _get_target(context)
     # duration=终止-起始；voice_start=起始秒；发送组件从该秒开始注入，按住时长=duration

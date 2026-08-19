@@ -50,6 +50,44 @@
 | weflow.messagePushFilterMode | 当前 WeFlow 版本定义的 string | WeFlow 决定 | WeFlow 推送过滤模式；Python 侧原样透传，不解释枚举。 |
 | weflow.messagePushFilterList | array | WeFlow 决定 | 与过滤模式配合的列表；Python 侧原样透传。 |
 
+## 音乐源（music）
+
+`/song` 和 `/music` 仍使用网易云搜索第一首结果取得歌曲 ID；自定义音源通过 **Node.js 执行洛雪脚本**（`music-source/` 目录下的 `.js` 文件）解析播放 URL，行为与洛雪桌面版一致。解析和下载会按 `source_order` 依次尝试，网易云默认作为最后降级源。
+
+| 路径 | 类型 / 可选值 | 默认值 | 作用 |
+|---|---|---:|---|
+| `music.source_order` | string[]：`flower`、`exclusive`、`grass`、`netease` | `["flower", "exclusive", "grass", "netease"]` | 音源尝试顺序；不能有未知或重复 ID。 |
+| `music.script_dir` | path string | `music-source` | 洛雪自定义源脚本目录（相对项目根目录）；启动时自动扫描其中全部 `*.js`。 |
+| `music.node_executable` | string | `node` | Node.js 可执行文件；需在 PATH 中可用。 |
+| `music.source_order` | string[] | 见 `source_order.txt` 或文件名排序 | 可选。省略时读 `music-source/source_order.txt`（每行一个脚本文件名或 source_id）；若文件不存在则按**文件名**排序，最后接 `netease`。 |
+| `music.platform_order` | string[] | `["wy","kg","kw","tx","mg"]` | 单个脚本内按平台依次尝试解析 URL 的顺序；会 intersect 脚本 init 声明支持的平台。 |
+| `music.quality` | `128k`、`320k`、`flac`、`flac24bit` | `128k` | 传给脚本的音质；微信语音通常使用 `128k`。 |
+| `music.resolve_timeout_seconds` | number，>0 | `20` | 搜索和音源解析请求超时。 |
+| `music.download_timeout_seconds` | number，>0 | `60` | 音频文件下载超时。 |
+| `music.allow_netease_fallback` | boolean | `true` | 是否允许所有自定义音源失败后使用网易云音源。 |
+| `music.auto_update_scripts` | boolean | `true` | 是否自动处理脚本 `updateAlert`（从 `updateUrl` 下载并热重载）。无需安装洛雪桌面版。 |
+| `music.update_min_interval_hours` | number，≥0 | `24` | 同一脚本两次自动更新的最小间隔（小时）。 |
+| `music.sources.<id>.script` | filename string | — | **通常无需配置**。仅在使用 `mode: python` 或手动 HTTP 适配器时需要 `base_url` / `api_key`。 |
+| `music.mode` | `lx_script`（默认）或 `python` | 省略 | 设为 `python` 时回退到旧的 HTTP 适配器，需配置 `base_url` / `api_key`。 |
+
+默认脚本映射：
+
+| 音源 ID | 默认脚本 |
+|---|---|
+| `flower` | `野花音源.js` |
+| `exclusive` | `[独家音源] v4.0.js` |
+| `grass` | `野草音源.js` |
+
+将洛雪格式的自定义源 `.js` 文件放到 `music-source/` 即可。顺序不写死在代码里，按以下优先级决定：
+
+1. `config.json` 的 `music.source_order`（若配置）
+2. `music-source/source_order.txt`（每行一个脚本文件名或 `source_id`，`#` 开头为注释）
+3. 按脚本**文件名**字母序
+
+最后可降级 `netease`。`config.json` 里仍可用旧别名 `flower` / `exclusive` / `grass` 指代对应脚本文件。
+
+旧版 `config.json` 可以不增加 `music` 段，程序会使用上述默认链路。若仍使用 Python HTTP 适配器，在对应源下填写 `base_url`（及独家的 `api_key`），并设置 `"mode": "python"`。
+
 ## 4. 限流和发送节奏
 
 ### rate_limit

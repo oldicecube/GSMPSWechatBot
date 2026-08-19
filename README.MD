@@ -10,7 +10,7 @@
 - **多协议 LLM API 池**：支持 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages；可按优先级配置多路模型并在单次请求内自动回退。
 - **群聊对话与主动参与**：支持前缀唤起、@ 唤起和可选的群聊上下文参与；本地门控用于控制不必要的模型请求与发言频率。
 - **记忆与群聊学习**：按群维护短期上下文、长期记忆、人物信息、黑话和句式表达库，并在群聊周期结束时整理新学习材料。
-- **语音与点歌**：音频通过 Windows 虚拟麦克风录入微信语音；`/song`、`/music` 可搜索歌曲并截取片段发送。
+- **语音与点歌**：音频通过 Windows 虚拟麦克风录入微信语音；`/song`、`/music` 由网易云搜索歌曲，再通过 Node.js 长驻守护进程执行 `music-source/` 下的洛雪自定义源脚本解析 URL（init 一次、多次复用，支持 `updateAlert` 自动更新脚本），失败时回退网易云。
 - **可选服务集成**：仓库包含 Minecraft/RCON、ComfyUI、网页工具等可选能力，按配置启用即可。
 
 ## 项目结构
@@ -83,6 +83,8 @@ python main.py
   ```
 
   只填写起始秒时，终止位置默认为起始秒后 59.5 秒；单段语音最长不超过 59.5 秒。
+
+  音源脚本放在 `music-source/`；顺序由 `source_order.txt` 或文件名排序决定（见 [config_guide.md](./config_guide.md)），无需在代码里写死。
 
 ## LLM、上下文与学习
 

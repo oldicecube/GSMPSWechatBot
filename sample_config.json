@@ -18,6 +18,17 @@
     "resourcesPath": "./weflow-core/resources",
     "messagePushEnabled": true
   },
+  "music": {
+    "script_dir": "music-source",
+    "node_executable": "node",
+    "quality": "128k",
+    "platform_order": ["wy", "kg", "kw", "tx", "mg"],
+    "resolve_timeout_seconds": 20,
+    "download_timeout_seconds": 60,
+    "allow_netease_fallback": true,
+    "auto_update_scripts": true,
+    "update_min_interval_hours": 24
+  },
   "time_slots": [],
   "rate_limit": {
     "messages_per_minute": 10,
