@@ -1341,6 +1341,22 @@ class DeepSeekProvider:
             return "none"
         return getattr(self._endpoints[index], "cache_scope", "none")
 
+    def current_protocol(self):
+        """Protocol used by the endpoint that would receive the next request."""
+        index = self._first_available_index()
+        if index is None:
+            return ""
+        entry = getattr(self._endpoints[index], "entry", {}) or {}
+        return str(entry.get("protocol") or "openai").strip().lower()
+
+    def current_cache_enabled(self):
+        """Whether the next endpoint has request caching enabled in its config."""
+        index = self._first_available_index()
+        if index is None:
+            return False
+        entry = getattr(self._endpoints[index], "entry", {}) or {}
+        return bool(entry.get("cache", True)) and getattr(self._endpoints[index], "cache_scope", "none") != "none"
+
     def _record_failure(self, index):
         """Record one consecutive failure and demote after the configured limit."""
         now = time.monotonic()
@@ -1411,9 +1427,9 @@ class DeepSeekProvider:
 
         raise PoolExhaustedError(errors)
 
-    def send(self, messages: list) -> str:
+    def send(self, messages: list, prompt_cache_key=None) -> str:
         """向后兼容的字符串 API。"""
-        message = self.send_chat(messages)
+        message = self.send_chat(messages, prompt_cache_key=prompt_cache_key)
         return str(getattr(message, "content", None) or "")
 
     def __del__(self):

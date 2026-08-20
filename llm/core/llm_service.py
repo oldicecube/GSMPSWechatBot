@@ -78,6 +78,12 @@ class LLMService:
         # later incremental requests preserve and reuse the same boundary.
         self._history_cache_breakpoints = {}
         self._history_cache_breakpoints_lock = threading.RLock()
+        # Responses automatic caching only extends a request when the next
+        # request is a true tail append. Keep a compact per-group/flow stream
+        # of already-sent prompt records so later group messages and runtime
+        # state can be appended rather than inserted before the old runtime.
+        self._responses_prompt_streams = {}
+        self._responses_prompt_streams_lock = threading.RLock()
         # Idle content is fetched into a small shared cache only after a real
         # cycle boundary. It is not a global send quota: each group still
         # independently decides whether it has earned a share opportunity.
@@ -843,6 +849,230 @@ class LLMService:
                 if wanted and flow not in wanted:
                     continue
                 self._history_cache_breakpoints.pop(key, None)
+        with self._responses_prompt_streams_lock:
+            for key in list(self._responses_prompt_streams):
+                flow, stored_group = key
+                if stored_group != group_key:
+                    continue
+                if wanted and flow not in wanted:
+                    continue
+                self._responses_prompt_streams.pop(key, None)
+
+    @staticmethod
+    def _prompt_stream_digest(value):
+        """Return a content digest without logging prompt text."""
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            encoded = str(value or "")
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _prompt_stream_tokens(messages):
+        return sum(
+            MemoryManager.estimate_tokens(str(item.get("content") or ""))
+            for item in (messages or [])
+            if isinstance(item, dict)
+        )
+
+    def _responses_stream_enabled(self):
+        """Use append-only prompt records only for the active Responses route."""
+        provider = self.provider
+        if provider is None:
+            return False
+        try:
+            return (
+                str(provider.current_protocol() or "").lower() == "responses"
+                and bool(provider.current_cache_enabled())
+                and str(provider.current_cache_scope() or "none").lower() == "full"
+            )
+        except Exception:
+            return False
+
+    def _responses_stream_token_budget(self):
+        """Keep enough room for tools, outputs, and a post-reset full prompt."""
+        try:
+            context_window = int(self.config.get("context_window_tokens", 200000) or 200000)
+        except (TypeError, ValueError):
+            context_window = 200000
+        try:
+            compression_target = int(self.config.get("context_compression_target_tokens", 160000) or 160000)
+        except (TypeError, ValueError):
+            compression_target = 160000
+        return max(12000, min(max(12000, context_window - 12000), max(60000, compression_target)))
+
+    def _build_responses_append_only_messages(
+        self,
+        group_id,
+        namespace,
+        system_prompt,
+        rendered_messages,
+        group_messages,
+        tool_schema_signature="",
+    ):
+        """Keep Responses prompts append-only across group turns.
+
+        RightAPI's automatic cache does not extend through a new history item
+        inserted before the previous request's runtime block.  The first
+        request keeps the normal prompt layout.  Later requests retain that
+        old runtime block as historical context and append only the newly seen
+        transcript records plus the new runtime block.  The system prompt
+        explicitly declares that only the final runtime block is operational.
+        A memory/style rewrite, history compaction, route change, or budget
+        overflow safely starts a fresh stream instead of using stale context.
+        """
+        normal = [dict(item) for item in (rendered_messages or []) if isinstance(item, dict)]
+        records = [item for item in (group_messages or []) if isinstance(item, dict)]
+        if not self._responses_stream_enabled() or not normal or not records:
+            return normal
+
+        # Direct and proactive builders both end with exactly one runtime item;
+        # each group record is rendered as one intervening immutable item.
+        history_count = len(records)
+        history_start = len(normal) - history_count - 1
+        if history_start < 0:
+            return normal
+        static_messages = normal[:history_start]
+        history_messages = normal[history_start:-1]
+        runtime_message = normal[-1]
+        if len(history_messages) != history_count or runtime_message.get("role") != "user":
+            return normal
+
+        history_ids = [group_message_identity(item) for item in records]
+        if not all(history_ids):
+            return normal
+        flow = str(namespace or "chat").strip().lower() or "chat"
+        stream_key = (flow, str(group_id or "global"))
+        # The automatic-cache namespace is endpoint-local.  If the pool has
+        # moved to a fallback API, do not reuse a stream that was emitted to a
+        # different gateway: start a clean prefix for that route instead.
+        route_signature = str(getattr(self.provider, "current_api_name", "") or "").strip()
+        stable_signature = self._prompt_stream_digest({
+            "system": str(system_prompt or ""),
+            "static": static_messages,
+            "route": route_signature,
+        })
+        tool_schema_signature = str(tool_schema_signature or "")
+        runtime_signature = self._prompt_stream_digest(runtime_message)
+        token_budget = self._responses_stream_token_budget()
+
+        with self._responses_prompt_streams_lock:
+            state = self._responses_prompt_streams.get(stream_key)
+            previous_ids = list(state.get("history_ids") or []) if isinstance(state, dict) else []
+            history_prefix_ok = history_ids[:len(previous_ids)] == previous_ids
+            valid_prefix = (
+                isinstance(state, dict)
+                and state.get("stable_signature") == stable_signature
+                and state.get("tool_schema_signature", "") == tool_schema_signature
+                and history_prefix_ok
+            )
+            if valid_prefix:
+                new_history = history_messages[len(previous_ids):]
+                # A duplicate request with an identical runtime needs no new
+                # packet. Otherwise append the fresh turn after every old
+                # request block, never splice it into the old prefix.
+                additions = list(new_history)
+                if state.get("runtime_signature") != runtime_signature:
+                    additions.append(runtime_message)
+                candidate = list(state.get("messages") or []) + additions
+                estimated_tokens = self._prompt_stream_tokens(candidate)
+                if additions and estimated_tokens <= token_budget:
+                    state["messages"] = candidate
+                    state["history_ids"] = list(history_ids)
+                    state["runtime_signature"] = runtime_signature
+                    state["updated_at"] = time.monotonic()
+                    print(
+                        f"[LLM CACHE STREAM] flow={flow} action=append "
+                        f"history_delta={len(new_history)} packets={state.get('packets', 1) + 1} "
+                        f"estimated_tokens={estimated_tokens}",
+                        flush=True,
+                    )
+                    state["packets"] = int(state.get("packets", 1) or 1) + 1
+                    return [dict(item) for item in candidate]
+                if not additions:
+                    print(
+                        f"[LLM CACHE STREAM] flow={flow} action=reuse packets={state.get('packets', 1)}",
+                        flush=True,
+                    )
+                    return [dict(item) for item in (state.get("messages") or [])]
+                reset_reason = "budget" if estimated_tokens > token_budget else "no_additions"
+            else:
+                reasons = []
+                if not isinstance(state, dict):
+                    reasons.append("new")
+                else:
+                    if state.get("stable_signature") != stable_signature:
+                        reasons.append("stable_changed")
+                    if state.get("tool_schema_signature", "") != tool_schema_signature:
+                        reasons.append("tools_changed")
+                    if previous_ids and len(history_ids) < len(previous_ids):
+                        reasons.append("history_shrunk")
+                    elif not history_prefix_ok:
+                        reasons.append("history_rewritten")
+                reset_reason = "+".join(reasons) or "reset"
+
+            self._responses_prompt_streams[stream_key] = {
+                "stable_signature": stable_signature,
+                "route_signature": route_signature,
+                "history_ids": list(history_ids),
+                "tool_schema_signature": tool_schema_signature,
+                "messages": list(normal),
+                "runtime_signature": runtime_signature,
+                "packets": 1,
+                "updated_at": time.monotonic(),
+            }
+            print(
+                f"[LLM CACHE STREAM] flow={flow} action=reset reason={reset_reason} "
+                f"estimated_tokens={self._prompt_stream_tokens(normal)}",
+                flush=True,
+            )
+        return normal
+
+    def _record_responses_tool_tail(self, group_id, namespace, conversation):
+        """Keep tool-loop packets in the append-only Responses cache stream.
+
+        A tool follow-up is a real request whose assistant/tool records are part
+        of the gateway's cached prefix. If those records were omitted from the
+        in-memory stream, the next group turn would be appended after an older
+        prefix and the gateway could only reuse the prefix before the tool
+        call. Only extend a stream when the same Responses endpoint is still
+        active; fallback routes have their own cache namespace and must reset.
+        """
+        flow = str(namespace or "").strip().lower()
+        if flow not in {"direct-reply", "proactive-reply"}:
+            return
+        current_api = str(getattr(self.provider, "current_api_name", "") or "").strip()
+        if not current_api:
+            return
+        records = [item for item in (conversation or []) if isinstance(item, dict)]
+        if records and records[0].get("role") == "system":
+            records = records[1:]
+        if not records:
+            return
+        stream_key = (flow, str(group_id or "global"))
+        with self._responses_prompt_streams_lock:
+            state = self._responses_prompt_streams.get(stream_key)
+            if not isinstance(state, dict) or state.get("route_signature") != current_api:
+                return
+            existing = list(state.get("messages") or [])
+            if len(records) < len(existing) or records[:len(existing)] != existing:
+                return
+            if len(records) == len(existing):
+                return
+            candidate = records
+            if self._prompt_stream_tokens(candidate) > self._responses_stream_token_budget():
+                print(
+                    f"[LLM CACHE STREAM] flow={flow} action=tool_tail_skipped reason=budget",
+                    flush=True,
+                )
+                return
+            state["messages"] = candidate
+            state["updated_at"] = time.monotonic()
+            print(
+                f"[LLM CACHE STREAM] flow={flow} action=tool_tail packets={state.get('packets', 1)} "
+                f"extra_packets={len(candidate) - len(existing)} estimated_tokens={self._prompt_stream_tokens(candidate)}",
+                flush=True,
+            )
 
     def _history_cache_breakpoint_id(self, group_id, messages, namespace, cycle_id=None):
         """Return the immutable history tail selected for this group cycle.
@@ -1976,9 +2206,20 @@ class LLMService:
                 "active_style_switch": active_style_switch,
             }
 
+            rendered_user_messages = build_user_messages(prompt_data)
             messages = [
                 {"role": "system", "content": system_prompt},
-            ] + build_user_messages(prompt_data)
+            ] + self._build_responses_append_only_messages(
+                group_id,
+                "direct-reply",
+                system_prompt,
+                rendered_user_messages,
+                group_messages,
+                tool_schema_signature=self._tool_schema_signature(
+                    current_session_id=session_id,
+                    memory_group_id=group_id,
+                ),
+            )
 
             print(
                 f"[LLM INPUT] {time.strftime('%Y-%m-%d %H:%M:%S')} "
@@ -2160,8 +2401,8 @@ class LLMService:
             })
         return candidates
 
-    def _complete_with_tools(self, messages, allowed_hosts=None, current_session_id=None, memory_group_id=None, allow_memory_update=False, memory_observations=None, tieba_opportunity=False, behavior_lookup_enabled=False, cache_namespace="generic"):
-        """Run DeepSeek's assistant/tool/assistant loop and return final JSON."""
+    def _build_request_tools(self, current_session_id=None, memory_group_id=None, tieba_opportunity=False, behavior_lookup_enabled=False):
+        """Return the exact tool schema enabled for one model request."""
         tools = []
         if self.config.get("web_fetch_enabled", True):
             tools.append(WEB_FETCH_TOOL)
@@ -2183,6 +2424,25 @@ class LLMService:
                 tools.append(BEHAVIOR_LOOKUP_TOOL)
         if memory_group_id and self.long_term_memory and self.long_term_memory.enabled:
             tools.append(MEMORY_LOOKUP_TOOL)
+        return tools
+
+    def _tool_schema_signature(self, current_session_id=None, memory_group_id=None, tieba_opportunity=False, behavior_lookup_enabled=False):
+        """Fingerprint tool definitions because they participate in Responses caching."""
+        return self._prompt_stream_digest(self._build_request_tools(
+            current_session_id=current_session_id,
+            memory_group_id=memory_group_id,
+            tieba_opportunity=tieba_opportunity,
+            behavior_lookup_enabled=behavior_lookup_enabled,
+        ))
+
+    def _complete_with_tools(self, messages, allowed_hosts=None, current_session_id=None, memory_group_id=None, allow_memory_update=False, memory_observations=None, tieba_opportunity=False, behavior_lookup_enabled=False, cache_namespace="generic"):
+        """Run DeepSeek's assistant/tool/assistant loop and return final JSON."""
+        tools = self._build_request_tools(
+            current_session_id=current_session_id,
+            memory_group_id=memory_group_id,
+            tieba_opportunity=tieba_opportunity,
+            behavior_lookup_enabled=behavior_lookup_enabled,
+        )
         prompt_cache_key = self._responses_prompt_cache_key(memory_group_id, cache_namespace)
         if not tools:
             return self.provider.send(messages, prompt_cache_key=prompt_cache_key)
@@ -2233,6 +2493,7 @@ class LLMService:
             )
             tool_calls = getattr(assistant_message, "tool_calls", None) or []
             if not tool_calls:
+                self._record_responses_tool_tail(memory_group_id, cache_namespace, conversation)
                 return str(getattr(assistant_message, "content", None) or "")
 
             conversation.append(self._assistant_message_dict(assistant_message))
@@ -2373,6 +2634,7 @@ class LLMService:
                     conversation,
                     prompt_cache_key=prompt_cache_key,
                 )
+                self._record_responses_tool_tail(memory_group_id, cache_namespace, conversation)
                 return str(getattr(final_message, "content", None) or "")
 
     def handle_batch_message(
@@ -2652,10 +2914,27 @@ class LLMService:
                 f"force={effective_force_reply} priority={conversation_priority} attention={attention_check} trigger={trigger_source}",
                 flush=True,
             )
+            rendered_user_messages = build_batch_user_messages(prompt_data)
             response_text = self._complete_with_tools(
                 [
                     {"role": "system", "content": system_prompt},
-                ] + build_batch_user_messages(prompt_data),
+                ] + self._build_responses_append_only_messages(
+                    group_id,
+                    "proactive-reply",
+                    system_prompt,
+                    rendered_user_messages,
+                    prompt_group_messages,
+                    tool_schema_signature=self._tool_schema_signature(
+                        current_session_id=session_id,
+                        memory_group_id=group_id,
+                        tieba_opportunity=bool(
+                            (attention_check and tieba_opportunity)
+                            or proactive_web_opportunity
+                            or idle_content_opportunity
+                        ),
+                        behavior_lookup_enabled=bool(not attention_check),
+                    ),
+                ),
                 allowed_hosts=AUTO_REPLY_URL_HOSTS if url_only_present else None,
                 current_session_id=session_id,
                 memory_group_id=group_id,
