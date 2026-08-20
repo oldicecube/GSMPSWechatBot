@@ -432,8 +432,13 @@ class LxScriptSourceTests(unittest.TestCase):
     def test_discover_scripts_reads_music_source_directory(self):
         discovered = discover_scripts("music-source")
         names = {item.script_path.name for item in discovered}
-        self.assertIn("野花音源.js", names)
-        self.assertIn("野草音源.js", names)
+        js_files = {
+            path.name
+            for path in Path("music-source").glob("*.js")
+            if path.read_text(encoding="utf-8").lstrip().startswith("/*")
+        }
+        self.assertTrue(js_files)
+        self.assertEqual(names, js_files)
 
     def test_sort_discovered_uses_source_order_file(self):
         import tempfile
