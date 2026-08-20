@@ -37,6 +37,34 @@ class Dispatcher:
         self._llm_direct_wait_seconds = 3.0
 
     # =========================================================
+    # per-group feature switches
+    # =========================================================
+    def _group_feature_settings(self, group_id):
+        """Return per-group switches while keeping router payloads unchanged."""
+        group_key = str(group_id or "").strip()
+        all_settings = self.config.get("group_features") or {}
+        if not isinstance(all_settings, dict):
+            all_settings = {}
+        raw = all_settings.get(group_key)
+        if not isinstance(raw, dict):
+            raw = all_settings.get("default") if isinstance(all_settings.get("default"), dict) else {}
+
+        def read(name, alias):
+            return bool(raw.get(name, raw.get(alias, True)))
+
+        return {
+            "plugins_enabled": read("plugins_enabled", "plugins"),
+            "auto_plugins_enabled": read("auto_plugins_enabled", "auto_plugins"),
+            "llm_enabled": read("llm_enabled", "llm"),
+        }
+
+    def _group_feature_enabled(self, group_id, feature):
+        return bool(self._group_feature_settings(group_id).get(feature, True))
+
+    def _context_feature_enabled(self, context, feature):
+        return self._group_feature_enabled((context or {}).get("group"), feature)
+
+    # =========================================================
     # init plugins
     # =========================================================
     def init_plugins(self, config):
@@ -71,10 +99,16 @@ class Dispatcher:
 
             if hasattr(module, "start"):
                 try:
+                    feature = (
+                        "auto_plugins_enabled"
+                        if module in self.auto_modules.values()
+                        else "plugins_enabled"
+                    )
                     module.start(
-                        lambda content, target_groups=target_groups: self._broadcast_text(
+                        lambda content, target_groups=target_groups, feature=feature: self._broadcast_text(
                             target_groups,
-                            content
+                            content,
+                            feature=feature,
                         )
                     )
                 except Exception as e:
@@ -178,8 +212,13 @@ class Dispatcher:
         auto_results = []
         auto_target = context.get("auto_target")
         auto_command_handled = False
+        auto_plugins_enabled = self._context_feature_enabled(context, "auto_plugins_enabled")
+        plugins_enabled = self._context_feature_enabled(context, "plugins_enabled")
+        llm_enabled = self._context_feature_enabled(context, "llm_enabled")
 
         for name, module in self.modules.items():
+            if not auto_plugins_enabled:
+                break
             if getattr(module, "FALLBACK_ONLY", False):
                 continue
             if auto_target:
@@ -221,7 +260,7 @@ class Dispatcher:
                     return self._dispatch_llm(context)
                 return auto_result
 
-            if context.get("proactive_candidate") and self.llm_service:
+            if context.get("proactive_candidate") and self.llm_service and llm_enabled:
                 proactive_result = self.llm_service.handle_proactive_message(context)
                 if isinstance(proactive_result, dict) and proactive_result.get("forward_batch_to_llm"):
                     return self._dispatch_llm(
@@ -242,10 +281,10 @@ class Dispatcher:
                 if not context.get("prefix_used"):
                     return self._dispatch_fallback_auto(context)
 
-            if self._can_forward_to_llm(context):
+            if llm_enabled and self._can_forward_to_llm(context):
                 return self._dispatch_llm(context)
 
-            return self._dispatch_fallback_auto(context)
+            return self._dispatch_fallback_auto(context) if auto_plugins_enabled else None
 
         # =====================================================
         # 3. command debug
@@ -255,6 +294,9 @@ class Dispatcher:
             print(command, args)
 
         plugin = self.plugins.get(command)
+        if plugin and not plugins_enabled:
+            print(f"[PLUGIN BLOCK] group={context.get('group')} command={command} disabled by group_features")
+            plugin = None
 
         # =====================================================
         # 4. 未找到 command → fallback auto
@@ -265,6 +307,8 @@ class Dispatcher:
             # command reply.
             if auto_command_handled:
                 return auto_results[-1] if auto_results else None
+            if not plugins_enabled:
+                return None
             return auto_results[-1] if auto_results else f"未知命令: {command}"
 
         # =====================================================
@@ -342,7 +386,7 @@ class Dispatcher:
         self.llm_service.proactive_reply.record_sent_bot_message(group_id, 1)
 
     def _curate_cycle(self, group_id, context, messages):
-        if not self.llm_service:
+        if not self.llm_service or not self._group_feature_enabled(group_id, "llm_enabled"):
             return False
         # Cycle curation also performs synchronous LLM/tool work. Keep it in
         # the same provider budget as foreground and proactive batches.
@@ -416,6 +460,8 @@ class Dispatcher:
         cycle_id=None,
         conversation_priority=None,
     ):
+        if not self._context_feature_enabled(context, "llm_enabled"):
+            return None
         # Attention and ordinary autonomous pulls are cheap to skip when a
         # request is already using the provider. Direct prefix/@ requests get
         # a short wait so user-visible interactions retain priority.
@@ -526,6 +572,8 @@ class Dispatcher:
     ):
         """Flush a timer-owned proactive batch without waiting for a new event."""
         context = dict(context or {})
+        if not self._context_feature_enabled(context, "llm_enabled"):
+            return
         context["planned_send_delay_seconds"] = preview_delay_seconds("wechat_text")
         result = self._dispatch_llm(
             context,
@@ -569,6 +617,8 @@ class Dispatcher:
                 print("[AUTO ANIMATION ERROR]", e)
 
     def _dispatch_fallback_auto(self, context):
+        if not self._context_feature_enabled(context, "auto_plugins_enabled"):
+            return None
         for name, module in self.auto_modules.items():
             if not getattr(module, "FALLBACK_ONLY", False):
                 continue
@@ -620,10 +670,12 @@ class Dispatcher:
 
         return []
 
-    def _broadcast_text(self, target_groups, content):
+    def _broadcast_text(self, target_groups, content, feature="plugins_enabled"):
         result = False
 
         for target in target_groups:
+            if not self._group_feature_enabled(target, feature):
+                continue
             ok, _ = send(
                 target=target,
                 content=content,

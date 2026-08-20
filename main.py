@@ -146,7 +146,7 @@ def main():
     # ═══════════════════════════════════════
     # � 启动微信发送服务（localhost:9999）
     # ═══════════════════════════════════════
-    start_sender_server()
+    start_sender_server(config=config)
 
     # ═══════════════════════════════════════
     # �🚀 启动 weflow-core（Node.js 无头服务）

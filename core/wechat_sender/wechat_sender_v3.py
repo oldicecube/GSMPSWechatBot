@@ -60,6 +60,13 @@ class WeChatSenderV3(MessageSenderInterface):
         # dry-run：拦截所有对微信窗口的真实 UI 操作（用于全流程测试，可配合环境变量 WECHAT_SENDER_DRY_RUN=1）
         self.dry_run = bool((config or {}).get('dry_run', False)) or os.environ.get('WECHAT_SENDER_DRY_RUN', '0') == '1'
 
+        # 语音注入设备从 config.voice_sender 读取；环境变量仍可作为部署时的覆盖项。
+        voice_config = (config or {}).get('voice_sender', {})
+        if not isinstance(voice_config, dict):
+            voice_config = {}
+        self.voice_playback_device = voice_config.get('playback_device_name')
+        self.voice_capture_device = voice_config.get('capture_device_name')
+
     def initialize(self) -> bool:
         """初始化个人微信发送器"""
         try:
@@ -530,7 +537,10 @@ class WeChatSenderV3(MessageSenderInterface):
                 return False
 
             # 虚拟麦克风就绪检查
-            injector = VirtualMicInjector()
+            injector = VirtualMicInjector(
+                playback_device=self.voice_playback_device,
+                capture_device=self.voice_capture_device,
+            )
             if not injector.is_available():
                 logger.error(
                     f"未找到虚拟麦克风播放设备（{injector.playback_keyword}）。"

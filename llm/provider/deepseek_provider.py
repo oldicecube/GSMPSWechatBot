@@ -339,6 +339,78 @@ def _merge_consecutive(messages):
     return merged
 
 
+def _to_anthropic_content(content):
+    """Convert OpenAI-style multimodal content to Anthropic content blocks."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                blocks.append({"type": "text", "text": text})
+            continue
+        if block_type != "image_url":
+            continue
+        image_value = block.get("image_url")
+        if isinstance(image_value, dict):
+            image_url = str(image_value.get("url") or "")
+        else:
+            image_url = str(image_value or "")
+        if image_url.startswith("data:image/") and "," in image_url:
+            header, encoded = image_url.split(",", 1)
+            media_type = header[5:].split(";", 1)[0].strip().lower() or "image/png"
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": encoded,
+                },
+            })
+        elif image_url.startswith(("http://", "https://")):
+            # Some Anthropic-compatible gateways accept URL sources; keep this
+            # fallback for gateways that do, while WeFlow normally supplies data URLs.
+            blocks.append({
+                "type": "image",
+                "source": {"type": "url", "url": image_url},
+            })
+    return blocks or ""
+
+
+def _to_responses_content(content):
+    """Convert OpenAI chat content blocks to Responses input content blocks."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                blocks.append({"type": "input_text", "text": text})
+        elif block_type == "image_url":
+            image_value = block.get("image_url")
+            if isinstance(image_value, dict):
+                image_url = str(image_value.get("url") or "")
+            else:
+                image_url = str(image_value or "")
+            if image_url:
+                blocks.append({"type": "input_image", "image_url": image_url})
+    return blocks or ""
+
+
 def _to_anthropic_messages(messages, cache_enabled=False, cache_ttl="", cache_mode="auto"):
     """OpenAI 消息 -> (system_text, Anthropic messages)。
 
@@ -361,12 +433,14 @@ def _to_anthropic_messages(messages, cache_enabled=False, cache_ttl="", cache_mo
                 system_parts.append(text)
             continue
         if role == "user":
+            converted_content = _to_anthropic_content(content)
             text = _content_to_text(content)
             if (
                 cache_enabled
                 and cache_mode == "manual"
                 and msg.get("cache_breakpoint")
                 and text
+                and isinstance(converted_content, str)
             ):
                 out.append({
                     "role": "user",
@@ -377,7 +451,7 @@ def _to_anthropic_messages(messages, cache_enabled=False, cache_ttl="", cache_mo
                     }],
                 })
             else:
-                out.append({"role": "user", "content": text})
+                out.append({"role": "user", "content": converted_content})
         elif role == "assistant":
             text = _content_to_text(content)
             blocks = []
@@ -456,8 +530,14 @@ def _to_responses_input(messages, include_cache_breakpoints=False):
         if role == "system":
             continue
         if role == "user":
-            content = _content_to_text(msg.get("content"))
-            if include_cache_breakpoints and msg.get("cache_breakpoint"):
+            original_content = msg.get("content")
+            content = _content_to_text(original_content)
+            converted_content = _to_responses_content(original_content)
+            if (
+                include_cache_breakpoints
+                and msg.get("cache_breakpoint")
+                and isinstance(converted_content, str)
+            ):
                 items.append({
                     "role": "user",
                     "content": [{
@@ -467,7 +547,7 @@ def _to_responses_input(messages, include_cache_breakpoints=False):
                     }],
                 })
             else:
-                items.append({"role": "user", "content": content})
+                items.append({"role": "user", "content": converted_content})
         elif role == "assistant":
             content = _content_to_text(msg.get("content"))
             tool_calls = msg.get("tool_calls") or []
@@ -553,6 +633,7 @@ class OpenAICompatibleClient:
         self.entry = entry
         self.name = entry["name"]
         self.model = entry["model"]
+        self.supports_images = bool(entry.get("supports_images", False))
         self.timeout = entry["timeout_seconds"]
         self.last_usage = {}
         # Automatic Responses caching is widely supported; the GPT-specific
@@ -697,6 +778,7 @@ class ResponsesClient:
         self.entry = entry
         self.name = entry["name"]
         self.model = entry["model"]
+        self.supports_images = bool(entry.get("supports_images", False))
         self.timeout = entry["timeout_seconds"]
         self.max_output_tokens = int(entry.get("max_tokens") or 0)
         self.last_usage = {}
@@ -919,6 +1001,7 @@ class AnthropicClient:
         self.entry = entry
         self.name = entry["name"]
         self.model = entry["model"]
+        self.supports_images = bool(entry.get("supports_images", False))
         self.timeout = entry["timeout_seconds"]
         self.max_tokens = int(entry.get("max_tokens") or 4096)
         # Anthropic 缓存开关与 TTL 归一化（cache / cache_ttl）
@@ -1191,6 +1274,61 @@ class DeepSeekProvider:
         indices = self._available_indices_in_priority_order()
         return indices[0] if indices else None
 
+    @staticmethod
+    def _filter_tools_for_endpoint(endpoint, tools):
+        """Hide image-only tools from endpoints without multimodal support."""
+        if getattr(endpoint, "supports_images", False):
+            return tools
+        return [
+            tool
+            for tool in (tools or [])
+            if not isinstance(tool, dict) or not tool.get("requires_images")
+        ]
+
+    @staticmethod
+    def _filter_messages_for_endpoint(endpoint, messages):
+        """Avoid sending image blocks to a fallback model that cannot read them."""
+        if getattr(endpoint, "supports_images", False):
+            return messages
+        filtered = []
+        for message in messages or []:
+            if not isinstance(message, dict):
+                filtered.append(message)
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                filtered.append(message)
+                continue
+            blocks = []
+            removed_image = False
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    removed_image = True
+                    continue
+                blocks.append(dict(block) if isinstance(block, dict) else block)
+            if removed_image:
+                blocks.append({
+                    "type": "text",
+                    "text": "(Image content omitted because this fallback model does not support multimodal input.)",
+                })
+            updated = dict(message)
+            updated["content"] = blocks
+            filtered.append(updated)
+        return filtered
+
+    @property
+    def supports_images(self):
+        """Whether any endpoint currently available in the pool accepts images.
+
+        Individual endpoints are still filtered in ``send_chat``. This permits a
+        multimodal fallback to use the image tool after a text-only primary API
+        fails, without ever exposing that tool to the text-only endpoint.
+        """
+        return any(
+            bool(getattr(self._endpoints[index], "supports_images", False))
+            for index in self._available_indices_in_priority_order()
+        )
+
     @property
     def current_api_name(self):
         index = self._first_available_index()
@@ -1248,7 +1386,13 @@ class DeepSeekProvider:
         for attempt, index in enumerate(indices, start=1):
             endpoint = self._endpoints[index]
             try:
-                message = endpoint.chat(messages, tools=tools, prompt_cache_key=prompt_cache_key)
+                endpoint_tools = self._filter_tools_for_endpoint(endpoint, tools)
+                endpoint_messages = self._filter_messages_for_endpoint(endpoint, messages)
+                message = endpoint.chat(
+                    endpoint_messages,
+                    tools=endpoint_tools,
+                    prompt_cache_key=prompt_cache_key,
+                )
                 self._record_success(index)
                 self.last_usage = dict(endpoint.last_usage or {})
                 return message

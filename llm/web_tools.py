@@ -7,6 +7,7 @@ returns a bounded, plain-text representation of the page.
 
 from __future__ import annotations
 
+import base64
 import html
 import ipaddress
 import json
@@ -57,6 +58,28 @@ ORIGINAL_MESSAGE_TOOL = {
                 "server_id": {"type": "string", "description": "Message serverId/svrid/rawid, if present."},
             },
             "required": ["session_id"],
+        },
+    },
+}
+
+IMAGE_MESSAGE_TOOL = {
+    "type": "function",
+    "requires_images": True,
+    "function": {
+        "name": "fetch_image_by_message_id",
+        "description": (
+            "Fetch an image from one message in the current WeChat session by its message id. "
+            "Only use an id visibly present in the current conversation context, usually the value "
+            "inside [id=...]. Use this when the user asks about or refers to an image; the returned "
+            "image is supplied to the model as a visual reference."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Current WeChat session ID."},
+                "message_id": {"type": "string", "description": "The visible message id of the image message."},
+            },
+            "required": ["session_id", "message_id"],
         },
     },
 }
@@ -538,6 +561,229 @@ def fetch_original_message(session_id: str, local_id=None, server_id=None, *,
         return {"ok": False, "error": str(exc)[:500]}
 
 
+
+def _extract_image_url(value):
+    """Find an image media URL in a decoded WeFlow message."""
+    if isinstance(value, dict):
+        media_type = str(
+            value.get("mediaType")
+            or value.get("media_type")
+            or value.get("mimeType")
+            or value.get("mime_type")
+            or value.get("type")
+            or ""
+        ).lower()
+        content = str(value.get("content") or "").strip().lower()
+        is_image = (
+            media_type == "image"
+            or media_type.startswith("image/")
+            or value.get("localType") == 3
+            or value.get("local_type") == 3
+            or content == "[image]"
+        )
+        for key in ("mediaUrl", "media_url", "imageUrl", "image_url", "url"):
+            candidate = str(value.get(key) or "").strip()
+            if not candidate:
+                continue
+            lower_candidate = candidate.lower().split("?", 1)[0]
+            looks_like_image = lower_candidate.endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic")
+            )
+            if is_image or key in {"imageUrl", "image_url"} or looks_like_image:
+                return candidate
+        for child in value.values():
+            found = _extract_image_url(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _extract_image_url(child)
+            if found:
+                return found
+    return ""
+
+
+def _download_image_data_url(media_url, *, api_base, api_token, timeout, max_bytes):
+    """Download a WeFlow image and turn it into a bounded data URL."""
+    raw_url = str(media_url or "").strip()
+    if not raw_url:
+        raise ValueError("image URL is empty")
+    max_bytes = max(256 * 1024, min(int(max_bytes or 8 * 1024 * 1024), 16 * 1024 * 1024))
+    if raw_url.startswith("data:image/"):
+        if len(raw_url) > max_bytes * 2:
+            raise ValueError("image data URL exceeds size limit")
+        return raw_url
+
+    safe_base = str(api_base or DEFAULT_WEFLOW_API_BASE).rstrip("/")
+    if raw_url.startswith("/"):
+        download_url = safe_base + raw_url
+    elif raw_url.startswith(("http://", "https://")):
+        download_url = raw_url
+    else:
+        download_url = safe_base + "/" + raw_url.lstrip("/")
+
+    headers = {"Authorization": f"Bearer {str(api_token or '').strip()}"}
+    response = requests.get(
+        download_url,
+        headers=headers,
+        timeout=max(1.0, min(float(timeout), 30.0)),
+    )
+    if response.status_code == 401 and api_token:
+        response = requests.get(
+            download_url,
+            params={"access_token": str(api_token).strip()},
+            timeout=max(1.0, min(float(timeout), 30.0)),
+        )
+    response.raise_for_status()
+    content = response.content
+    if not content:
+        raise ValueError("image URL is empty")
+    if len(content) > max_bytes:
+        raise ValueError(f"image exceeds size limit ({max_bytes} bytes)")
+
+    content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if not content_type.startswith("image/"):
+        # WeFlow may omit content-type for locally served media. Let common
+        # image signatures pass, but do not forward arbitrary HTML as an image.
+        signatures = (
+            (b"\x89PNG", "image/png"),
+            (b"\xff\xd8\xff", "image/jpeg"),
+            (b"GIF8", "image/gif"),
+            (b"RIFF", "image/webp"),
+            (b"BM", "image/bmp"),
+        )
+        content_type = next(
+            (kind for prefix, kind in signatures if content.startswith(prefix)),
+            "",
+        )
+    if not content_type.startswith("image/"):
+        raise ValueError("WeFlow media is not an image")
+    encoded = base64.b64encode(content).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
+def _message_matches_id(message, requested_id, numeric_id):
+    if not isinstance(message, dict):
+        return False
+    if numeric_id > 0:
+        for key in ("localId", "local_id"):
+            try:
+                if int(message.get(key) or 0) == numeric_id:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    requested = str(requested_id or "").strip()
+    return requested and any(
+        str(message.get(key) or "").strip() == requested
+        for key in ("serverId", "server_id", "svrid", "rawid", "messageKey", "message_key")
+    )
+
+
+def _get_weflow_image_message(safe_base, requested_session, requested_id, numeric_id,
+                              api_token, timeout):
+    """Resolve an image message using original lookup, then /messages fallback."""
+    headers = {"Authorization": f"Bearer {str(api_token or '').strip()}"}
+    params = {"talker": requested_session}
+    if numeric_id > 0:
+        params["localId"] = numeric_id
+    else:
+        params["serverId"] = requested_id
+
+    try:
+        response = requests.get(
+            f"{safe_base}/api/v1/messages/original",
+            params=params,
+            headers=headers,
+            timeout=max(1.0, min(float(timeout), 20.0)),
+        )
+        if response.status_code < 400:
+            payload = response.json()
+            message = payload.get("message") if isinstance(payload, dict) else None
+            # The original endpoint may return the decoded message without
+            # media metadata. In that case continue to the enriched listing
+            # fallback used by the symmetry plugin.
+            if isinstance(message, dict) and _extract_image_url(message):
+                return message
+    except Exception:
+        pass
+
+    # The symmetry plugin uses this enriched listing endpoint, which often exposes
+    # mediaUrl even when the original-message endpoint omits media metadata.
+    list_params = {"talker": requested_session, "limit": 200, "media": 1, "image": 1}
+    response = requests.get(
+        f"{safe_base}/api/v1/messages",
+        params=list_params,
+        headers=headers,
+        timeout=max(1.0, min(float(timeout), 20.0)),
+    )
+    if response.status_code == 401 and api_token:
+        list_params["access_token"] = str(api_token).strip()
+        response = requests.get(
+            f"{safe_base}/api/v1/messages",
+            params=list_params,
+            timeout=max(1.0, min(float(timeout), 20.0)),
+        )
+    response.raise_for_status()
+    payload = response.json()
+    messages = payload.get("messages") if isinstance(payload, dict) else payload
+    for message in messages or []:
+        if _message_matches_id(message, requested_id, numeric_id):
+            return message
+    return None
+
+
+def fetch_image_by_message_id(session_id: str, message_id, *, current_session_id=None,
+                               api_base=DEFAULT_WEFLOW_API_BASE, api_token="", timeout=8.0,
+                               max_bytes=8 * 1024 * 1024) -> dict:
+    """Fetch one image message and return an internal data URL for the tool loop."""
+    requested_session = str(session_id or "").strip()
+    active_session = str(current_session_id or "").strip()
+    if not requested_session or not active_session or requested_session != active_session:
+        return {"ok": False, "error": "image lookup is limited to the current session"}
+    requested_id = str(message_id or "").strip()
+    if not requested_id:
+        return {"ok": False, "error": "message_id is required"}
+
+    try:
+        numeric_id = int(requested_id)
+    except (TypeError, ValueError):
+        numeric_id = 0
+
+    try:
+        safe_base = str(api_base or DEFAULT_WEFLOW_API_BASE).rstrip("/")
+        message = _get_weflow_image_message(
+            safe_base,
+            requested_session,
+            requested_id,
+            numeric_id,
+            api_token,
+            timeout,
+        )
+        if not isinstance(message, dict):
+            return {"ok": False, "error": "message not found"}
+        media_url = _extract_image_url(message)
+        if not media_url:
+            return {"ok": False, "error": "message is not a readable image"}
+        data_url = _download_image_data_url(
+            media_url,
+            api_base=safe_base,
+            api_token=api_token,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        # _image_data_url is consumed locally by LLMService and is not shown as
+        # tool text; the model receives the actual image as a multimodal block.
+        return {
+            "ok": True,
+            "session_id": requested_session,
+            "message_id": requested_id,
+            "description": "Image fetched. Refer to the following image content.",
+            "_image_data_url": data_url,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500]}
+
+
 def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_TIMEOUT_SECONDS,
                  max_chars: int = DEFAULT_MAX_CHARS, allowed_hosts=None,
                  current_session_id=None, api_base=DEFAULT_WEFLOW_API_BASE,
@@ -545,11 +791,12 @@ def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_T
                  original_max_chars=DEFAULT_ORIGINAL_MESSAGE_MAX_CHARS,
                  slang_lookup=None, slang_similar_lookup=None,
                  expression_lookup=None, memory_lookup=None,
-                 behavior_lookup=None) -> str:
+                 behavior_lookup=None, image_max_bytes=8 * 1024 * 1024) -> str:
     """Execute one model-requested tool and return JSON for the tool message."""
     known_names = {
         WEB_FETCH_TOOL["function"]["name"],
         ORIGINAL_MESSAGE_TOOL["function"]["name"],
+        IMAGE_MESSAGE_TOOL["function"]["name"],
         SLANG_LOOKUP_TOOL["function"]["name"],
         SLANG_SIMILAR_LOOKUP_TOOL["function"]["name"],
         EXPRESSION_LOOKUP_TOOL["function"]["name"],
@@ -574,6 +821,19 @@ def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_T
                 api_token=api_token,
                 timeout=original_timeout,
                 max_chars=original_max_chars,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        if name == IMAGE_MESSAGE_TOOL["function"]["name"]:
+            if not isinstance(payload, dict):
+                raise ValueError("tool arguments must be a JSON object")
+            result = fetch_image_by_message_id(
+                payload.get("session_id"),
+                payload.get("message_id"),
+                current_session_id=current_session_id,
+                api_base=api_base,
+                api_token=api_token,
+                timeout=original_timeout,
+                max_bytes=image_max_bytes,
             )
             return json.dumps(result, ensure_ascii=False)
         if name == SLANG_LOOKUP_TOOL["function"]["name"]:

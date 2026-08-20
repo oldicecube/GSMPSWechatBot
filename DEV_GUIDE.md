@@ -202,7 +202,7 @@ send(
 
 语音发送仅支持 Windows + VB-CABLE。发送组件会切换目标聊天后长按 Shift，等待 0.5 秒再向 `CABLE Input` 注入音频，完成后才松开 Shift。微信录音设备应设为 `CABLE Output`。不得绕过 `core.sender.send` 或直接向物理扬声器播放。
 
-所有待发送语音必须位于 `core.wechat_sender.file_down.VOICE_TEMP_DIR`（默认 `%TEMP%\WechatRobot\voice`）。hook 服务仅会删除该目录内的文件；插件不得自行删除任意音频路径。设备名称可用 `WECHAT_VOICE_PLAYBACK_DEVICE` 和 `WECHAT_VOICE_CAPTURE_DEVICE` 环境变量覆盖。
+所有待发送语音必须位于 `core.wechat_sender.file_down.VOICE_TEMP_DIR`（默认 `%TEMP%\WechatRobot\voice`）。hook 服务仅会删除该目录内的文件；插件不得自行删除任意音频路径。设备名称推荐在 `config.json` 的 `voice_sender.playback_device_name` / `voice_sender.capture_device_name` 中配置；环境变量 `WECHAT_VOICE_PLAYBACK_DEVICE` 和 `WECHAT_VOICE_CAPTURE_DEVICE` 仍可用于未填写配置时的覆盖。
 
 ---
 
@@ -533,3 +533,9 @@ save_document("key_name", {"field": "value"})
 `llm/conversation_pulse.py` 是 working 期的纯本地调度器：读取最近最多 120 条、最多约三分钟的现有群消息，计算一分钟密度、参与人数、二元片段重叠、直接提及和 Bot 静默时间，返回 `skip`、`defer` 或 `plan`。它不调用 LLM、不做 embedding，也不决定回复内容；只有 `plan` 才会调用一次既有的批量 LLM 流程。模型收到完整上下文及脉冲摘要后，仍可返回 `should_reply=false`，并应自行选择连贯话题而不是默认回复批次最后一条。
 
 碎片闲聊的 `plan` 是低频采样机会：默认要求一分钟至少 3 条人类消息、Bot 静默 6 分钟、同群距离上次该机会至少 6 分钟，并以 12% 概率抽样。`attention_nonsense_probability` 默认同样降为 12%。弱智吧内容只在独立随机 2--3 小时主动网页机会中现场拉取；若计时期间 Bot 成功发送超过 10 条分开的群文本，计时器立即重新随机。
+
+## LLM 图片工具
+
+`llm/web_tools.py` 提供 `fetch_image_by_message_id`。它只接受当前会话的消息 ID，通过 WeFlow 原始消息接口及 `/api/v1/messages` 图片列表获取 `mediaUrl`，下载后由 `llm/core/llm_service.py` 转成多模态用户消息。不要把 `_image_data_url` 直接加入工具文本。
+
+每个 `llm.apis[]` 项使用 `supports_images` 明确声明模型是否支持图片；默认为 `false`。`DeepSeekProvider` 会按当前端点过滤图片工具，Responses、Chat Completions 和 Anthropic Messages 分别转换为 `input_image`、`image_url` 和 Anthropic `image` block。该功能不修改 Router 或 WeFlow 推送/发送消息体结构。

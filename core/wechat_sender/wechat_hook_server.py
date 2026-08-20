@@ -36,6 +36,7 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
     # 类级别的发送器实例（延迟初始化）
     _sender = None
     _sender_lock = threading.Lock()
+    _sender_config = {}
     
     def log_message(self, format, *args):
         """重写日志记录方法，不记录请求日志"""
@@ -46,7 +47,7 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
         if WeChatHookHandler._sender is None:
             with WeChatHookHandler._sender_lock:
                 if WeChatHookHandler._sender is None:
-                    WeChatHookHandler._sender = WeChatSenderV3()
+                    WeChatHookHandler._sender = WeChatSenderV3(WeChatHookHandler._sender_config)
         return WeChatHookHandler._sender
     
     def _send_cors_headers(self):
@@ -273,7 +274,11 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
             # /voice/status 路径：虚拟麦克风注入器状态
             if parsed_path.path.strip('/') == 'voice/status':
                 from core.wechat_sender.virtual_mic import VirtualMicInjector
-                injector = VirtualMicInjector()
+                sender = self._get_sender()
+                injector = VirtualMicInjector(
+                    playback_device=sender.voice_playback_device,
+                    capture_device=sender.voice_capture_device,
+                )
                 result = {
                     "service": "WeChat Voice Status API",
                     "dry_run": os.environ.get('WECHAT_SENDER_DRY_RUN', '0') == '1',
@@ -420,8 +425,9 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
 
 
-def run_server(host: str = 'localhost', port: int = 9999):
+def run_server(host: str = 'localhost', port: int = 9999, config: Dict[str, Any] = None):
     """运行 HTTP 服务器"""
+    WeChatHookHandler._sender_config = config if isinstance(config, dict) else {}
     server_address = (host, port)
     logger.info(f"正在启动微信 Hook HTTP 服务器...")
     httpd = HTTPServer(server_address, WeChatHookHandler)

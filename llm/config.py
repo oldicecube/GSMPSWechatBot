@@ -58,6 +58,10 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "timeout_seconds": timeout,
                 "max_tokens": max(1, max_tokens) if max_tokens > 0 else 0,
                 "priority": priority,
+                # Explicit opt-in for multimodal image input.
+                "supports_images": bool(
+                    item.get("supports_images", item.get("image_enabled", False))
+                ),
                 # 协议缓存开关：anthropic 走 cache_control；responses 走 prompt_cache_key。
                 "cache": bool(item.get("cache", True)),
                 "prompt_cache_key": str(item.get("prompt_cache_key") or "").strip(),
@@ -91,8 +95,86 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "cache_mode": "auto",
                 "cache_ttl": "",
                 "priority": 1,
+                "supports_images": bool(
+                    llm_config.get("supports_images", llm_config.get("image_enabled", False))
+                ),
             })
     return entries
+
+
+def _normalize_identity(identity, fallback=None):
+    fallback = fallback if isinstance(fallback, dict) else {}
+    identity = identity if isinstance(identity, dict) else {}
+    raw_rules = identity.get("rules", fallback.get("rules", []))
+    if isinstance(raw_rules, str):
+        raw_rules = [raw_rules]
+    if not isinstance(raw_rules, list):
+        raw_rules = []
+    return {
+        "name": str(identity.get("name", fallback.get("name", "LLM")) or "LLM").strip() or "LLM",
+        "role": str(identity.get("role", fallback.get("role", "微信群聊助手")) or "微信群聊助手").strip() or "微信群聊助手",
+        "style": str(identity.get("style", fallback.get("style", "自然、简短、像真人微信聊天")) or "自然、简短、像真人微信聊天").strip() or "自然、简短、像真人微信聊天",
+        "rules": [str(item).strip() for item in raw_rules if str(item).strip()],
+    }
+
+
+def _normalize_auto_reply(settings, fallback=None, prefix_mode="strict"):
+    merged = dict(fallback) if isinstance(fallback, dict) else {}
+    if isinstance(settings, dict):
+        merged.update(settings)
+    if "enabled" not in merged:
+        merged["enabled"] = prefix_mode == "mixed"
+    merged["reply_trigger_mode"] = str(
+        merged.get("reply_trigger_mode", "conversation_pulse") or "conversation_pulse"
+    ).strip().lower()
+    if merged["reply_trigger_mode"] not in {"frequency", "reply_necessity", "conversation_pulse"}:
+        merged["reply_trigger_mode"] = "conversation_pulse"
+    try:
+        merged["reply_necessity_threshold"] = max(
+            0, min(200, int(merged.get("reply_necessity_threshold", 35)))
+        )
+    except (TypeError, ValueError):
+        merged["reply_necessity_threshold"] = 35
+    return merged
+
+
+def _normalize_group_profiles(llm_config, base_config, prefix_mode):
+    raw_profiles = llm_config.get("group_profiles")
+    if not isinstance(raw_profiles, dict):
+        return {}
+
+    profiles = {}
+    for raw_name, raw_profile in raw_profiles.items():
+        group_name = str(raw_name or "").strip()
+        if not group_name or not isinstance(raw_profile, dict):
+            continue
+        profile = dict(raw_profile)
+        profile["identity"] = _normalize_identity(
+            raw_profile.get("identity"), base_config.get("identity")
+        )
+        for field in ("reply_style", "behavior_style", "group_prompt", "private_prompt"):
+            profile[field] = str(
+                raw_profile.get(field, base_config.get(field, "")) or ""
+            ).strip()
+        raw_prefixes = raw_profile.get("prefixes", base_config.get("prefixes") or [])
+        if isinstance(raw_prefixes, str):
+            raw_prefixes = [raw_prefixes]
+        profile["prefixes"] = [
+            str(item).strip()
+            for item in (raw_prefixes if isinstance(raw_prefixes, list) else [])
+            if str(item).strip()
+        ]
+        profile["prompt"] = dict(base_config.get("prompt") or {})
+        if isinstance(raw_profile.get("prompt"), dict):
+            profile["prompt"].update(raw_profile["prompt"])
+        profile["auto_reply"] = _normalize_auto_reply(
+            raw_profile.get("auto_reply"), base_config.get("auto_reply"), prefix_mode
+        )
+        profile["proactive"] = dict(base_config.get("proactive") or {})
+        if isinstance(raw_profile.get("proactive"), dict):
+            profile["proactive"].update(raw_profile["proactive"])
+        profiles[group_name] = profile
+    return profiles
 
 
 def _normalize_time_slots(config):
@@ -181,6 +263,20 @@ def get_llm_config():
         ),
         "original_message_max_chars": _safe_int(
             llm_config.get("original_message_max_chars", 16000), 16000
+        ),
+        "image_tool_enabled": bool(llm_config.get("image_tool_enabled", True)),
+        "image_tool_max_calls": max(
+            1, min(_safe_int(llm_config.get("image_tool_max_calls", 1), 1), 3)
+        ),
+        "image_tool_max_bytes": max(
+            256 * 1024,
+            min(
+                _safe_int(
+                    llm_config.get("image_tool_max_bytes", 8 * 1024 * 1024),
+                    8 * 1024 * 1024,
+                ),
+                16 * 1024 * 1024,
+            ),
         ),
         # Keep provider work bounded across the Worker pool and proactive
         # timer threads. The dispatcher applies the actual semaphore.
@@ -302,21 +398,9 @@ def get_llm_config():
         if str(item).strip()
     ]
 
-    auto_reply = llm_config.get("auto_reply")
-    if not isinstance(auto_reply, dict):
-        auto_reply = {"enabled": prefix_mode == "mixed"}
-    result["auto_reply"] = dict(auto_reply)
-    result["auto_reply"]["reply_trigger_mode"] = str(
-        auto_reply.get("reply_trigger_mode", "conversation_pulse") or "conversation_pulse"
-    ).strip().lower()
-    if result["auto_reply"]["reply_trigger_mode"] not in {"frequency", "reply_necessity", "conversation_pulse"}:
-        result["auto_reply"]["reply_trigger_mode"] = "conversation_pulse"
-    try:
-        result["auto_reply"]["reply_necessity_threshold"] = max(
-            0, min(200, int(auto_reply.get("reply_necessity_threshold", 35)))
-        )
-    except (TypeError, ValueError):
-        result["auto_reply"]["reply_necessity_threshold"] = 35
+    result["auto_reply"] = _normalize_auto_reply(
+        llm_config.get("auto_reply"), prefix_mode=prefix_mode
+    )
 
     intercept_auto_plugins = llm_config.get("intercept_auto_plugins", [])
     if isinstance(intercept_auto_plugins, str):
@@ -360,20 +444,7 @@ def get_llm_config():
     assistant_nickname = str(llm_config.get("assistant_nickname") or "LLM").strip()
     result["assistant_nickname"] = assistant_nickname or "LLM"
 
-    identity = llm_config.get("identity")
-    if not isinstance(identity, dict):
-        identity = {}
-
-    result["identity"] = {
-        "name": str(identity.get("name") or "LLM").strip() or "LLM",
-        "role": str(identity.get("role") or "微信群聊助手").strip() or "微信群聊助手",
-        "style": str(identity.get("style") or "自然、简短、像真人微信聊天").strip() or "自然、简短、像真人微信聊天",
-        "rules": [
-            str(item).strip()
-            for item in (identity.get("rules") or [])
-            if str(item).strip()
-        ]
-    }
+    result["identity"] = _normalize_identity(llm_config.get("identity"))
 
     prompt = llm_config.get("prompt")
     if not isinstance(prompt, dict):
@@ -399,6 +470,13 @@ def get_llm_config():
             if str(item).strip()
         ]
     }
+    result["reply_style"] = str(llm_config.get("reply_style") or "").strip()
+    result["behavior_style"] = str(llm_config.get("behavior_style") or "").strip()
+    result["group_prompt"] = str(llm_config.get("group_prompt") or "").strip()
+    result["private_prompt"] = str(llm_config.get("private_prompt") or "").strip()
+    proactive = llm_config.get("proactive")
+    result["proactive"] = dict(proactive) if isinstance(proactive, dict) else {}
+    result["group_profiles"] = _normalize_group_profiles(llm_config, result, prefix_mode)
     return result
 
 

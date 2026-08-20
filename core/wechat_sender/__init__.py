@@ -13,7 +13,7 @@ _server_started = False
 _server_thread = None
 
 
-def start_server(host: str = "127.0.0.1", port: int = 9999):
+def start_server(host: str = "127.0.0.1", port: int = 9999, config: dict = None):
     """在后台线程启动微信消息发送 HTTP 服务器"""
     global _server_started, _server_thread
 
@@ -25,7 +25,7 @@ def start_server(host: str = "127.0.0.1", port: int = 9999):
 
         _server_thread = threading.Thread(
             target=run_server,
-            args=(host, port),
+            args=(host, port, config),
             daemon=True,
             name="wechat-sender-server",
         )

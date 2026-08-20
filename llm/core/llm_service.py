@@ -39,6 +39,7 @@ from llm.web_tools import (
     SLANG_LOOKUP_TOOL,
     SLANG_SIMILAR_LOOKUP_TOOL,
     ORIGINAL_MESSAGE_TOOL,
+    IMAGE_MESSAGE_TOOL,
     BEHAVIOR_LOOKUP_TOOL,
     TIABA_HOT_TOOL,
     WEB_FETCH_TOOL,
@@ -93,7 +94,13 @@ class LLMService:
         except Exception:
             self.emoji_list = []
 
-        self.proactive_reply = ProactiveReplyManager(self.config)
+        self._proactive_callback = None
+        # The default proactive manager is created before the learner below.
+        # Keep the attribute available so manager construction is safe during startup.
+        self.style_learner = None
+        self._proactive_managers = {}
+        self.proactive_reply = self._get_proactive_manager("")
+        self._conversation_pulses = {}
         self.conversation_pulse = ConversationPulse(self.config.get("auto_reply") or {})
         try:
             learning_config = dict(self.config)
@@ -105,12 +112,84 @@ class LLMService:
             print(f"[LLM LEARNING INIT ERROR] {exc}", flush=True)
             self.style_learner = None
         if self.style_learner:
-            self.proactive_reply.set_reply_timing_reader(
-                self.style_learner.get_response_learning
-            )
-            self.proactive_reply.set_activity_profile_reader(
-                self.style_learner.get_activity_profile
-            )
+            for manager in self._proactive_managers.values():
+                manager.set_reply_timing_reader(
+                    self.style_learner.get_response_learning
+                )
+                manager.set_activity_profile_reader(
+                    self.style_learner.get_activity_profile
+                )
+
+    def _group_profile(self, group_id):
+        profiles = self.config.get("group_profiles") or {}
+        if not isinstance(profiles, dict):
+            return {}
+        key = str(group_id or "").strip()
+        profile = profiles.get(key)
+        if not isinstance(profile, dict):
+            profile = profiles.get("default")
+        return dict(profile) if isinstance(profile, dict) else {}
+
+    def _effective_group_config(self, group_id):
+        """Return the global LLM config with only group-local persona/timing overrides."""
+        effective = dict(self.config)
+        profile = self._group_profile(group_id)
+        for key in (
+            "identity", "reply_style", "behavior_style", "group_prompt",
+            "private_prompt", "prefixes", "prompt", "proactive",
+        ):
+            if key in profile:
+                value = profile.get(key)
+                effective[key] = dict(value) if isinstance(value, dict) else value
+        if "auto_reply" in profile:
+            effective["auto_reply"] = dict(profile.get("auto_reply") or {})
+        return effective
+
+    @staticmethod
+    def _persona_guidance(profile):
+        profile = profile if isinstance(profile, dict) else {}
+        parts = []
+        labels = (
+            ("Reply style", "reply_style"),
+            ("Behavior guidance", "behavior_style"),
+            ("Group context", "group_prompt"),
+            ("Private context", "private_prompt"),
+        )
+        for label, key in labels:
+            value = str(profile.get(key) or "").strip()
+            if value:
+                parts.append(f"{label}: {value}")
+        return "\n".join(parts)
+
+    def _get_proactive_manager(self, group_id):
+        key = str(group_id or "").strip() or "__default__"
+        manager = self._proactive_managers.get(key)
+        if manager is not None:
+            return manager
+        effective = self._effective_group_config(group_id)
+        if str(group_id or "").strip():
+            auto_reply = dict(effective.get("auto_reply") or {})
+            auto_reply["allowed_groups"] = [str(group_id).strip()]
+            effective["auto_reply"] = auto_reply
+            effective["target_groups"] = [str(group_id).strip()]
+        manager = ProactiveReplyManager(effective)
+        if self._proactive_callback:
+            manager.set_batch_callback(self._proactive_callback)
+        if self.style_learner:
+            manager.set_reply_timing_reader(self.style_learner.get_response_learning)
+            manager.set_activity_profile_reader(self.style_learner.get_activity_profile)
+        self._proactive_managers[key] = manager
+        return manager
+
+    def _conversation_pulse_for(self, group_id):
+        key = str(group_id or "").strip() or "__default__"
+        pulse = self._conversation_pulses.get(key)
+        if pulse is None:
+            profile = self._group_profile(group_id)
+            settings = profile.get("auto_reply") if isinstance(profile, dict) else None
+            pulse = ConversationPulse(settings or self.config.get("auto_reply") or {})
+            self._conversation_pulses[key] = pulse
+        return pulse
 
     def _get_memory_context(self, group_id, wxid, query):
         if self.long_term_memory is None:
@@ -830,12 +909,18 @@ class LLMService:
         try:
             messages = self.memory_manager.get_group_messages(group_id)
             state = self._get_group_memory_state(group_id)
+            effective_config = self._effective_group_config(group_id)
             response = self._complete_with_tools(
                 [
-                    {"role": "system", "content": build_system_prompt(self.config.get("prompt") or {}, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])},
+                    {"role": "system", "content": build_system_prompt(
+                        effective_config.get("prompt") or {},
+                        identity=effective_config.get("identity") or {},
+                        prefixes=effective_config.get("prefixes") or [],
+                        persona_guidance=self._persona_guidance(effective_config),
+                    )},
                 ] + build_context_compression_messages({
-                    "identity": self.config.get("identity") or {},
-                    "prefixes": self.config.get("prefixes") or [],
+                    "identity": effective_config.get("identity") or {},
+                    "prefixes": effective_config.get("prefixes") or [],
                     "group_messages": messages,
                     **state,
                 }),
@@ -987,7 +1072,13 @@ class LLMService:
             "behavior_actions": [],
             "style_action": {"action": "keep"},
         }
-        system_prompt = build_system_prompt(self.config.get("prompt") or {}, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])
+        effective_config = self._effective_group_config(group_id)
+        system_prompt = build_system_prompt(
+            effective_config.get("prompt") or {},
+            identity=effective_config.get("identity") or {},
+            prefixes=effective_config.get("prefixes") or [],
+            persona_guidance=self._persona_guidance(effective_config),
+        )
         for index in range(batch_count):
             message_chunk = message_chunks[min(index, len(message_chunks) - 1)]
             slang_chunk = slang_chunks[min(index, len(slang_chunks) - 1)]
@@ -1291,9 +1382,10 @@ class LLMService:
                     f"{[item['phrase'] for item in local_slang_candidates]}",
                     flush=True,
                 )
+            effective_config = self._effective_group_config(group_id)
             prompt_data = {
-                "identity": self.config.get("identity") or {},
-                "prefixes": self.config.get("prefixes") or [],
+                "identity": effective_config.get("identity") or {},
+                "prefixes": effective_config.get("prefixes") or [],
                 "cycle_messages": prompt_cycle_messages,
                 # These units are the *only* valid evidence source for new
                 # slang. Raw cycle messages remain available as context for
@@ -1312,7 +1404,12 @@ class LLMService:
             try:
                 response = self._complete_with_tools(
                     [
-                        {"role": "system", "content": build_system_prompt(self.config.get("prompt") or {}, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])},
+                        {"role": "system", "content": build_system_prompt(
+                        effective_config.get("prompt") or {},
+                        identity=effective_config.get("identity") or {},
+                        prefixes=effective_config.get("prefixes") or [],
+                        persona_guidance=self._persona_guidance(effective_config),
+                    )},
                     ] + build_memory_curation_messages(prompt_data),
                     current_session_id=context.get("sessionId"),
                     memory_group_id=group_id,
@@ -1528,7 +1625,7 @@ class LLMService:
                     )
             # Fetching only fills a source-backed cache for future eligible
             # idle windows. It is asynchronous and never sends a group message.
-            self._schedule_idle_content_prefetch()
+            self._schedule_idle_content_prefetch(group_id)
             print(
                 f"[LLM CYCLE CURATION] group={group_id} memory={memory_result} slang={slang_applied} "
                 f"expressions={expression_applied} behaviors={behavior_applied} style={style_applied} "
@@ -1573,10 +1670,13 @@ class LLMService:
             self._memory_curator_lock.release()
 
     def set_proactive_callback(self, callback):
-        self.proactive_reply.set_batch_callback(callback)
+        self._proactive_callback = callback if callable(callback) else None
+        for manager in self._proactive_managers.values():
+            manager.set_batch_callback(self._proactive_callback)
 
     def handle_proactive_message(self, context):
-        return self.proactive_reply.handle_message(context)
+        group_id = (context or {}).get("group") or (context or {}).get("sessionId") or ""
+        return self._get_proactive_manager(group_id).handle_message(context)
 
     @staticmethod
     def _attention_batch(group_id, stored_messages, token_budget=1000):
@@ -1675,7 +1775,11 @@ class LLMService:
         return combined
 
     def on_proactive_result(self, context, result, attention_check=False):
-        self.proactive_reply.on_llm_result(
+        group_id = ""
+        if isinstance(context, dict):
+            group_id = context.get("group") or context.get("group_id") or context.get("target") or ""
+        manager = self._get_proactive_manager(group_id)
+        manager.on_llm_result(
             context,
             result,
             attention_check=attention_check,
@@ -1684,12 +1788,12 @@ class LLMService:
         # briefly so a natural follow-up is never rejected by autonomous
         # frequency scoring before the model can see the context.
         if not attention_check:
-            self.proactive_reply.record_conversation_reply(context, result)
+            manager.record_conversation_reply(context, result)
 
     def _get_active_style_switch(self, group_id):
         """Read the current cycle's LLM-chosen style selection for injection."""
         try:
-            return self.proactive_reply.get_active_style_switch(group_id)
+            return self._get_proactive_manager(group_id).get_active_style_switch(group_id)
         except Exception:
             return None
 
@@ -1707,14 +1811,15 @@ class LLMService:
             return False
 
     def _apply_style_switch_inner(self, group_id, cycle_id, switch):
-        if self.proactive_reply is None or not isinstance(switch, dict):
+        manager = self._get_proactive_manager(group_id)
+        if manager is None or not isinstance(switch, dict):
             return False
         learning = self.config.get("learning") or {}
         if not bool(learning.get("style_switch_enabled", True)):
             return False
         action = str(switch.get("action") or "set").lower()
         if action == "clear":
-            return self.proactive_reply.set_active_style_switch(group_id, cycle_id, None)
+            return self._get_proactive_manager(group_id).set_active_style_switch(group_id, cycle_id, None)
         if action == "keep":
             return False
         scene = str(switch.get("scene") or "").strip()[:40]
@@ -1765,7 +1870,7 @@ class LLMService:
                     valid_emotion = False
             if not (valid_situation and valid_type and valid_emotion):
                 return False
-        return self.proactive_reply.set_active_style_switch(group_id, cycle_id, selection)
+        return self._get_proactive_manager(group_id).set_active_style_switch(group_id, cycle_id, selection)
 
     def _balance_response(self):
         if self._balance_warning_sent:
@@ -1840,7 +1945,13 @@ class LLMService:
             )
             active_style_switch = self._get_active_style_switch(group_id)
 
-            system_prompt = build_system_prompt(self.config.get("prompt") or {}, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])
+            effective_config = self._effective_group_config(group_id)
+            system_prompt = build_system_prompt(
+                effective_config.get("prompt") or {},
+                identity=effective_config.get("identity") or {},
+                prefixes=effective_config.get("prefixes") or [],
+                persona_guidance=self._persona_guidance(effective_config),
+            )
             prompt_data = {
                 "group_messages": group_messages,
                 "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
@@ -1850,10 +1961,10 @@ class LLMService:
                     cycle_id=current_message.get("_cycle_id"),
                 ),
                 "emoji_list": emoji_list,
-                "identity": self.config.get("identity") or {},
-                "llm_config": self.config or {},
-                "prefixes": self.config.get("prefixes") or [],
-                "prompt": self.config.get("prompt") or {},
+                "identity": effective_config.get("identity") or {},
+                "llm_config": effective_config or {},
+                "prefixes": effective_config.get("prefixes") or [],
+                "prompt": effective_config.get("prompt") or {},
                 "sender_wxid": wxid,
                 "current_message": current_message,
                 "current_state": "直接回复模式",
@@ -1888,7 +1999,7 @@ class LLMService:
             parsed.pop("style_switch", None)
             if force_reply and not parsed.get("messages") and not parsed.get("animation"):
                 fallback_message = str(
-                    (self.config.get("prompt") or {}).get("fallback_message")
+                    (effective_config.get("prompt") or {}).get("fallback_message")
                     or "我在"
                 ).strip() or "我在"
                 parsed["messages"] = [fallback_message]
@@ -1984,9 +2095,10 @@ class LLMService:
             with self._idle_content_prefetch_lock:
                 self._idle_content_prefetch_running = False
 
-    def _schedule_idle_content_prefetch(self):
+    def _schedule_idle_content_prefetch(self, group_id=None):
         """Refresh after a cycle without adding a learner timer or LLM call."""
-        if not self.style_learner or not bool((self.config.get("auto_reply") or {}).get("adaptive_idle_content_enabled", True)):
+        effective_auto_reply = self._effective_group_config(group_id).get("auto_reply") or {}
+        if not self.style_learner or not bool(effective_auto_reply.get("adaptive_idle_content_enabled", True)):
             return False
         max_age, interval, min_items = self._idle_content_cache_settings()
         try:
@@ -2057,6 +2169,12 @@ class LLMService:
                 tools.append(TIABA_HOT_TOOL)
         if self.config.get("original_message_enabled", True) and current_session_id:
             tools.append(ORIGINAL_MESSAGE_TOOL)
+        if (
+            self.config.get("image_tool_enabled", True)
+            and current_session_id
+            and bool(getattr(self.provider, "supports_images", False))
+        ):
+            tools.append(IMAGE_MESSAGE_TOOL)
         if memory_group_id and self.style_learner:
             tools.append(SLANG_LOOKUP_TOOL)
             tools.append(SLANG_SIMILAR_LOOKUP_TOOL)
@@ -2087,6 +2205,8 @@ class LLMService:
         conversation = list(messages)
         tool_calls_used = 0
         original_calls_used = 0
+        image_calls_used = 0
+        image_references = []
         try:
             loop_timeout = float(self.config.get("tool_loop_timeout_seconds", 45) or 45)
         except (TypeError, ValueError):
@@ -2097,6 +2217,11 @@ class LLMService:
         except (TypeError, ValueError):
             original_max_calls = 2
         original_max_calls = max(1, min(original_max_calls, 4))
+        try:
+            image_max_calls = int(self.config.get("image_tool_max_calls", 1) or 1)
+        except (TypeError, ValueError):
+            image_max_calls = 1
+        image_max_calls = max(1, min(image_max_calls, 3))
         while True:
             if time.monotonic() >= loop_deadline:
                 print("[LLM TOOL LOOP TIMEOUT] final response skipped after deadline", flush=True)
@@ -2122,6 +2247,16 @@ class LLMService:
 
                 function = getattr(tool_call, "function", None)
                 name = str(getattr(function, "name", "") or "")
+                if name == IMAGE_MESSAGE_TOOL["function"]["name"]:
+                    if image_calls_used >= image_max_calls:
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": getattr(tool_call, "id", ""),
+                            "content": '{"ok":false,"error":"image lookup limit reached"}',
+                        })
+                        tool_calls_used += 1
+                        continue
+                    image_calls_used += 1
                 if name == ORIGINAL_MESSAGE_TOOL["function"]["name"]:
                     if original_calls_used >= original_max_calls:
                         conversation.append({
@@ -2144,6 +2279,7 @@ class LLMService:
                     api_token=self.config.get("weflow_api_token"),
                     original_timeout=self.config.get("original_message_timeout_seconds", 8),
                     original_max_chars=self.config.get("original_message_max_chars", 16000),
+                    image_max_bytes=self.config.get("image_tool_max_bytes", 8 * 1024 * 1024),
                     slang_lookup=(
                         lambda query, max_items=20: {
                             "ok": True,
@@ -2197,12 +2333,37 @@ class LLMService:
                         self._cache_idle_content_posts(load_json_lenient(content), source="tieba")
                     except Exception:
                         pass
+
+                safe_content = content
+                if name == IMAGE_MESSAGE_TOOL["function"]["name"]:
+                    try:
+                        image_payload = json.loads(content)
+                    except (TypeError, ValueError):
+                        image_payload = None
+                    if isinstance(image_payload, dict):
+                        image_data_url = str(image_payload.pop("_image_data_url", "") or "")
+                        if image_data_url.startswith("data:image/"):
+                            image_references.append(image_data_url)
+                        safe_content = json.dumps(image_payload, ensure_ascii=False)
+
                 conversation.append({
                     "role": "tool",
                     "tool_call_id": getattr(tool_call, "id", ""),
-                    "content": content,
+                    "content": safe_content,
                 })
                 tool_calls_used += 1
+
+            if image_references:
+                image_blocks = [{
+                    "type": "text",
+                    "text": "Image tool returned image content. Refer to it directly when answering.",
+                }]
+                image_blocks.extend(
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                    for image_url in image_references[:3]
+                )
+                conversation.append({"role": "user", "content": image_blocks})
+                image_references = []
 
             if tool_calls_used >= max_calls:
                 # Do not leave the model in an unbounded tool-call loop. The
@@ -2277,7 +2438,7 @@ class LLMService:
                 return _finish(result_to_return)
 
             attention_budget = int(
-                (self.config.get("auto_reply") or {}).get(
+                (self._effective_group_config(group_id).get("auto_reply") or {}).get(
                     "attention_context_token_budget", 1000
                 ) or 1000
             )
@@ -2305,7 +2466,7 @@ class LLMService:
             # one normal proactive LLM call. It does not author a reply: once
             # planned, the model receives the complete context and may still
             # stay silent or select an earlier topic.
-            auto_settings = self.config.get("auto_reply") or {}
+            auto_settings = self._effective_group_config(group_id).get("auto_reply") or {}
             trigger_mode = str(auto_settings.get("reply_trigger_mode", "conversation_pulse") or "conversation_pulse").lower()
             if (
                 not attention_check
@@ -2316,13 +2477,13 @@ class LLMService:
                 and trigger_mode in {"reply_necessity", "conversation_pulse"}
             ):
                 history = self.memory_manager.get_group_messages(group_id)
-                timing_learning = self.proactive_reply.get_reply_timing_learning(group_id)
-                pulse_decision, conversation_pulse = self.conversation_pulse.decide(
+                timing_learning = self._get_proactive_manager(group_id).get_reply_timing_learning(group_id)
+                pulse_decision, conversation_pulse = self._conversation_pulse_for(group_id).decide(
                     group_id,
                     batch_messages,
                     history,
                     timing_learning,
-                    self.proactive_reply.seconds_since_llm_reply(group_id),
+                    self._get_proactive_manager(group_id).seconds_since_llm_reply(group_id),
                 )
                 if pulse_decision != "plan":
                     result_to_return = {
@@ -2381,8 +2542,8 @@ class LLMService:
             memory_state = self._get_group_memory_state(group_id)
             style_context = self.style_learner.get_prompt_context(group_id) if self.style_learner else ""
             active_style_switch = self._get_active_style_switch(group_id)
-            no_llm_reply_seconds = self.proactive_reply.seconds_since_llm_reply(group_id)
-            attention_boost = self.proactive_reply.attention_boost_active(group_id)
+            no_llm_reply_seconds = self._get_proactive_manager(group_id).seconds_since_llm_reply(group_id)
+            attention_boost = self._get_proactive_manager(group_id).attention_boost_active(group_id)
             self._maybe_compress_context(group_id, session_id)
             latest_attention_messages = self._attention_batch(
                 group_id,
@@ -2427,8 +2588,14 @@ class LLMService:
                 if idle_content_opportunity else []
             )
             idle_content_shadow_mode = bool((self.config.get("learning") or {}).get("idle_content_shadow_mode", True))
-            prompt_config = self.config.get("prompt") or {}
-            system_prompt = build_system_prompt(prompt_config, identity=self.config.get("identity") or {}, prefixes=self.config.get("prefixes") or [])
+            effective_config = self._effective_group_config(group_id)
+            prompt_config = effective_config.get("prompt") or {}
+            system_prompt = build_system_prompt(
+                prompt_config,
+                identity=effective_config.get("identity") or {},
+                prefixes=effective_config.get("prefixes") or [],
+                persona_guidance=self._persona_guidance(effective_config),
+            )
             prompt_data = {
                 "batch_messages": batch_messages,
                 "group_messages": prompt_group_messages,
@@ -2467,9 +2634,9 @@ class LLMService:
                 **cycle_context,
                 **memory_state,
                 "emoji_list": self.emoji_list,
-                "identity": self.config.get("identity") or {},
-                "llm_config": self.config or {},
-                "prefixes": self.config.get("prefixes") or [],
+                "identity": effective_config.get("identity") or {},
+                "llm_config": effective_config or {},
+                "prefixes": effective_config.get("prefixes") or [],
                 "style_profile": style_context,
                 "expression_list": expression_list,
                 "active_style_switch": active_style_switch,
@@ -2713,7 +2880,7 @@ class LLMService:
                     content
                 )
             if sent_reply:
-                self.proactive_reply.record_llm_reply(group_id)
+                self._get_proactive_manager(group_id).record_llm_reply(group_id)
             self._maybe_compress_context(group_id)
         except Exception:
             return

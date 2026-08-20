@@ -3,6 +3,13 @@
   "target_group": [
     "Your Target Group Name"
   ],
+  "group_features": {
+    "Your Target Group Name": {
+      "plugins_enabled": true,
+      "auto_plugins_enabled": true,
+      "llm_enabled": true
+    }
+  },
   "prefix": [
     "@bot"
   ],
@@ -34,6 +41,9 @@
   "llm": {
     "enabled": true,
     "history_expire_ms": 600000,
+    "image_tool_enabled": true,
+    "image_tool_max_calls": 1,
+    "image_tool_max_bytes": 8388608,
     "apis": [
       {
         "name": "primary",
@@ -42,6 +52,7 @@
         "api_key": "your-api-key",
         "base_url": "https://api.example.com/v1",
         "timeout_seconds": 60,
+        "supports_images": false,
         "cache": true,
         "cache_scope": "full",
         "responses_explicit_cache_breakpoint": false,
@@ -75,6 +86,44 @@
       "conversation_lease_seconds": 90,
       "conversation_lease_direct_seconds": 180,
       "adaptive_idle_content_enabled": false
+    },
+    "group_profiles": {
+      "Your Target Group Name": {
+        "identity": {
+          "name": "Group Bot",
+          "role": "A regular member of the group who joins conversation naturally",
+          "style": "Natural, concise, and context-aware",
+          "rules": [
+            "Follow the surrounding context and group tone.",
+            "Prefer a short social reply in casual banter; answer clearly when a real question is asked."
+          ]
+        },
+        "reply_style": "Natural and concise; adapt to the group rather than using a fixed persona.",
+        "behavior_style": "Judge the whole context before replying. Do not rely only on a name or keyword.",
+        "group_prompt": "Participate naturally in this group chat without changing the router message format.",
+        "private_prompt": "Reply naturally and briefly in private chat.",
+        "auto_reply": {
+          "enabled": false,
+          "reply_trigger_mode": "conversation_pulse",
+          "idle_min_seconds": 600,
+          "idle_max_seconds": 1800,
+          "conversation_lease_seconds": 90,
+          "conversation_lease_direct_seconds": 180
+        },
+        "proactive": {
+          "enabled": false,
+          "group_enabled": true,
+          "private_enabled": false,
+          "aggressiveness": 0.25
+        },
+        "prefixes": [
+          "@bot"
+        ]
+      }
     }
+  },
+  "voice_sender": {
+    "playback_device_name": "CABLE Input",
+    "capture_device_name": "CABLE Output"
   }
 }
