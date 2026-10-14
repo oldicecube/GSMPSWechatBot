@@ -634,6 +634,7 @@ flowchart TB
 - `mixed` 允许普通消息成为候选，但候选仍可能被状态机、限频或必要性判断拒绝。
 - 全局/群 `auto_reply.enabled` 与普通命令插件、自动化插件的开关相互独立。
 - `LLM PROACTIVE ROUTE` 日志表示进入候选处理，不等同于已经创建模型请求。
+- `llm/density_gate.py` 对普通请求按低/中/高密度调度，积累后在固定活动窗口中集中处理新批次。显式请求保留原路径，输出静默也消耗窗口请求预算；不通过空请求保持缓存。门控 metadata 从 ProactiveReplyManager 经 Dispatcher 传到 LLMService，避免二次 pulse 判断又丢弃已准入批次。
 - 周期性 autonomy 的相关入口当前禁用；计划提醒和自动化插件不因此一起关闭。
 
 模型返回“不回复”是合法结果，不应被当作服务失败强制重试。

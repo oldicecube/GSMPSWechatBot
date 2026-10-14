@@ -29,6 +29,8 @@ def _is_supported_url_only(content):
     )
 
 
+from llm.density_gate import DensityGate, enabled as density_gate_enabled
+
 class ProactiveReplyManager:
     def __init__(self, config):
         self.config = config if isinstance(config, dict) else {}
@@ -40,6 +42,7 @@ class ProactiveReplyManager:
         if self.prefix_mode == "strict":
             self.enabled = False
         self.states = {}
+        self.density_gate = DensityGate(self.settings)
         # Event-level guard for duplicate SSE/queue deliveries. Keys are
         # message IDs only; identical text without an ID remains valid.
         self.seen_message_ids = {}
@@ -1033,6 +1036,13 @@ class ProactiveReplyManager:
 
     def _advance_state_locked(self, state, now, group_id="unknown"):
         pending_dispatch = None
+        if density_gate_enabled(self.settings):
+            phase = state.get("phase")
+            burst = self.density_gate.groups.get(str(group_id), {})
+            if phase == "working" and now >= float(burst.get("window_end") or state.get("phase_end") or now):
+                state["phase"] = "idle"
+                state["phase_end"] = None
+            return None
         if state["phase"] == "idle":
             density_rate = float(state.get("density_rate") or 0.0)
             density_upper = float(
@@ -1419,6 +1429,31 @@ class ProactiveReplyManager:
         batch = list(state.get("pending_batch") or [])
         if not batch or state.get("batch_flushing"):
             return None
+        if density_gate_enabled(self.settings) and not state.get("pending_force_reply") and state.get("pending_conversation_priority") not in {"MUST_REPLY", "SHOULD_REPLY"}:
+            now = self.clock()
+            ttl = self.density_gate.number("density_low_accumulate_seconds")
+            def fresh(item):
+                try:
+                    timestamp = float(item.get("timestamp") or now)
+                    return math.isfinite(timestamp) and -60 <= now-timestamp <= ttl
+                except (TypeError, ValueError):return False
+            batch = [item for item in batch if fresh(item)]
+            state["pending_batch"] = batch
+            decision = self.density_gate.admit(group_id, now, float(state.get("density_rate") or 0), batch)
+            state["density_stage"] = decision["stage"]
+            if not decision["admit"]:
+                state["batch_flush_at"] = decision["next_at"] if batch else None
+                if state.get("phase") != "working":
+                    state["phase"] = "attention" if decision["stage"] != "low" else "idle"
+                return None
+            state["phase"] = "working"
+            state["phase_end"] = decision["window_end"]
+            if not state.get("cycle_id"):
+                state["cycle_id"] = f"cycle-{int(now)}-{self.randint(1000, 9999)}"
+            context = state.get("pending_context") or {}
+            context["_density_admitted"] = True
+            context["_density_stage"] = decision["stage"]
+            state["pending_context"] = context
 
         if not self._autonomy_setting_bool("allow_followup_after_autonomy", False):
             kept = [item for item in batch if not self._autonomy_has_consumed(group_id, item)]
@@ -1464,6 +1499,7 @@ class ProactiveReplyManager:
             "attention_check": bool(attention_check),
             "group_id": self._group_key(context),
             "cycle_id": context.get("_cycle_id"),
+            "density_admitted": bool(context.get("_density_admitted")),
         }
 
     def handle_message(self, context):
@@ -1494,7 +1530,8 @@ class ProactiveReplyManager:
             priority = self._conversation_priority_locked(group_id, context, now, mention=mention)
             context["_conversation_priority"] = priority
             message["conversation_priority"] = priority
-            self.density_events.setdefault(group_id, []).append(now)
+            if priority != "DO_NOT_REPLY":
+                self.density_events.setdefault(group_id, []).append(now)
             self._update_density_locked(group_id, state, now)
             expired_dispatch = self._advance_state_locked(state, now, group_id)
             self._remember_locked(state, context, message)
@@ -1511,22 +1548,26 @@ class ProactiveReplyManager:
                      expired_dispatch[2], expired_dispatch[3]),
                 )
 
-            # In model-led mode, every eligible ordinary message is admitted to
-            # the short batch buffer, including messages received while idle or
-            # in attention. The LLM then sees the complete context and decides
-            # whether to speak. Only the explicit other-member boundary below
-            # prevents admission; this is deliberately not a local frequency
-            # or reply-count policy.
+            # Ordinary input is buffered in all three phases. Local density
+            # controls provider admission; the model still decides reply content
+            # or silence. Only explicit addressing/short reply leases bypass it.
             direct_priority = priority in {"MUST_REPLY", "SHOULD_REPLY"}
             model_led = self._setting_bool("proactive_decision_by_llm", True)
-            admit_to_model = bool(model_led or direct_priority or message.get("is_url_only"))
+            gated = density_gate_enabled(self.settings)
+            admit_to_model = bool((model_led and not gated) or direct_priority)
             if state["phase"] != "working" and admit_to_model:
                 old_phase = state.get("phase")
                 recent = list(state.get("recent_messages") or [])
                 cycle_messages = list(state.get("cycle_messages") or [])
                 cycle_id = state.get("cycle_id")
-                state.clear()
-                state.update(self._new_work_state(now))
+                if not gated:
+                    state.clear()
+                    state.update(self._new_work_state(now))
+                else:
+                    state["phase"] = "working"
+                    state.setdefault("cycle_id", None)
+                    if not state["cycle_id"]:
+                        state["cycle_id"] = f"cycle-{int(now)}-{self.randint(1000, 9999)}"
                 state["phase_end"] = now + self._work_extend_seconds()
                 state["recent_messages"] = recent
                 state["cycle_messages"] = cycle_messages
@@ -1543,10 +1584,10 @@ class ProactiveReplyManager:
                 print(f"[LLM PROACTIVE] group={group_id} prefix trigger -> direct model request; batch_count=0", flush=True)
                 return None
 
-            if state["phase"] != "working":
+            if state["phase"] != "working" and not gated:
                 return None
 
-            force_reply = bool(priority == "MUST_REPLY" or message.get("is_url_only"))
+            force_reply = bool(priority == "MUST_REPLY" or (message.get("is_url_only") and not gated))
             trigger_source = (
                 "mention" if mention
                 else "reply_to_bot" if self._is_reply_to_bot(context)
@@ -1670,7 +1711,8 @@ class ProactiveReplyManager:
                 return
 
             if (
-                state["phase"] == "working"
+                not density_gate_enabled(self.settings)
+                and state["phase"] == "working"
                 and isinstance(result, dict)
                 and result.get("_llm_ok")
                 and result.get("should_reply")
@@ -1902,7 +1944,7 @@ class ProactiveReplyManager:
                         ))
 
                     if (
-                        state["phase"] == "working"
+                        (state["phase"] == "working" or density_gate_enabled(self.settings))
                         and state.get("pending_batch")
                         and not state.get("batch_flushing")
                         and state.get("batch_flush_at") is not None
@@ -1920,7 +1962,8 @@ class ProactiveReplyManager:
                             ))
 
                     if (
-                        state["phase"] == "idle"
+                        not density_gate_enabled(self.settings)
+                        and state["phase"] == "idle"
                         and state.get("cycle_snapshot")
                         and not state.get("cycle_curation_pending")
                         and not state.get("cycle_curation_inflight")
@@ -1930,7 +1973,8 @@ class ProactiveReplyManager:
                         state["cycle_curation_pending"] = True
 
                     if (
-                        state["phase"] == "idle"
+                        not density_gate_enabled(self.settings)
+                        and state["phase"] == "idle"
                         and state.get("cycle_curation_pending")
                         and not state.get("cycle_curation_inflight")
                         and (
@@ -1974,7 +2018,7 @@ class ProactiveReplyManager:
                 state = self.states.get(group_id)
                 if state and not attention_check:
                     state["batch_flushing"] = False
-                    if state.get("pending_batch") and state.get("phase") == "working":
+                    if state.get("pending_batch") and (state.get("phase") == "working" or density_gate_enabled(self.settings)):
                         if state.get("pending_force_reply") or len(state["pending_batch"]) >= self._batch_max_messages():
                             state["batch_flush_at"] = self.clock()
                         elif not state.get("batch_flush_at"):

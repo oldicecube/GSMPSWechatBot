@@ -102,7 +102,20 @@
       "idle_max_seconds": 1800,
       "conversation_lease_seconds": 90,
       "conversation_lease_direct_seconds": 180,
-      "adaptive_idle_content_enabled": false
+      "adaptive_idle_content_enabled": false,
+      "density_gate_enabled": true,
+      "density_low_messages_per_minute": 3,
+      "density_high_messages_per_minute": 8,
+      "density_low_accumulate_messages": 4,
+      "density_low_accumulate_seconds": 600,
+      "density_low_cooldown_seconds": 600,
+      "density_medium_batch_messages": 3,
+      "density_high_batch_messages": 2,
+      "density_burst_seconds": 120,
+      "density_burst_idle_seconds": 60,
+      "density_request_interval_seconds": 20,
+      "density_burst_max_requests": 4,
+      "density_burst_cooldown_seconds": 180
     },
     "group_profiles": {
       "Your Target Group Name": {

@@ -339,6 +339,8 @@ class Dispatcher:
                     flush=True,
                 )
                 proactive_result = self.llm_service.handle_proactive_message(context)
+                if isinstance(proactive_result, dict) and proactive_result.get("density_admitted"):
+                    context["_density_admitted"] = True
                 if isinstance(proactive_result, dict) and proactive_result.get("forward_batch_to_llm"):
                     return self._dispatch_llm(
                         context,
@@ -1032,6 +1034,7 @@ class Dispatcher:
                     idle_content_probability=context.get("_idle_content_probability", 0.0),
                     idle_content_reason=context.get("_idle_content_reason") or "",
                     conversation_priority=conversation_priority or context.get("_conversation_priority") or "MAY_REPLY",
+                    density_admitted=bool(context.get("_density_admitted")),
                 )
             else:
                 result = self.llm_service.handle_message(

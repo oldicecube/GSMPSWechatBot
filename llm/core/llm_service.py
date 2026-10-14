@@ -4690,6 +4690,7 @@ class LLMService:
         idle_content_reason="",
         conversation_priority="MAY_REPLY",
         scheduled_event=None,
+        density_admitted=False,
     ):
         """Judge a message batch or deliver an activated scheduled reminder."""
         scheduled_event = dict(scheduled_event) if isinstance(scheduled_event, dict) else None
@@ -4790,6 +4791,7 @@ class LLMService:
             trigger_mode = str(auto_settings.get("reply_trigger_mode", "conversation_pulse") or "conversation_pulse").lower()
             if (
                 not attention_check
+                and not density_admitted
                 and not effective_force_reply
                 and not frequency_exempt
                 and not proactive_web_opportunity

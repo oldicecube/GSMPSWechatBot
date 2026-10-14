@@ -36,13 +36,13 @@ _TZ = ZoneInfo("Asia/Shanghai")
 _NY_TZ = ZoneInfo("America/New_York")
 _GOLD_OPEN = None
 
-# One 120-minute simulated session is calibrated to one reference FX day.
-# ECB 2025 daily log-return sigma: EUR/GBP .297%, EUR/USD .494%, EUR/JPY .506%.
-# Per-minute sigma = session sigma / sqrt(120), NOT percentage return per tick.
+# Reference FX calibration retained, but requested simulation risk is 50x.
+# Scaling standard deviation by 50 scales variance by 2500; real quotes do not scale.
+_SIM_VOLATILITY_MULTIPLIER = 50.0
 _ASSETS = {
-    "iron": {"name": "\u94c1\u952d", "base": 12.0, "vol": 0.0029742839686254427 / math.sqrt(120), "kind": "sim"},
-    "emerald": {"name": "\u7eff\u5b9d\u77f3", "base": 32.0, "vol": 0.004938082635636979 / math.sqrt(120), "kind": "sim"},
-    "diamond": {"name": "\u94bb\u77f3", "base": 64.0, "vol": 0.005059129907990951 / math.sqrt(120), "kind": "sim"},
+    "iron": {"name": "\u94c1\u952d", "base": 12.0, "vol": 0.0029742839686254427 / math.sqrt(120) * _SIM_VOLATILITY_MULTIPLIER, "kind": "sim"},
+    "emerald": {"name": "\u7eff\u5b9d\u77f3", "base": 32.0, "vol": 0.004938082635636979 / math.sqrt(120) * _SIM_VOLATILITY_MULTIPLIER, "kind": "sim"},
+    "diamond": {"name": "\u94bb\u77f3", "base": 64.0, "vol": 0.005059129907990951 / math.sqrt(120) * _SIM_VOLATILITY_MULTIPLIER, "kind": "sim"},
     # Both real-market lines use persistent first-observation anchors and
     # continuously mirror the external percentage move in points.
     "gold": {"name": "\u91d1\u952d", "base": 100.0, "vol": 0.0, "kind": "xau_usd", "no_leverage": True, "no_liquidation": True},
@@ -57,8 +57,8 @@ _EVENT_DAILY_LIMIT = 6
 _MAJOR_EVENT_COOLDOWN_DAYS = 14
 _FEED_POLL_SECONDS = 60
 _FEED_MAX_AGE_SECONDS = 300
-_SIM_MINUTE_RETURN_CAP = 0.002
-_SIM_EVENT_DRIFT_CAP = 0.00012
+_SIM_MINUTE_RETURN_CAP = 0.002 * _SIM_VOLATILITY_MULTIPLIER
+_SIM_EVENT_DRIFT_CAP = 0.00012 * _SIM_VOLATILITY_MULTIPLIER
 _GOLD_FEED_URL = "https://api.gold-api.com/price/XAU"
 _COPPER_FEED_URL = "https://api.fxratesapi.com/latest?base=USD&currencies=JPY&resolution=1m&places=6&format=json"
 _ASSET_ALIASES = {
@@ -177,6 +177,11 @@ def _ensure_schema():
             CREATE INDEX IF NOT EXISTS ix_fx_events_active
                 ON fx_events(consumed, remaining_buckets, id);
             """)
+            for column in ("duration_buckets INTEGER NOT NULL DEFAULT 0", "elapsed_buckets INTEGER NOT NULL DEFAULT 0"):
+                if column.split()[0] not in {row[1] for row in conn.execute("PRAGMA table_info(fx_events)")}:
+                    conn.execute(f"ALTER TABLE fx_events ADD COLUMN {column}")
+            conn.execute("UPDATE fx_events SET duration_buckets=remaining_buckets WHERE duration_buckets=0 AND remaining_buckets>0")
+            conn.commit()
         finally:
             conn.close()
 
@@ -261,16 +266,52 @@ def _event_effect(theme, asset, severity="minor", reference_price=None, current_
             drift -= 0.00035 * strength
     # Event effects are calibrated too: reducing Gaussian noise alone leaves
     # deterministic news drift large enough to produce extreme moves.
-    drift *= 0.03
+    drift *= 0.03 * _SIM_VOLATILITY_MULTIPLIER
     vol_mult = 1.25 if theme == "uncertain_vol" else 1.15 if theme in {"fear_sell", "black_swan"} else 1.0
     if severity == "black_swan":
         vol_mult = 1.5
     return drift, vol_mult
 
 
+
+def _event_impact(event, asset, bucket, price):
+    """Deterministic per-event response, diversity without model-generated prices."""
+    if asset not in _SIM_ASSETS:
+        return 0.0, 1.0
+    elapsed = int(event.get("elapsed_buckets") or 0)
+    duration = max(1, int(event.get("duration_buckets") or event.get("remaining_buckets") or 1))
+    phase = min(1.0, elapsed / duration)
+    theme = str(event.get("theme") or "no_effect")
+    severity = str(event.get("severity") or "minor")
+    refs = json.loads(event.get("reference_prices") or "{}")
+    reference = float(refs.get(asset) or price)
+    # Asset-specific coefficients distinguish sector rotation from uniform shocks.
+    coefficient = {"iron": 0.8, "emerald": 1.0, "diamond": 1.2}[asset]
+    strength = 1 if severity == "minor" else 1.5 if severity == "major" else 2
+    unit = 0.00002 * _SIM_VOLATILITY_MULTIPLIER * coefficient * strength
+    if theme == "mean_revert":
+        displacement = math.log(reference / price) if price > 0 and reference > 0 else 0
+        return max(-unit*2, min(unit*2, displacement*0.03)), 0.75
+    if theme == "trend_follow":
+        sign = 1 if price >= reference else -1
+        return sign*unit*(0.3+0.7*phase), 1.1
+    if theme == "liquidity_crunch":
+        return -unit*(1-phase), 1.8 if phase < 0.4 else 1.2
+    if theme == "relief_rally":
+        # Delayed reversal: the event changes sign instead of only adding noise.
+        return (-0.5 if phase < 0.3 else 0.8)*unit, 1.05
+    if theme == "oscillation":
+        return math.sin((elapsed+1)*math.tau/12)*unit, 1.2
+    if theme == "quiet_liquidity":
+        return 0.0, 0.55
+    drift, volatility = _event_effect(theme, asset, severity, reference, price)
+    # Older themes decay over the event's active minutes; black swans front-load.
+    decay = math.exp(-4*phase) if theme == "black_swan" else (0.25+0.75*(1-phase))
+    return drift*decay, volatility
+
 def _active_events(conn, bucket):
     rows = conn.execute(
-        "SELECT id,theme,severity,remaining_buckets,reference_prices FROM fx_events "
+        "SELECT id,theme,severity,remaining_buckets,reference_prices,duration_buckets,elapsed_buckets,created_at FROM fx_events "
         "WHERE consumed=1 AND remaining_buckets>0 ORDER BY id"
     ).fetchall()
     return [dict(row) for row in rows]
@@ -289,73 +330,56 @@ def _advance_market(conn, now=None, *, finalize_session=False):
         session_end = local.replace(hour=21, minute=0, second=0, microsecond=0).timestamp()
         first_bucket = _now_bucket(session_start)
         target_bucket = min(_now_bucket(now), _now_bucket(session_end) - 1)
-        generated_buckets = 0
+        states = {}
         for asset in _SIM_ASSETS:
-            spec = _ASSETS[asset]
-            state = conn.execute(
-                "SELECT last_bucket,price FROM fx_market_state WHERE asset=?", (asset,)
-            ).fetchone()
-            if state is None:
+            row = conn.execute("SELECT last_bucket,price FROM fx_market_state WHERE asset=?", (asset,)).fetchone()
+            if row is None:
                 if can_finalize:
                     continue
-                price = float(spec["base"])
-                last_bucket = first_bucket - 1
-                conn.execute(
-                    "INSERT INTO fx_market_state(asset,last_bucket,price,updated_at) VALUES(?,?,?,?)",
-                    (asset, last_bucket, price, now),
-                )
+                states[asset] = [first_bucket-1, float(_ASSETS[asset]["base"])]
+                conn.execute("INSERT INTO fx_market_state(asset,last_bucket,price,updated_at) VALUES(?,?,?,?)", (asset,first_bucket-1,states[asset][1],now))
             else:
-                last_bucket, price = int(state[0]), float(state[1])
-            if last_bucket < first_bucket - 1:
-                last_bucket = first_bucket - 1
-            for bucket in range(last_bucket + 1, target_bucket + 1):
-                generated_buckets = max(generated_buckets, bucket - last_bucket)
-                seed = int.from_bytes(hashlib.sha256(f"fx-v2:{asset}:{bucket}".encode("ascii")).digest()[:8], "big")
+                states[asset] = [max(first_bucket-1,int(row[0])),float(row[1])]
+        start_bucket = min((state[0]+1 for state in states.values()), default=target_bucket+1)
+        # Iterate by MINUTE, not by ASSET: all curves observe the same event age,
+        # effects expire once per active minute and long events pause overnight.
+        for bucket in range(start_bucket,target_bucket+1):
+            events = _active_events(conn,bucket)
+            changed = False
+            for asset,state in states.items():
+                if state[0] >= bucket:
+                    continue
+                changed = True
+                spec = _ASSETS[asset]
+                opening = state[1]
+                seed = int.from_bytes(hashlib.sha256(f"fx-v2:{asset}:{bucket}".encode("ascii")).digest()[:8],"big")
                 rng = random.Random(seed)
-                opening = price
-                event_drift = 0.0
-                vol_mult = 1.0
-                for event in _active_events(conn, bucket):
-                    if bucket - last_bucket > int(event["remaining_buckets"]):
+                drift,vol_mult = 0.0,1.0
+                for event in events:
+                    # A freshly created event must never change earlier missing candles.
+                    if bucket < _now_bucket(float(event.get("created_at") or now)):
                         continue
-                    refs = json.loads(event.get("reference_prices") or "{}")
-                    drift, multiplier = _event_effect(
-                        str(event.get("theme") or "no_effect"), asset,
-                        str(event.get("severity") or "minor"), refs.get(asset), price,
-                    )
-                    event_drift += drift
+                    impact,multiplier = _event_impact(event,asset,bucket,opening)
+                    drift += impact
                     vol_mult *= multiplier
-                event_drift = max(-_SIM_EVENT_DRIFT_CAP, min(_SIM_EVENT_DRIFT_CAP, event_drift))
-                vol_mult = max(0.8, min(1.5, vol_mult))
-                ret = rng.gauss(event_drift, float(spec["vol"]) * vol_mult)
-                ret = max(-_SIM_MINUTE_RETURN_CAP, min(_SIM_MINUTE_RETURN_CAP, ret))
-                close = max(0.01, opening * math.exp(ret))
-                wick_up = rng.uniform(0.00001, max(0.00001, float(spec["vol"]) * 0.5 * vol_mult))
-                wick_down = rng.uniform(0.00001, max(0.00001, float(spec["vol"]) * 0.5 * vol_mult))
-                high = max(opening, close) * (1.0 + wick_up)
-                low = max(0.01, min(opening, close) * (1.0 - wick_down))
-                conn.execute(
-                    "INSERT OR REPLACE INTO fx_market_candles(asset,bucket,open,high,low,close) VALUES(?,?,?,?,?,?)",
-                    (asset, bucket, opening, high, low, close),
-                )
-                price = close
-            conn.execute(
-                "UPDATE fx_market_state SET last_bucket=?,price=?,updated_at=? WHERE asset=?",
-                (target_bucket, price, now, asset),
-            )
+                drift = max(-_SIM_EVENT_DRIFT_CAP,min(_SIM_EVENT_DRIFT_CAP,drift))
+                vol_mult = max(0.4,min(2.5,vol_mult))
+                ret = max(-_SIM_MINUTE_RETURN_CAP,min(_SIM_MINUTE_RETURN_CAP,rng.gauss(drift,float(spec["vol"])*vol_mult)))
+                close = max(0.01,opening*math.exp(ret))
+                wick_up = rng.uniform(0.00001,max(0.00001,float(spec["vol"])*0.5*vol_mult))
+                wick_down = rng.uniform(0.00001,max(0.00001,float(spec["vol"])*0.5*vol_mult))
+                high = max(opening,close)*(1+wick_up)
+                low = max(0.01,min(opening,close)*(1-wick_down))
+                conn.execute("INSERT OR REPLACE INTO fx_market_candles(asset,bucket,open,high,low,close) VALUES(?,?,?,?,?,?)",(asset,bucket,opening,high,low,close))
+                state[:] = [bucket,close]
+            if changed:
+                for event in events:
+                    if bucket >= _now_bucket(float(event.get("created_at") or now)):
+                        conn.execute("UPDATE fx_events SET duration_buckets=CASE WHEN duration_buckets=0 THEN remaining_buckets ELSE duration_buckets END,remaining_buckets=MAX(0,remaining_buckets-1),elapsed_buckets=elapsed_buckets+1 WHERE id=?",(event['id'],))
+        for asset,(last_bucket,price) in states.items():
+            conn.execute("UPDATE fx_market_state SET last_bucket=?,price=?,updated_at=? WHERE asset=?",(last_bucket,price,now,asset))
             prices[asset] = price
-            conn.execute(
-                "DELETE FROM fx_market_candles WHERE asset=? AND bucket<?",
-                (asset, target_bucket - _CANDLE_RETENTION + 1),
-            )
-        # Event duration is measured in active simulated-market minutes, not
-        # once per asset.  Decrement only after the bucket is fully generated.
-        if generated_buckets:
-            conn.execute(
-                "UPDATE fx_events SET remaining_buckets=MAX(0, remaining_buckets-?) "
-                "WHERE consumed=1 AND remaining_buckets>0",
-                (generated_buckets,),
-            )
+            conn.execute("DELETE FROM fx_market_candles WHERE asset=? AND bucket<?",(asset,target_bucket-_CANDLE_RETENTION+1))
     # Real-market assets are only advanced by the external-feed synchronizer.
     for asset in ("gold", "copper"):
         row = conn.execute("SELECT point_price FROM fx_external_quotes WHERE asset=?", (asset,)).fetchone()
@@ -486,14 +510,20 @@ def _sync_external_feeds(now=None):
 
 def _event_templates():
     return [
+        ("minor", "mean_revert", "长期库存收购计划启动", "资源商人开始分批建立库存，短期失衡报价逐渐受到长期订单牵引。", 360),
+        ("minor", "trend_follow", "跨村庄工程陆续签约", "多个工程队按照相近进度分批采购，商人预计接下来数个交易时段都有需求。", 240),
+        ("minor", "quiet_liquidity", "交易规则逐步规范", "交易大厅引入统一验货和稳定交割，报价争议减少。", 90),
+        ("minor", "oscillation", "商队报价交替调整", "两条运输线路轮流到货，库存时紧时松。", 45),
+        ("major", "liquidity_crunch", "仓储交割暂时受限", "货物短期难以交割，抢购与撤单交错，影响可能跨越多个交易时段。", 240),
+        ("major", "relief_rally", "运输线路分阶段恢复", "早期清点仍然紧张，后续修复将逐步释放库存和运力。", 480),
         ("minor", "capital_inflow", "大型资本开始寻找新矿区", "数支大型采矿队带着库存进入市场，交易大厅突然挤满了新面孔。", 3),
         ("minor", "dip_buy", "低价收购传闻扩散", "有人在深夜挂出大额收购单，但没有人确认买家的真实身份。", 4),
         ("minor", "uncertain_vol", "村民交易所报价失去共识", "不同村庄给出了互相矛盾的报价，玩家开始频繁修改自己的出价。", 3),
         ("minor", "sector_rotation", "大型工程临时更换材料方案", "施工队放弃了原定的部分材料采购，转而寻找另一条供应路线。", 4),
         ("minor", "no_effect", "河边发现会捡鱼的狐狸", "目击者称它叼走了两条鱼，目前没有任何村民愿意发表评论。", 2),
         ("major", "fear_sell", "主世界矿道出现安全警报", "多支采矿队暂时撤离深层矿道，市场上开始出现集中抛售。", 5),
-        ("major", "long_bear", "远古城市的补给线中断", "探险队推迟了返程计划，资源商人开始重新评估长期库存。", 10),
-        ("major", "capital_inflow", "大型资本宣布建设跨区仓储", "一支大型资本集团开始在多个区域收集资源，交易量持续放大。", 8),
+        ("major", "long_bear", "远古城市的补给线中断", "探险队推迟了返程计划，资源商人开始重新评估长期库存。", 360),
+        ("major", "capital_inflow", "大型资本宣布建设跨区仓储", "一支大型资本集团开始在多个区域收集资源，交易量持续放大。", 240),
         ("major", "dip_buy", "匿名财团试探性抄底", "市场低迷时出现连续大额买单，卖方暂时无法确认资金来源。", 7),
         ("major", "uncertain_vol", "末地航线前景突然变得模糊", "新的航线报告互相矛盾，玩家情绪被放大，报价开始快速来回跳动。", 6),
         ("black_swan", "black_swan", "黑曜石门异常开启", "多个区域同时报告无法解释的跨区资源流动，原有供需判断暂时失去参考。", 4),
@@ -516,8 +546,8 @@ def _llm_prepare_event(now):
         return None
     prompt = (
         "为 Minecraft 群聊 FX 模拟市场准备一条事件。只输出 JSON："
-        '{"severity":"minor|major|black_swan","theme":"fear_sell|long_bear|capital_inflow|dip_buy|sector_rotation|uncertain_vol|no_effect",'
-        '"title":"不超过24字","body":"不超过100字","duration_minutes":5}。'
+        '{"severity":"minor|major|black_swan","theme":"fear_sell|long_bear|capital_inflow|dip_buy|sector_rotation|uncertain_vol|no_effect|mean_revert|trend_follow|liquidity_crunch|relief_rally|oscillation|quiet_liquidity",'
+        '"title":"不超过24字","body":"不超过100字","duration_minutes":5}。长期库存/运输/工程事件可以持续120至720个开盘分钟，普通事件2至30分钟。'
         "不要说明会影响哪种物品、方向、幅度或概率；black_swan 必须罕见。"
     )
     try:
@@ -538,12 +568,14 @@ def _llm_prepare_event(now):
                     severity = "minor"
         title = str(payload.get("title") or "市场出现新的传闻")[:36]
         body = str(payload.get("body") or "交易者开始重新评估今日资源流向。")[:160]
-        duration = max(2, min(15, int(payload.get("duration_minutes") or 5)))
+        duration = max(2, min(720, int(payload.get("duration_minutes") or 5)))
+        if severity == "black_swan":
+            duration = min(duration,30)
         with _transaction() as conn:
             if conn.execute("SELECT 1 FROM fx_events WHERE trade_date=? AND published_at IS NULL LIMIT 1", (_local_datetime(now).date().isoformat(),)).fetchone():
                 return None
             refs = {row[0]: row[1] for row in conn.execute("SELECT asset,price FROM fx_market_state").fetchall()}
-            conn.execute("INSERT INTO fx_events(trade_date,event_kind,title,body,theme,severity,remaining_buckets,reference_prices,prepared_by,created_at,consumed) VALUES(?,?,?,?,?,?,?,?,?,?,1)", (_local_datetime(now).date().isoformat(), payload["theme"], title, body, payload["theme"], severity, duration, json.dumps(refs, ensure_ascii=False), "llm", now))
+            conn.execute("INSERT INTO fx_events(trade_date,event_kind,title,body,theme,severity,remaining_buckets,reference_prices,prepared_by,created_at,consumed,duration_buckets) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)", (_local_datetime(now).date().isoformat(), payload["theme"], title, body, payload["theme"], severity, duration, json.dumps(refs, ensure_ascii=False), "llm", now, duration))
             return True
     except Exception as exc:
         _LOG.debug("LLM event preparation skipped: %s", exc)
@@ -563,7 +595,7 @@ def _prepare_event(conn, now, *, force=False):
     refs = {row[0]: row[1] for row in conn.execute("SELECT asset,price FROM fx_market_state").fetchall()}
     # prepared/consumed=1 means it is already allowed to influence the next
     # simulated candle; published_at controls when the narrative is revealed.
-    conn.execute("INSERT INTO fx_events(trade_date,event_kind,title,body,theme,severity,remaining_buckets,reference_prices,prepared_by,created_at,consumed) VALUES(?,?,?,?,?,?,?,?,?,?,1)", (date_key, theme, title, body, theme, severity, duration, json.dumps(refs, ensure_ascii=False), "template", now))
+    conn.execute("INSERT INTO fx_events(trade_date,event_kind,title,body,theme,severity,remaining_buckets,reference_prices,prepared_by,created_at,consumed,duration_buckets) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)", (date_key, theme, title, body, theme, severity, duration, json.dumps(refs, ensure_ascii=False), "template", now, duration))
     return True
 
 
@@ -1297,7 +1329,7 @@ def _help_text():
         "标的：铁锭、绿宝石、钻石；支持做多/做空，杠杆最高 20 倍。\n"
         "每笔保证金无上限；浮亏达到保证金 80% 时强平。\n"
         "MC 模拟盘每日 19:00—21:00 开盘，K 线每分钟更新；收盘后仍可平仓。\n"
-        "模拟盘按真实外汇日波动校准：两小时一场约 0.30%—0.51% 的标准差，事件冲击同样限幅。\n\n"
+        "模拟盘波动已扩大至外汇校准基准的50倍（每分钟标准差约1.36%—2.31%）；仅积分模拟，杠杆收益和亏损都会显著放大。\n\n"
         "/fx market [标的]：查看行情/K 线\n"
         "/fx market pic：发送铁锭、绿宝石、钻石、金锭、铜锭的 K 线图\n"
         "/fx balance：查看可用积分与持仓保证金\n"

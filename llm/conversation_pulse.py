@@ -217,6 +217,8 @@ class ConversationPulse:
             decision = "skip"
             if direct:
                 decision, mode = "plan", "direct"
+            elif cooldown_active:
+                decision, mode = "defer", "request_cooldown"
             elif model_decides:
                 # Keep the normal path model-led, but borrow MaiBot's cheap
                 # turn-trigger idea as a *low-signal backoff*.  A lone

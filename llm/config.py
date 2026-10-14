@@ -138,9 +138,11 @@ def _normalize_auto_reply(settings, fallback=None, prefix_mode="strict"):
         merged.update(settings)
     if "enabled" not in merged:
         merged["enabled"] = prefix_mode == "mixed"
-    # Ordinary proactive reply policy belongs to the model. These switches
-    # are explicit opt-ins for deployments that knowingly want a deterministic
-    # local backstop, rather than implicit behavior hidden in code.
+    # Local density schedules ordinary provider work; models still decide
+    # whether/what to reply after admission. Direct requests bypass scheduling.
+    from llm.density_gate import DEFAULTS as density_defaults
+    for name, default in density_defaults.items():
+        merged.setdefault(name, default)
     merged.setdefault("proactive_decision_by_llm", True)
     merged.setdefault("reply_frequency_gate_enabled", False)
     merged["reply_trigger_mode"] = str(
