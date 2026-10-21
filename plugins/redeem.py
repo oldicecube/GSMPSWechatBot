@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Wechatbot /redeem plugin backed by PrintServer coupon credits."""
 
 from __future__ import annotations

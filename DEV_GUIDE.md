@@ -755,3 +755,72 @@ with provider.prompt_capture_kind("auxiliary"):
 ---
 
 项目自有代码按 [AGPL-3.0-only](LICENSE) 授权。WeFlow、原生组件及其他第三方代码保留原许可；修改、打包或再分发前请阅读 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
+
+### Experimental AI-authored text plugins
+
+`manage_ai_plugin` is a separate development interface. Call `guide` to obtain the
+supported Python subset and a source template; use `list`, `get`, `validate`,
+`create`, `update` and `delete` to manage files under `plugins/ai_generated`.
+Only that directory is editable through this interface. The AI marker, commands,
+source digest and timestamps live in the local `data/ai_plugins.json` manifest.
+Generated code and this manifest are installation-local and excluded from Git.
+
+The runtime interprets an allowlisted AST subset instead of executing generated
+Python with `exec`. Plugins receive sanitized message data and return text. They
+have no imports, file/network/process/database handles, raw event, credentials,
+or direct sender. Bounded loops and helper functions are supported; unsupported
+syntax produces repairable validation errors. Limits include 4,000 evaluation
+steps, 256 collection items, eight call levels and 4,000 total returned characters.
+Aggregate nested data is bounded by 4,096 visited values and 32,768 text
+characters per validation traversal, including repeated references, keeping
+collection traversal and string conversion bounded.
+
+A mutation requires explicit user intent and `confirm=true`. Before changing a
+file the manager validates UTF-8 without BOM, Python syntax, command/alias conflicts,
+handler signature and sample executions including Unicode. Failed validation
+preserves the previous file; a failed reload rolls the change back. Commands are
+resolved dynamically and still obey group plugin restrictions. A matched plugin
+returning `None` is a silent result, not an unknown command.
+
+`llm.ai_plugin_max_calls` (default 12, maximum 16) and
+`llm.ai_plugin_tool_timeout_seconds` (default 240) give development and repair
+calls a separate budget from web tools. Read `ok`, `error_code` and validation
+errors before reporting success. Offline tool-loop tests are not substitutes for
+live-model acceptance when the provider is unavailable.
+
+### Cache diagnosis in long-running conversations
+
+`llm.reply_history_token_budget` defaults to an estimated 32,000 history tokens.
+Direct and proactive replies share an anchored history window with append slack;
+complete history remains on disk. Runtime batch numbers are not serialized into
+historical records, and scheduling-cycle changes do not move a surviving cache
+anchor. This budget excludes current instructions, tool schemas and reply tokens.
+
+The Chat and Responses adapters write `llm_cache_request` and `llm_cache_usage` events to the
+local runtime trace. These record request IDs, hashed route/tool/settings/prompt
+identifiers, identical-prefix character counts, first changed message position,
+and provider-reported cache tokens. Prompt text and credentials are not stored
+in those diagnostic events. Character-prefix ratios are local stability metrics,
+not measured token hit rates; omitted cache usage remains unknown rather than zero.
+
+GPT-5.6+ Responses caching supports explicit content-block boundaries and uses
+`prompt_cache_options` with `mode=implicit` and `ttl=30m`. Older Responses models
+use their supported `prompt_cache_retention` values. Chat Completions strips local
+checkpoint metadata; configuring a cache key does not transmit a Responses
+breakpoint or prove a compatible gateway supports it. Verify protocol support and
+compare exact business requests before switching an installation to Responses.
+
+The shared `thinking_params.reasoning_effort` option is translated to
+`reasoning.effort` by the Responses adapter. It must not be forwarded as a
+top-level SDK argument. Each `llm.apis` entry may set its own `thinking_params`
+object to override the global setting; omitted/null inherits the global setting,
+and `{}` sends no reasoning parameters. Set `supports_images: true` only after
+verifying that the endpoint accepts image inputs. Both protocol adapters emit request/usage cache traces;
+Responses diagnostics reflect the actual instructions/input and retry shape.
+
+For compatible gateways, validate append-only business requests with explicit
+history boundaries before selecting `protocol: "responses"`. A successful HTTP
+response alone does not establish cache support. Include an initial cold call,
+several historical appends, and an identical repeat; inspect provider usage and
+also test tool calling. Keep credentials and real transcripts out of reports.

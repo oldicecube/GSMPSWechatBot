@@ -3,6 +3,7 @@ import difflib
 import hashlib
 import json
 import queue
+import random
 import re
 import threading
 import time
@@ -57,6 +58,7 @@ from llm.web_tools import (
     GROUP_MEMBER_LOOKUP_TOOL,
     TIABA_HOT_TOOL,
     WEB_FETCH_TOOL,
+    AI_PLUGIN_TOOL,
     execute_tool,
     fetch_tieba_hot_post,
 )
@@ -86,6 +88,12 @@ class LLMService:
         )
         self._aux_thread.start()
         self.scheduled_event_manager = ScheduledEventManager()
+        try:
+            from llm.ai_plugin_manager import AIPluginManager
+            self.ai_plugin_manager = AIPluginManager(self.config)
+        except Exception as exc:
+            print(f"[AI PLUGIN INIT ERROR] {exc}", flush=True)
+            self.ai_plugin_manager = None
 
         try:
             self.memory_manager = MemoryManager()
@@ -811,41 +819,14 @@ class LLMService:
                 cached = self._cycle_context_cache.get(cache_key)
                 if cached and cached.get("cycle_id") == cycle_id:
                     return dict(cached)
-        participant_rows = []
-        seen_subjects = set()
-        for item in participants or []:
-            if not isinstance(item, dict):
-                continue
-            subject_id = str(
-                item.get("subject_id") or item.get("sender_wxid") or item.get("wxid") or ""
-            ).strip()
-            nickname = str(item.get("nickname") or item.get("sender_nickname") or item.get("user") or "未知用户").strip()
-            if not subject_id:
-                subject_id = f"nickname:{nickname}"
-            if subject_id in seen_subjects:
-                continue
-            seen_subjects.add(subject_id)
-            participant_rows.append((subject_id, nickname))
-        if wxid and str(wxid).strip() not in seen_subjects:
-            participant_rows.insert(0, (str(wxid).strip(), "当前发言人"))
-        profile_parts = []
-        for subject_id, nickname in participant_rows[:12]:
-            profile = self._get_person_profile_context(
-                group_id,
-                subject_id,
-                query,
-            )
-            profile_parts.append(
-                f"[person subject_id={subject_id} nickname={nickname}]\n"
-                + (profile or "暂无已确认人物画像；不要根据昵称臆测身份。")
-            )
+        # Person facts are loaded only on demand through lookup_group_memory.
         context = {
             "cycle_id": cycle_id,
             # Select slang from the current context for each request. The full
             # qualified table must not become a cached prompt prefix.
             "slang_context": "[]",
             "slang_taxonomy_context": self._get_slang_taxonomy_context(group_id),
-            "person_profile_context": "\n".join(profile_parts),
+            "person_profile_context": "",
             "extra_memory_context": self._get_memory_context(group_id, wxid, query) if allow_memory else "",
         }
         if cycle_id != "direct":
@@ -870,7 +851,7 @@ class LLMService:
                 for item in (messages or [])[-12:]
                 if isinstance(item, dict) and not item.get("is_bot") and item.get("role") != "assistant"
             )
-            intent = "question" if "?" in topic or "?" in topic else "statement"
+            intent = "question" if "?" in topic or chr(0xFF1F) in topic else "statement"
             scene = store.get_slang_scene_candidates(
                 group_id, topic=topic, intent=intent, max_items=4, max_chars=700
             ) if topic.strip() else []
@@ -1143,7 +1124,16 @@ class LLMService:
     @staticmethod
     def _annotate_prompt_records(records, effective_config):
         from llm.identity import annotate_records
-        return annotate_records(records, effective_config)
+        visible = []
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            if record.get("prompt_visible") is False:
+                continue
+            if str(record.get("source_kind") or "").casefold() in {"system_event", "bot_echo_external", "llm_error", "plugin_outbound"}:
+                continue
+            visible.append(record)
+        return annotate_records(visible, effective_config)
 
     def _get_context_expressions(self, group_id, messages, max_items=None) -> list:
         """Recall a small, high-signal expression set for this turn.
@@ -1198,29 +1188,31 @@ class LLMService:
         for item in result or []:
             if not isinstance(item, dict):
                 continue
-            fragments = []
-            for key in ("pattern", "style", "situation", "phrase", "examples"):
+            values = []
+            for key in ("pattern", "style", "phrase", "examples"):
                 value = item.get(key)
-                if isinstance(value, list):
-                    fragments.extend(str(part) for part in value)
-                elif value not in (None, ""):
-                    fragments.append(str(value))
-            candidate_text = re.sub(r"\s+", "", " ".join(fragments).casefold())
-            # Short catchphrases are the strongest repetition attractor.  For
-            # longer styles, require a complete candidate phrase to be present.
-            blocked = False
-            for recent in recent_text:
-                if not recent or not candidate_text:
-                    continue
-                if len(candidate_text) <= 12 and candidate_text in recent:
-                    blocked = True
-                    break
-                if len(candidate_text) > 12 and candidate_text in recent:
-                    blocked = True
-                    break
+                values.extend(value if isinstance(value, list) else [value])
+            candidate_phrases = [
+                re.sub(r"\s+", "", str(value).casefold())
+                for value in values if value not in (None, "")
+            ]
+            candidate_phrases = [value for value in candidate_phrases if len(value) >= 2]
+            blocked = any(
+                phrase in recent
+                for recent in recent_text if recent
+                for phrase in candidate_phrases
+            )
             if not blocked:
                 filtered.append(item)
         result = filtered
+        # Rotate a bounded candidate pool so a learned catchphrase is a
+        # reference rather than a deterministic prefix on every turn. Keep
+        # the first context hit when available, then shuffle the remainder.
+        if len(result) > 1:
+            head = [item for item in result if item.get("recall_source") == "context_hit"][:1]
+            tail = [item for item in result if item not in head]
+            random.SystemRandom().shuffle(tail)
+            result = (head + tail)[:inject_limit]
         if result:
             try:
                 self.style_learner.record_expression_selection(
@@ -1613,13 +1605,11 @@ class LLMService:
             )
 
     def _history_cache_breakpoint_id(self, group_id, messages, namespace, cycle_id=None):
-        """Return the immutable history tail selected for this group cycle.
+        """Reuse a stable history boundary while its message remains available.
 
-        The first request in a cycle anchors its full stable memory + accumulated
-        history prefix. Later requests append records after that anchor, so
-        Responses automatic caching sees a byte-identical prefix. A named new
-        cycle deliberately gets a new anchor because cycle-scoped memory/style
-        state may have changed before the next request.
+        Cycle-local state follows history in the prompt, so a new scheduler
+        cycle alone must not move this boundary. Re-anchor after history rolls
+        past it, or when the caller explicitly clears the stored anchor.
         """
         records = [item for item in (messages or []) if isinstance(item, dict)]
         if not records:
@@ -1636,8 +1626,9 @@ class LLMService:
                 current = {"id": current, "cycle_id": ""}
             if isinstance(current, dict):
                 current_id = str(current.get("id") or "")
-                previous_cycle = str(current.get("cycle_id") or "")
-                if current_id in available and (not current_cycle or previous_cycle == current_cycle):
+                # Memory and cycle runtime are after history. A new scheduling
+                # cycle does not invalidate a still-present history boundary.
+                if current_id in available:
                     return current_id
             selected = group_message_identity(records[-1])
             self._history_cache_breakpoints[key] = {
@@ -1783,26 +1774,14 @@ class LLMService:
         an old summary into increasingly detailed pseudo-history.
         """
         records = [dict(item) for item in (messages or []) if isinstance(item, dict)]
-        original_indexes = [
-            index for index, item in enumerate(records)
-            if str(item.get("role") or "") != "context_summary"
-        ]
-        original_count = len(original_indexes)
-        chronological_positions = {record_index: position for position, record_index in enumerate(original_indexes)}
-        for index, item in enumerate(records):
+        for item in records:
             is_prior_compression = str(item.get("role") or "") == "context_summary"
             item["prior_compression"] = is_prior_compression
+            # Record-local weight remains unchanged when later messages append.
             if is_prior_compression:
                 item["compression_weight"] = 0.01
-                continue
-            chronological_index = chronological_positions.get(index, 0)
-            # Low but nonzero weight for early source records; the newest source
-            # record reaches 1.0. The curve is intentionally simple and stable.
-            if original_count <= 1:
-                weight = 1.0
             else:
-                weight = 0.15 + 0.85 * (chronological_index / (original_count - 1))
-            item["compression_weight"] = round(weight, 2)
+                item["compression_weight"] = 0.55 if item.get("is_bot") or str(item.get("role") or "") == "assistant" else 1.0
         return records
 
     @staticmethod
@@ -1969,6 +1948,9 @@ class LLMService:
                     "temporary_persona_active": bool(effective_config.get("temporary_persona_active")),
                     "prefixes": effective_config.get("prefixes") or [],
                     "group_messages": weighted_records,
+                    "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
+                        group_id, weighted_records, "pre-compression-curation"
+                    ),
                     "learning_units": compression_units,
                     "slang_context": json.dumps(slang_records, ensure_ascii=False, separators=(",", ":")),
                     "local_slang_candidates": local_slang_candidates,
@@ -2049,8 +2031,14 @@ class LLMService:
                 self.long_term_memory.apply_memory_actions(group_id, memory_actions)
                 if memory_enabled else {"updated": 0, "deleted": 0, "added": 0}
             )
+            user_source_ids = [
+                str(item.get("source_id") or "").strip() for item in prompt_records
+                if not item.get("is_bot") and str(item.get("role") or "") != "assistant"
+            ]
             expression_applied = int(
-                self.style_learner.apply_expression_actions(group_id, expression_actions) or 0
+                self.style_learner.apply_expression_actions(
+                    group_id, expression_actions, valid_source_ids=user_source_ids
+                ) or 0
             ) if learning_enabled else 0
             user_source_ids = [
                 str(item.get("source_id") or "").strip() for item in prompt_records
@@ -2068,7 +2056,7 @@ class LLMService:
             # A compressed transcript may cover many cycles, but a style/persona
             # rewrite still needs enough original user evidence in this pass.
             if (
-                learning_enabled and len(user_source_ids) >= 10
+                learning_enabled and len(user_source_ids) >= 5
                 and isinstance(style_action, dict)
                 and str(style_action.get("action") or "keep").lower() == "replace"
                 and isinstance(style_action.get("card"), dict)
@@ -2323,6 +2311,9 @@ class LLMService:
                     "temporary_persona_active": bool(effective_config.get("temporary_persona_active")),
                     "prefixes": effective_config.get("prefixes") or [],
                     "group_messages": weighted_messages,
+                    "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
+                        group_id, weighted_messages, "context-compression"
+                    ),
                     **state,
                 }),
                 current_session_id=session_id,
@@ -2855,6 +2846,11 @@ class LLMService:
                 )
                 copied["source_id"] = source_id or f"cycle-message-{index}"
                 prompt_cycle_messages.append(copied)
+            human_source_ids = [
+                str(item.get("source_id") or "").strip()
+                for item in prompt_cycle_messages
+                if not item.get("is_bot") and str(item.get("role") or "") != "assistant"
+            ]
             learning_units = build_learning_units(prompt_cycle_messages)
             complete_learning_units = [
                 item for item in learning_units
@@ -2898,6 +2894,10 @@ class LLMService:
                 "identity": effective_config.get("identity") or {},
                 "prefixes": effective_config.get("prefixes") or [],
                 "cycle_messages": prompt_cycle_messages,
+                "history_cache_breakpoint_id": self._history_cache_breakpoint_id(
+                    group_id, prompt_cycle_messages, "memory-curation",
+                    cycle_id=context.get("cycle_id") or context.get("_cycle_id"),
+                ),
                 "initiative_profile": initiative_profile,
                 "behavior_query": behavior_query,
                 "behavior_feedback_candidates": behavior_feedback_candidates,
@@ -2928,6 +2928,7 @@ class LLMService:
                     ] + build_memory_curation_messages(prompt_data),
                     current_session_id=context.get("sessionId"),
                     memory_group_id=group_id,
+                    cache_namespace="memory-curation",
                 )
                 data = self._normalize_curation_result(
                     load_json_lenient(response),
@@ -3058,7 +3059,9 @@ class LLMService:
             expression_applied = 0
             if self.style_learner:
                 expression_applied = int(
-                    self.style_learner.apply_expression_actions(group_id, expression_actions or []) or 0
+                    self.style_learner.apply_expression_actions(
+                        group_id, expression_actions or [], valid_source_ids=human_source_ids
+                    ) or 0
                 )
             behavior_applied = 0
             if self.style_learner and isinstance(behavior_actions, list):
@@ -3071,7 +3074,7 @@ class LLMService:
                 behavior_applied = int(self.style_learner.apply_behavior_actions(
                     group_id,
                     behavior_actions,
-                    valid_source_ids=(all_source_ids if len(user_source_ids) >= 10 else []),
+                    valid_source_ids=(all_source_ids if len(human_source_ids) >= 10 else []),
                     min_messages=10,
                 ) or 0)
             feedback_applied = 0
@@ -3130,13 +3133,14 @@ class LLMService:
                 isinstance(style_action, dict)
                 and str(style_action.get("action") or "keep").lower() == "replace"
                 and self.style_learner
+                and len(human_source_ids) >= 5
             ):
                 card = style_action.get("card")
                 if isinstance(card, dict):
                     style_applied = bool(self.style_learner.apply_style_card(
                         group_id,
                         card,
-                        source_message_count=int(style_payload.get("message_count", 0) or 0),
+                        source_message_count=len(human_source_ids),
                     ))
             context_cleared = False
             cycle_end_at = context.get("_cycle_end_at")
@@ -3724,6 +3728,10 @@ class LLMService:
                 quoted_available=current_message.get("quoted_available"),
                 quoted_role=current_message.get("quoted_role"),
                 quoted_is_bot=current_message.get("quoted_is_bot"),
+                source_kind=current_message.get("source_kind") or "user_incoming",
+                source_origin=current_message.get("source_origin") or "wechat_inbound",
+                learnable=current_message.get("learnable", True),
+                prompt_visible=current_message.get("prompt_visible", True),
             )
             self._maybe_compress_context(group_id, session_id)
             if self._autonomy_consumed_message(group_id, current_message):
@@ -3741,7 +3749,10 @@ class LLMService:
                     "_local_gate": "autonomy_consumed",
                 }
             group_messages = self._fit_group_messages_for_prompt(
-                self.memory_manager.get_group_messages(group_id)
+                self._annotate_prompt_records(self.memory_manager.get_group_messages(group_id), self._effective_group_config(group_id)),
+                budget_tokens=int(self.config.get("reply_history_token_budget", 32000)),
+                cache_stable_prefix=True,
+                cache_group_id=group_id,
             )
             memory_state, memory_recalled = self._reply_memory_state_if_needed(
                 group_id,
@@ -4078,6 +4089,17 @@ class LLMService:
             if kind == "expression":
                 if not self.style_learner:
                     return {"ok": False, "error": "style learner is disabled"}
+                source_message_id = str(payload.get('source_message_id') or '').strip()
+                source = self.memory_manager.find_group_message(group_id, source_message_id) if self.memory_manager and source_message_id else None
+                if (
+                    not isinstance(source, dict)
+                    or source.get('is_bot')
+                    or str(source.get('role') or '') == 'assistant'
+                    or source.get('prompt_visible') is False
+                    or source.get('learnable') is False
+                    or str(source.get('source_kind') or '').casefold() in {'system_event', 'bot_echo_external', 'llm_error', 'plugin_outbound'}
+                ):
+                    return {'ok': False, 'error': 'expression learning requires a verified human source message'}
                 situation = str(payload.get("situation") or content)[:160]
                 applied = self.style_learner.apply_expression_actions(group_id, [{
                     "action": "add",
@@ -4086,7 +4108,8 @@ class LLMService:
                     "category": str(payload.get("category") or "general")[:48],
                     "confidence": confidence,
                     "source": "llm_initiative",
-                }])
+                    "source_ids": [source_message_id],
+                }], valid_source_ids=[source_message_id])
                 return {"ok": applied > 0, "applied": int(applied or 0), "kind": "expression", "group_id": group_id}
             if kind == "slang":
                 if not self.style_learner:
@@ -4233,6 +4256,8 @@ class LLMService:
             tools.append(IMAGE_MESSAGE_TOOL)
         if memory_group_id:
             tools.append(GROUP_MEMBER_LOOKUP_TOOL)
+        if memory_group_id and getattr(self, "ai_plugin_manager", None) is not None:
+            tools.append(AI_PLUGIN_TOOL)
         if memory_group_id and self.style_learner:
             tools.append(SLANG_LOOKUP_TOOL)
             tools.append(SLANG_SIMILAR_LOOKUP_TOOL)
@@ -4333,6 +4358,10 @@ class LLMService:
 
         conversation = list(messages)
         tool_calls_used = 0
+        plugin_calls_used = 0
+        plugin_max_calls = max(2, min(int(self.config.get("ai_plugin_max_calls", 12)), 16))
+        tool_rounds = 0
+        plugin_deadline = None
         original_calls_used = 0
         image_calls_used = 0
         rcon_calls_used = 0
@@ -4404,7 +4433,8 @@ class LLMService:
             memory_max_calls = 8
         memory_max_calls = max(1, min(memory_max_calls, 16))
         while True:
-            if time.monotonic() >= loop_deadline:
+            tool_rounds += 1
+            if time.monotonic() >= loop_deadline or tool_rounds > 20:
                 # The deadline is a budget for *exploration*, not a reason to
                 # throw away work already done.  If the model has already
                 # called tools, those results are in the conversation and
@@ -4457,16 +4487,22 @@ class LLMService:
 
             conversation.append(self._assistant_message_dict(assistant_message))
             for tool_call in tool_calls:
-                if tool_calls_used >= max_calls:
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": getattr(tool_call, "id", ""),
-                        "content": '{"ok":false,"error":"工具调用次数已达到上限"}',
-                    })
-                    continue
-
                 function = getattr(tool_call, "function", None)
                 name = str(getattr(function, "name", "") or "")
+                is_plugin_tool = name == AI_PLUGIN_TOOL["function"]["name"]
+                if is_plugin_tool:
+                    if plugin_deadline is None:
+                        plugin_deadline = time.monotonic() + min(600, max(60, int(self.config.get("ai_plugin_tool_timeout_seconds", 240))))
+                    loop_deadline = max(loop_deadline, plugin_deadline)
+                    plugin_calls_used += 1
+                    if plugin_calls_used > plugin_max_calls:
+                        conversation.append({"role": "tool", "tool_call_id": getattr(tool_call, "id", ""),
+                                             "content": '{"ok":false,"error_code":"PLUGIN_BUDGET_EXHAUSTED","error":"Plugin repair budget exhausted; report failure honestly."}'})
+                        continue
+                elif not _is_memory_tool_name(name) and tool_calls_used >= max_calls:
+                    conversation.append({"role": "tool", "tool_call_id": getattr(tool_call, "id", ""),
+                                         "content": '{"ok":false,"error":"External tool budget exhausted"}'})
+                    continue
                 if name == IMAGE_MESSAGE_TOOL["function"]["name"]:
                     if image_calls_used >= image_max_calls:
                         conversation.append({
@@ -4602,6 +4638,10 @@ class LLMService:
                             self._persistent_state_write
                         ) if memory_group_id and self.style_learner else None,
                         scheduled_event_write=_write_scheduled_event,
+                        ai_plugin_manager=(
+                            self.ai_plugin_manager.handle_tool
+                            if getattr(self, "ai_plugin_manager", None) is not None and memory_group_id else None
+                        ),
                     )
                 except Exception as exc:
                     content = json.dumps({
@@ -4614,6 +4654,16 @@ class LLMService:
                     except Exception:
                         pass
 
+                if is_plugin_tool:
+                    try:
+                        from utils.runtime_trace import trace_runtime
+                        outcome = json.loads(content)
+                        request_args = arguments if isinstance(arguments, dict) else json.loads(arguments or "{}")
+                        trace_runtime("llm_ai_plugin_result", action=request_args.get("action"),
+                                      ok=outcome.get("ok") is True, error_code=outcome.get("error_code"),
+                                      validation_errors=(outcome.get("errors") or (outcome.get("validation") or {}).get("errors", []))[:5])
+                    except (ValueError, TypeError, AttributeError):
+                        pass
                 safe_content = content
                 if name == IMAGE_MESSAGE_TOOL["function"]["name"]:
                     try:
@@ -4642,7 +4692,7 @@ class LLMService:
                     "tool_call_id": getattr(tool_call, "id", ""),
                     "content": safe_content,
                 })
-                if not _is_memory_tool_name(name):
+                if not _is_memory_tool_name(name) and not is_plugin_tool:
                     tool_calls_used += 1
 
             if image_references:
@@ -4657,7 +4707,7 @@ class LLMService:
                 conversation.append({"role": "user", "content": image_blocks})
                 image_references = []
 
-            if tool_calls_used >= max_calls:
+            if (tool_calls_used >= max_calls and not plugin_calls_used) or plugin_calls_used > plugin_max_calls:
                 # Do not leave the model in an unbounded tool-call loop. The
                 # tool error (or the last successful result) is still included
                 # in the context for one final JSON-only response.
@@ -4883,6 +4933,10 @@ class LLMService:
                         quoted_available=item.get("quoted_available"),
                         quoted_role=item.get("quoted_role"),
                         quoted_is_bot=item.get("quoted_is_bot"),
+                        source_kind=item.get("source_kind") or "user_incoming",
+                        source_origin=item.get("source_origin") or "wechat_inbound",
+                        learnable=item.get("learnable", True),
+                        prompt_visible=item.get("prompt_visible", True),
                     )
 
             memory_query = "\n".join(
@@ -4933,7 +4987,7 @@ class LLMService:
             prompt_group_messages = self._annotate_prompt_records(prompt_group_messages, self._effective_group_config(group_id))
             prompt_group_messages = self._fit_group_messages_for_prompt(
                 prompt_group_messages,
-                budget_tokens=80000 if not attention_check else 100000,
+                budget_tokens=int(self.config.get("reply_history_token_budget", 32000)),
                 cache_stable_prefix=True,
                 cache_group_id=group_id,
             )
@@ -5393,7 +5447,7 @@ class LLMService:
                 attention_check=bool(committed.get("_delivery_attention_check")),
             )
 
-        if messages:
+        if messages and result.get("_llm_ok", True) and not result.get("_llm_error") and not result.get("_balance_error"):
             if self.style_learner:
                 self.style_learner.record_slang_usage(
                     group_id,

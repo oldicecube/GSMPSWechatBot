@@ -85,7 +85,7 @@ def build_error_response(reason=None, raw_text=None):
     if raw_preview:
         message = f"{message}\n原始返回：{raw_preview}"
 
-    return {"messages": [message], "animation": None}
+    return {"messages": [], "animation": None, "_llm_ok": False, "_llm_error": True, "_internal_error": message}
 
 
 def build_raw_response(text, reason=DEFAULT_ERROR_MESSAGE):

@@ -1,4 +1,4 @@
-﻿import os
+import os
 from PIL import Image, ImageDraw, ImageFont
 from core.sender import send
 

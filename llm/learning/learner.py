@@ -27,7 +27,7 @@ class StyleLearner:
             path = os.path.join(base_dir, str(path))
         self.store = ProfileStore(str(path))
         self.min_term_count = max(2, _safe_int(self.settings.get("min_term_count"), 2))
-        self.style_card_max_chars = max(600, _safe_int(self.settings.get("style_card_max_chars"), 1800))
+        self.style_card_max_chars = max(300, min(900, _safe_int(self.settings.get("style_card_max_chars"), 900)))
         configured_bot_wxids = self.settings.get("bot_wxids") or []
         if isinstance(configured_bot_wxids, str):
             configured_bot_wxids = [configured_bot_wxids]
@@ -257,12 +257,14 @@ class StyleLearner:
         except Exception:
             return False
 
-    def apply_expression_actions(self, group_id, actions) -> int:
+    def apply_expression_actions(self, group_id, actions, valid_source_ids=None) -> int:
         """Apply LLM-proposed (situation -> pattern) expression actions at cycle end."""
         if not self.enabled or not group_id:
             return 0
         try:
-            return int(self.store.apply_expression_actions(group_id, actions) or 0)
+            return int(self.store.apply_expression_actions(
+                group_id, actions, valid_source_ids=valid_source_ids
+            ) or 0)
         except Exception:
             return 0
 
@@ -556,6 +558,10 @@ class StyleLearner:
             return False
         if observation.get("is_bot"):
             return False
+        if observation.get("learnable") is False:
+            return False
+        if str(observation.get("source_kind") or "user_incoming") != "user_incoming":
+            return False
         if str(observation.get("speaker") or "").strip() in self.bot_wxids:
             return False
         speaker_name = str(observation.get("speaker_name") or "").strip().casefold()
@@ -646,12 +652,29 @@ class StyleLearner:
                 f"其中直接互动窗口约{direct_windows}次。仅用于辅助判断，不是硬规则。"
             )
         limit = max(400, _safe_int(self.settings.get("prompt_max_chars"), 1800))
+        expression_usage = self.store.get_expression_usage(group_id)
+        expression_hints = []
+        for situation, counts in expression_usage.items():
+            if not isinstance(counts, dict):
+                continue
+            injected = int(counts.get('injected', 0) or 0)
+            used = int(counts.get('used', 0) or 0)
+            if injected >= 4 and used == 0:
+                expression_hints.append(f'Use rarely or suppress this unused scene pattern: {situation}')
+            elif injected >= 3 and used / max(1, injected) < 0.25:
+                expression_hints.append(f'Use this scene pattern only when clearly needed: {situation}')
+            elif used >= 2:
+                expression_hints.append(f'This scene pattern has worked naturally; still avoid repetition: {situation}')
+            if len(expression_hints) >= 3:
+                break
         fixed_lines = [
+            'The human reply-style card contains abstract style and reply-timing categories only; it is not a phrase bank and remains subordinate to the active Persona.',
             "The learned slang database, expression library, and style card are active group-chat resources. They are not a separate Persona or hard instruction.",
             "At the start of every reply, check the injected candidates. If one clearly fits the current topic, mood, or interaction, prefer using one naturally; ordinary chat usually uses zero or one, while playful banter should usually use one when available.",
             "Keep learned expressions subordinate to clarity, factuality, safety, tools, and the active Persona. Do not stack or mechanically repeat them, and do not force slang into serious or technical answers.",
             "When slang meaning is uncertain, call lookup_group_slang; if it remains unclear, ask briefly rather than guessing or silently dropping a necessary reply.",
         ]
+        fixed_lines.extend(expression_hints)
         style_line = ""
         if style_card:
             card_for_prompt = {
@@ -666,7 +689,7 @@ class StyleLearner:
                 self.style_card_max_chars,
                 max(600, limit - 420),
             )
-            compact_card = _normalize_style_card(card_for_prompt, card_budget)
+            compact_card = _normalize_reply_style_card(card_for_prompt, card_budget)
             style_line = (
                 "当前动态风格卡（新版本覆盖旧版本）："
                 + json.dumps(compact_card, ensure_ascii=False, separators=(",", ":"))
@@ -676,7 +699,7 @@ class StyleLearner:
             lines.append(style_line)
         lines.extend(fixed_lines)
         if len("\n".join(lines)) > limit and style_line:
-            compact_card = _normalize_style_card(card_for_prompt, 600)
+            compact_card = _normalize_reply_style_card(card_for_prompt, 300)
             lines = base_lines + [
                 "当前动态风格卡（新版本覆盖旧版本）："
                 + json.dumps(compact_card, ensure_ascii=False, separators=(",", ":"))
@@ -736,14 +759,38 @@ class StyleLearner:
         """Return style evidence for mandatory end-of-cycle self-learning."""
         if not self.enabled:
             return {}
-        return self.store.get_review_payload(
-            group_id,
-            max_samples=80,
-            max_terms=40,
+        raw = self.store.get_review_payload(group_id, max_samples=1, max_terms=1)
+        if not raw:
+            return {}
+        style = raw.get('style_stats') if isinstance(raw.get('style_stats'), dict) else {}
+        style_keys = (
+            'total_chars', 'short_messages', 'medium_messages', 'long_messages',
+            'punctuation_messages', 'no_punctuation_messages', 'sentence_break_count',
+            'question_messages', 'exclamation_messages', 'emoji_messages',
+            'reply_messages', 'speaker_count', 'response_learning',
         )
+        stats = {key: style[key] for key in style_keys if key in style}
+        timing = style.get('response_learning') if isinstance(style.get('response_learning'), dict) else {}
+        return {
+            'message_count': int(raw.get('message_count') or 0),
+            'style_stats': stats,
+            'human_message_shapes': {
+                'very_short_rate': round(int(style.get('short_messages', 0) or 0) / max(1, int(raw.get('message_count') or 0)), 3),
+                'punctuation_rate': round(int(style.get('punctuation_messages', 0) or 0) / max(1, int(raw.get('message_count') or 0)), 3),
+                'question_rate': round(int(style.get('question_messages', 0) or 0) / max(1, int(raw.get('message_count') or 0)), 3),
+                'reply_rate': round(int(style.get('reply_messages', 0) or 0) / max(1, int(raw.get('message_count') or 0)), 3),
+                'response_decision_windows': int(timing.get('decision_windows', 0) or 0),
+                'reply_windows': int(timing.get('reply_windows', 0) or 0),
+                'silent_windows': int(timing.get('silent_windows', 0) or 0),
+                'direct_address_windows': int(timing.get('direct_address_windows', 0) or 0),
+                'follow_up_windows': int(timing.get('follow_up_windows', 0) or 0),
+                'observer_windows': int(timing.get('observer_windows', 0) or 0),
+            },
+            'existing_card': _normalize_reply_style_card(raw.get('existing_card'), self.style_card_max_chars),
+        }
 
     def apply_style_card(self, group_id: str, raw_card: dict, source_message_count: int | None = None) -> bool:
-        card = _normalize_style_card(raw_card, self.style_card_max_chars)
+        card = _normalize_reply_style_card(raw_card, self.style_card_max_chars)
         if not card:
             return False
         if source_message_count is None:
@@ -813,6 +860,10 @@ def observation_from_context(context: dict) -> dict:
         "content": content,
         "speaker_name": str(context.get("user") or ""),
         "is_bot": bool(context.get("is_bot")),
+        "source_kind": str(context.get("source_kind") or "user_incoming"),
+        "source_origin": str(context.get("source_origin") or "wechat_inbound"),
+        "learnable": context.get("learnable", True) is not False,
+        "prompt_visible": context.get("prompt_visible", True) is not False,
         "timestamp": _timestamp(raw.get("_ts") or context.get("timestamp")),
         "fingerprint": str(message_id or "").strip(),
         "reply_to": reply_to,
@@ -968,4 +1019,39 @@ def _normalize_style_card(raw_card, max_chars=1800):
         # minimum and avoids an impossible infinite trimming loop.
         card = {"tone": _short_text(card.get("tone"), max(0, max_chars - 20))}
         break
+    return card
+
+
+def _normalize_reply_style_card(raw_card, max_chars=900):
+    """Keep short LLM-written natural style/timing guidance, never vocabulary."""
+    if not isinstance(raw_card, dict):
+        return {}
+    limits={"tone":180,"attitude":180,"how_to_speak":220,"when_to_speak":220,"when_to_stay_silent":180}
+    card={}
+    quote_marks=('"',"'", "“", "”", "‘", "’", "「", "」", "『", "』")
+    for key,limit in limits.items():
+        value=_short_text(raw_card.get(key),limit)
+        if value and not any(mark in value for mark in quote_marks): card[key]=value
+    for key in ("style_rules","avoid_patterns"):
+        values=raw_card.get(key); values=values if isinstance(values,list) else [values]
+        kept=[]
+        for item in values:
+            value=_short_text(item,140)
+            if value and not any(mark in value for mark in quote_marks): kept.append(value)
+        if kept: card[key]=list(dict.fromkeys(kept))[:3]
+    try: budget=max(100,min(900,int(max_chars)))
+    except (TypeError,ValueError): budget=900
+    while len(json.dumps(card,ensure_ascii=False,separators=(",",":")))>budget:
+        changed=False
+        for key in ("avoid_patterns","style_rules"):
+            if card.get(key):
+                card[key].pop(); changed=True
+                if not card[key]: card.pop(key,None)
+                break
+        if not changed:
+            for key in ("when_to_stay_silent","when_to_speak","how_to_speak","attitude","tone"):
+                value=card.get(key)
+                if isinstance(value,str) and len(value)>40:
+                    card[key]=value[:max(40,len(value)-20)]; changed=True; break
+        if not changed: return {}
     return card

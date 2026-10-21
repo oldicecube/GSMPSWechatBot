@@ -99,6 +99,37 @@ class Worker:
                     routing = self.router.inspect_message(msg)
                 except Exception:
                     routing = {}
+                sender_wxid = item.get("wxid") or msg.get("wxid")
+                is_bot_echo = bool(
+                    msg.get("is_bot")
+                    or raw_flags.get("is_bot")
+                    or (sender_wxid and self._is_bot_wxid(sender_wxid))
+                )
+                try:
+                    normalized_local_type = int(msg.get("localType") or msg.get("local_type") or 0)
+                except (TypeError, ValueError):
+                    normalized_local_type = 0
+                # Source precedence is deliberate: system events and Bot echoes
+                # must never be reclassified as user input by an upstream
+                # normalizer that supplied a generic ``user_incoming`` value.
+                if normalized_local_type in {10000, 10002}:
+                    inbound_source_kind = "system_event"
+                elif is_bot_echo:
+                    inbound_source_kind = "bot_echo_external"
+                else:
+                    inbound_source_kind = msg.get("source_kind") or "user_incoming"
+                inbound_source_origin = (
+                    "weflow_system_event" if normalized_local_type in {10000, 10002}
+                    else ("wechat_echo" if is_bot_echo else (msg.get("source_origin") or "wechat_inbound"))
+                )
+                inbound_learnable = (
+                    False if normalized_local_type in {10000, 10002} or is_bot_echo
+                    else bool(msg.get("learnable", True))
+                )
+                inbound_prompt_visible = (
+                    False if normalized_local_type in {10000, 10002} or is_bot_echo
+                    else bool(msg.get("prompt_visible", True))
+                )
                 context = {
                     "user": item.get("user", "未知用户"),
                     "group": msg.get("group"),
@@ -108,15 +139,8 @@ class Worker:
                     "serverId": msg.get("serverId") or msg.get("svrid") or msg.get("rawid"),
                     "svrid": msg.get("svrid"),
                     "rawid": msg.get("rawid"),
-                    "wxid": item.get("wxid") or msg.get("wxid"),
-                    "is_bot": bool(
-                        msg.get("is_bot")
-                        or raw_flags.get("is_bot")
-                        or (
-                            (item.get("wxid") or msg.get("wxid"))
-                            and self._is_bot_wxid(item.get("wxid") or msg.get("wxid"))
-                        )
-                    ),
+                    "wxid": sender_wxid,
+                    "is_bot": is_bot_echo,
                     "type": msg.get("type"),
                     "is_group": msg.get("is_group", msg.get("type") == "group"),
                     "is_private": msg.get("is_private", msg.get("type") == "private"),
@@ -135,6 +159,20 @@ class Worker:
                     "is_picture": msg.get("is_picture", False),
                     "is_emoji": msg.get("is_emoji", False),
                     "is_voice": msg.get("is_voice", False),
+                    "source_kind": inbound_source_kind,
+                    "source_origin": inbound_source_origin,
+                    "learnable": inbound_learnable,
+                    "prompt_visible": inbound_prompt_visible,
+                    "quoted_message": routing.get("quoted_message"),
+                    "quoted_message_id": routing.get("quoted_message_id"),
+                    "quoted_sender": routing.get("quoted_sender"),
+                    "quoted_sender_wxid": routing.get("quoted_sender_wxid"),
+                    "quoted_content": routing.get("quoted_content"),
+                    "quoted_message_type": routing.get("quoted_message_type"),
+                    "quoted_timestamp": routing.get("quoted_timestamp"),
+                    "quoted_available": routing.get("quoted_available"),
+                    "quoted_role": routing.get("quoted_role"),
+                    "quoted_is_bot": routing.get("quoted_is_bot"),
                     "command": command,
                     "args": args,
                     "content": item.get("content"),
@@ -273,6 +311,15 @@ class Worker:
         except Exception:
             return
 
+        sender_wxid = info.get("wxid") or msg.get("wxid")
+        is_bot_echo = bool(info.get("is_bot") or self._is_bot_wxid(sender_wxid))
+        if is_bot_echo:
+            info["source_kind"] = "bot_echo_external"
+            info["source_origin"] = "wechat_echo"
+            info["learnable"] = False
+            # Echoes remain available for diagnostics but never become prompt evidence.
+            info["prompt_visible"] = False
+
         if not info.get("is_target_group"):
             return
 
@@ -351,7 +398,11 @@ class Worker:
                 "messageKey": info.get("message_id"),
                 "serverId": info.get("server_id"),
                 "prefix_used": bool(info.get("has_prefix")),
-                "is_bot": self._is_bot_wxid(sender_wxid),
+                "is_bot": bool(info.get("is_bot") or self._is_bot_wxid(sender_wxid)),
+                "source_kind": info.get("source_kind") or "user_incoming",
+                "source_origin": info.get("source_origin") or "wechat_inbound",
+                "learnable": info.get("learnable", True),
+                "prompt_visible": info.get("prompt_visible", True),
             })
         if self.style_learner and not is_picture:
             self.style_learner.record_message({
@@ -374,6 +425,10 @@ class Worker:
                 "quoted_available": info.get("quoted_available"),
                 "quoted_role": info.get("quoted_role"),
                 "quoted_is_bot": info.get("quoted_is_bot"),
+                "source_kind": info.get("source_kind") or "user_incoming",
+                "source_origin": info.get("source_origin") or "wechat_inbound",
+                "learnable": info.get("learnable", True),
+                "prompt_visible": info.get("prompt_visible", True),
                 "is_picture": msg.get("is_picture", False),
                 "is_emoji": msg.get("is_emoji", False),
                 "is_voice": msg.get("is_voice", False),

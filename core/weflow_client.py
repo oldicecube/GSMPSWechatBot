@@ -134,6 +134,13 @@ class WeFlowClient:
             "rawid": msg.get("rawid"),
             "timestamp": msg.get("timestamp"),
             "localType": msg.get("localType") or msg.get("local_type"),
+            "source_kind": (
+                "system_event" if int(msg.get("localType") or msg.get("local_type") or 0) in {10000, 10002}
+                else ("user_incoming" if msg.get("senderWxid") or msg.get("sourceName") else "unknown_inbound")
+            ),
+            "source_origin": "weflow_sse",
+            "learnable": int(msg.get("localType") or msg.get("local_type") or 0) not in {10000, 10002},
+            "prompt_visible": int(msg.get("localType") or msg.get("local_type") or 0) not in {10000, 10002},
             "avatarUrl": msg.get("avatarUrl"),
 
             # ===== debug =====

@@ -950,10 +950,15 @@ class OpenAICompatibleClient:
             import hashlib
             tools_sha = hashlib.sha256(json.dumps(tools or [], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
             print(f"[LLM CACHE REQUEST] api={self.name} protocol=chat route_key={'yes' if cache_key else 'no'} tools_sha={tools_sha} messages={len(wire_messages)}", flush=True)
+        from llm.cache_diagnostics import CacheDiagnostics
+        diagnostics = self.__dict__.setdefault("_cache_diagnostics", CacheDiagnostics())
+        request_diag = diagnostics.request(wire_messages, tools, cache_key, _current_prompt_capture_kind(), self.model,
+                                           settings={k: kwargs[k] for k in ("response_format", "reasoning_effort", "parallel_tool_calls") if k in kwargs})
         try:
             capture_prompt(kwargs["messages"], kind=_current_prompt_capture_kind(), metadata={"api": self.name, "model": self.model, "protocol": "chat", "tools_sha": tools_sha if bool(self.entry.get("cache", True)) else ""})
             response = self._client.chat.completions.create(**kwargs)
             self._log_usage(response)
+            diagnostics.usage(request_diag, getattr(self, "last_usage", {}) or {})
             message = response.choices[0].message
             _log_visible_reasoning(self.name, "openai", message)
             return message
@@ -986,6 +991,7 @@ class OpenAICompatibleClient:
     def _log_usage(self, response):
         usage = getattr(response, "usage", None)
         if usage is None:
+            self.last_usage = {}
             print(f"[LLM TOKENS] api={self.name} usage unavailable", flush=True)
             return
         fields = {
@@ -999,6 +1005,9 @@ class OpenAICompatibleClient:
             cached = prompt_details.get("cached_tokens")
         else:
             cached = getattr(prompt_details, "cached_tokens", None)
+        cache_write = self._usage_value(prompt_details, "cache_write_tokens") if prompt_details is not None else None
+        if cache_write is not None:
+            fields["cache_write"] = cache_write
         if cached is not None:
             fields["cache_hit"] = cached
         else:
@@ -1136,6 +1145,23 @@ class ResponsesClient:
                 )
                 self._rebuild_client()
 
+    def _create_response(self, kwargs):
+        """Trace the actual Responses wire shape, including fallback attempts."""
+        from llm.cache_diagnostics import CacheDiagnostics
+        diagnostics = self.__dict__.setdefault("_cache_diagnostics", CacheDiagnostics())
+        records = list(kwargs.get("input") or [])
+        if kwargs.get("instructions"):
+            records.insert(0, {"role": "developer", "content": kwargs["instructions"]})
+        request = diagnostics.request(
+            records, kwargs.get("tools"), kwargs.get("prompt_cache_key"),
+            _current_prompt_capture_kind(), self.model,
+            settings={key: kwargs[key] for key in ("reasoning", "text", "parallel_tool_calls", "tool_choice") if key in kwargs},
+        )
+        response = self._client.responses.create(**kwargs)
+        self._log_usage(response)
+        diagnostics.usage(request, getattr(self, "last_usage", {}))
+        return response
+
     def _chat_once(self, messages, tools=None, prompt_cache_key=None, thinking=None, timeout=None):
         """Call this endpoint with implicit cache plus one history checkpoint."""
         if _shutting_down():
@@ -1162,7 +1188,15 @@ class ResponsesClient:
         if self.max_output_tokens > 0:
             kwargs["max_output_tokens"] = self.max_output_tokens
         if isinstance(thinking, dict):
-            kwargs.update(thinking)
+            # Config uses Chat Completions spelling; Responses requires the
+            # nested reasoning object and rejects reasoning_effort as a kwarg.
+            response_thinking = dict(thinking)
+            effort = response_thinking.pop("reasoning_effort", None)
+            if effort is not None:
+                reasoning = dict(response_thinking.get("reasoning") or {})
+                reasoning.setdefault("effort", effort)
+                response_thinking["reasoning"] = reasoning
+            kwargs.update(response_thinking)
         if timeout is not None:
             kwargs["timeout"] = max(1.0, float(timeout))
 
@@ -1180,9 +1214,13 @@ class ResponsesClient:
         if cache_enabled and cache_key:
             kwargs["prompt_cache_key"] = cache_key
         if cache_enabled and self._prompt_cache_options_supported:
-            # RightAPI/OpenAI Responses uses prompt_cache_retention for
-            # automatic caching; do not send Anthropic-style cache options.
-            kwargs["prompt_cache_retention"] = self.prompt_cache_ttl
+            if _responses_explicit_breakpoint_default(self.model):
+                # GPT-5.6+ uses prompt_cache_options.ttl; 30m is NOT a
+                # prompt_cache_retention value. extra_body supports SDKs
+                # predating this optional Responses field.
+                kwargs["extra_body"] = {"prompt_cache_options": {"mode": "implicit", "ttl": "30m"}}
+            else:
+                kwargs["prompt_cache_retention"] = "24h" if self.prompt_cache_ttl == "24h" else "in_memory"
         breakpoint_count = _responses_breakpoint_count(responses_input)
         if cache_enabled:
             input_digest = OpenAICompatibleClient._message_chars(messages)
@@ -1200,8 +1238,7 @@ class ResponsesClient:
         retried_format = False
         try:
             capture_prompt(messages, kind=_current_prompt_capture_kind())
-            response = self._client.responses.create(**kwargs)
-            self._log_usage(response)
+            response = self._create_response(kwargs)
             return _responses_message_to_openai(response)
         except httpx.TimeoutException as exc:
             print(
@@ -1236,8 +1273,7 @@ class ResponsesClient:
                     "retrying with top-level instructions",
                     flush=True,
                 )
-                response = self._client.responses.create(**kwargs)
-                self._log_usage(response)
+                response = self._create_response(kwargs)
                 return _responses_message_to_openai(response)
             # Keep the request usable with gateways that implement automatic
             # caching but have not yet added the GPT-5.6 content-block marker.
@@ -1251,13 +1287,16 @@ class ResponsesClient:
                 self._prompt_cache_options_supported = False
                 kwargs.pop("prompt_cache_retention", None)
                 kwargs.pop("prompt_cache_options", None)
+                if isinstance(kwargs.get("extra_body"), dict):
+                    kwargs["extra_body"].pop("prompt_cache_options", None)
+                    if not kwargs["extra_body"]:
+                        kwargs.pop("extra_body", None)
                 print(
                     f"[LLM CACHE FALLBACK] api={self.name} gateway rejected cache retention; "
                     "retrying with implicit automatic caching defaults",
                     flush=True,
                 )
-                response = self._client.responses.create(**kwargs)
-                self._log_usage(response)
+                response = self._create_response(kwargs)
                 return _responses_message_to_openai(response)
             if _responses_breakpoint_unsupported(exc) and breakpoint_count:
                 # Prevent every future call in this process from first paying
@@ -1269,8 +1308,7 @@ class ResponsesClient:
                     flush=True,
                 )
                 kwargs["input"] = _to_responses_input(messages, include_cache_breakpoints=False, include_system=self._responses_system_mode == "developer_input")
-                response = self._client.responses.create(**kwargs)
-                self._log_usage(response)
+                response = self._create_response(kwargs)
                 return _responses_message_to_openai(response)
             if (
                 not tools
@@ -1287,8 +1325,7 @@ class ResponsesClient:
                     flush=True,
                 )
                 kwargs.pop("text", None)
-                response = self._client.responses.create(**kwargs)
-                self._log_usage(response)
+                response = self._create_response(kwargs)
                 return _responses_message_to_openai(response)
             error_text = str(exc).lower()
             if any(marker in error_text for marker in (
@@ -1803,8 +1840,9 @@ class DeepSeekProvider:
                 endpoint_tools = self._filter_tools_for_endpoint(endpoint, tools)
                 endpoint_messages = self._filter_messages_for_endpoint(endpoint, messages)
                 protocol = str((getattr(endpoint, "entry", {}) or {}).get("protocol") or "openai").lower()
+                override = (getattr(endpoint, "entry", {}) or {}).get("thinking_params")
                 endpoint_thinking = _thinking_payload_for_protocol(
-                    thinking,
+                    override if isinstance(override, dict) else thinking,
                     protocol,
                     max_tokens=getattr(endpoint, "max_tokens", None),
                 )

@@ -1,4 +1,4 @@
-﻿"""Bounded Minecraft Java 26.2 RCON actions exposed to the LLM.
+"""Bounded Minecraft Java 26.2 RCON actions exposed to the LLM.
 
 This module intentionally exposes named, parameter-validated actions rather than
 an arbitrary RCON command string.  The server password never enters a prompt or

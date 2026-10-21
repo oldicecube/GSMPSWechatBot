@@ -20,6 +20,7 @@ import httpx
 import requests
 
 from llm.rcon_tools import MINECRAFT_RCON_TOOL, execute_minecraft_rcon_action
+from llm.ai_plugin_manager import PLUGIN_DEVELOPMENT_SPEC
 
 
 WEB_FETCH_TOOL = {
@@ -253,6 +254,7 @@ LEARNING_WRITE_TOOL = {
                 "speaker": {"type": "string", "description": "Optional speaker/wxid this learning is about."},
                 "subject_id": {"type": "string", "description": "Optional person wxid for memory="},
                 "situation": {"type": "string", "description": "Optional situation label for kind=expression."},
+                "source_message_id": {"type": "string", "description": "Required for kind=expression: exact ID of a current-group human-authored message that supports the pattern."},
                 "category": {"type": "string", "description": "Optional expression category."},
                 "confidence": {"type": "number", "description": "Optional confidence 0..1."},
             },
@@ -303,6 +305,31 @@ GROUP_MEMBER_LOOKUP_TOOL = {
                 "identifier": {"type": "string", "description": "Exact wxid or group nickname."},
             },
             "required": ["group_id", "identifier"],
+        },
+    },
+}
+
+
+AI_PLUGIN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "manage_ai_plugin",
+        "description": (
+            "Manage only bounded AI-authored WeChat text plugins. For an explicit plugin request call action=guide first to obtain the supported Python subset and source template. Then use list/get/validate/create/update/delete. validate accepts new source without writing. Read validation errors and repair on failure. "
+            "The plugin may read sanitized current message context and return text, but cannot access files, network, processes, imports, credentials, or send files. "
+            "Write/delete actions require confirm=true. The tool validates UTF-8 without BOM, COMMAND/ALIASES, handle(content, context), restricted return format, dangerous syntax, and Python AST before and after writing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["guide", "list", "get", "validate", "create", "update", "delete"]},
+                "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,48}$", "description": "Lowercase ASCII plugin name, without .py."},
+                "source": {"type": "string", "maxLength": 16000, "description": "Complete UTF-8 source for validate/create/update; source may be validated before a file exists."},
+                "description": {"type": "string", "description": "Short user-facing plugin description."},
+                "include_source": {"type": "boolean"},
+                "confirm": {"type": "boolean", "description": "Must be true for create/update/delete after explicit user intent."},
+            },
+            "required": ["action"],
         },
     },
 }
@@ -1121,7 +1148,7 @@ def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_T
                  image_max_bytes=8 * 1024 * 1024,
                  minecraft_rcon_config=None, minecraft_group_id="", minecraft_user_wxid="",
                  learning_write=None, sentence_compare_learn=None,
-                 persistent_state_write=None, scheduled_event_write=None) -> str:
+                 persistent_state_write=None, scheduled_event_write=None, ai_plugin_manager=None) -> str:
     """Execute one model-requested tool and return JSON for the tool message."""
     known_names = {
         WEB_FETCH_TOOL["function"]["name"],
@@ -1138,6 +1165,7 @@ def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_T
         SENTENCE_COMPARE_LEARNING_TOOL["function"]["name"],
         PERSISTENT_STATE_WRITE_TOOL["function"]["name"],
         SCHEDULED_EVENT_TOOL["function"]["name"],
+        AI_PLUGIN_TOOL["function"]["name"],
         MINECRAFT_RCON_TOOL["function"]["name"],
     }
     if name not in known_names:
@@ -1263,6 +1291,12 @@ def execute_tool(name: str, arguments: str | dict, *, timeout: float = DEFAULT_T
             if not isinstance(payload, dict):
                 raise ValueError("tool arguments must be a JSON object")
             return json.dumps(scheduled_event_write(payload), ensure_ascii=False)
+        if name == AI_PLUGIN_TOOL["function"]["name"]:
+            if not callable(ai_plugin_manager):
+                return json.dumps({"ok": False, "error": "AI plugin management is unavailable in this request"}, ensure_ascii=False)
+            if not isinstance(payload, dict):
+                raise ValueError("Tool arguments must be a JSON object")
+            return json.dumps(ai_plugin_manager(payload), ensure_ascii=False)
         if name == TIABA_HOT_TOOL["function"]["name"]:
             if not isinstance(payload, dict):
                 raise ValueError("工具参数必须是 JSON 对象")

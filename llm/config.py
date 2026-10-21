@@ -64,6 +64,8 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "timeout_seconds": timeout,
                 "max_tokens": max(1, max_tokens) if max_tokens > 0 else 0,
                 "priority": priority,
+                # None inherits global settings; an empty dict sends no reasoning parameters.
+                "thinking_params": dict(item["thinking_params"]) if isinstance(item.get("thinking_params"), dict) else None,
                 # Explicit opt-in for multimodal image input.
                 "supports_images": bool(
                     item.get("supports_images", item.get("image_enabled", False))
@@ -83,6 +85,7 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "prompt_cache_retention": str(
                     item.get("prompt_cache_retention") or ""
                 ).strip().lower(),
+                "prompt_cache_ttl": str(item.get("prompt_cache_ttl") or "").strip().lower(),
                 # Anthropic cache_mode：auto=网关自动缓存（仅声明 TTL，请求顶层 auto_cached=true）；
                 # manual=消息内注入 cache_control 断点；off=关闭缓存。
                 "cache_mode": str(item.get("cache_mode") or "").strip().lower(),
@@ -328,6 +331,9 @@ def get_llm_config():
 
 
     # ---- 多 LLM API 池 ----
+    result["reply_history_token_budget"] = max(8000, min(_safe_int(llm_config.get("reply_history_token_budget", 32000), 32000), 160000))
+    result["ai_plugin_max_calls"] = max(2, min(_safe_int(llm_config.get("ai_plugin_max_calls", 12), 12), 16))
+    result["ai_plugin_tool_timeout_seconds"] = max(60, min(_safe_int(llm_config.get("ai_plugin_tool_timeout_seconds", 240), 240), 600))
     result["thinking_params"] = dict(llm_config.get("thinking_params") or {})
     request_timeout = result["request_timeout_seconds"]
     result["apis"] = _normalize_api_entries(llm_config, request_timeout)
@@ -357,7 +363,7 @@ def get_llm_config():
         "queue_max": max(100, _safe_int(learning.get("queue_max", 2000), 2000)),
         "min_term_count": max(2, _safe_int(learning.get("min_term_count", 2), 2)),
         "prompt_max_chars": max(400, _safe_int(learning.get("prompt_max_chars", 1800), 1800)),
-        "style_card_max_chars": max(600, _safe_int(learning.get("style_card_max_chars", 1800), 1800)),
+        "style_card_max_chars": max(300, min(900, _safe_int(learning.get("style_card_max_chars", 900), 900))),
         "expression_recall_scan_limit": max(200, _safe_int(learning.get("expression_recall_scan_limit", 2000), 2000)),
         "expression_pool_size": max(4, min(_safe_int(learning.get("expression_pool_size", 12), 12), 24)),
         "expression_prompt_max_items": max(1, min(_safe_int(learning.get("expression_prompt_max_items", 3), 3), 8)),

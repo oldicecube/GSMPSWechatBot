@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """/acgpic - send one random ACG landscape or portrait image.
 
 The API's content is random; image orientation only selects the documented

@@ -1,4 +1,4 @@
-﻿"""Thread-safe TTL store tracking which autonomy events already produced a reply.
+"""Thread-safe TTL store tracking which autonomy events already produced a reply.
 
 One autonomy cycle may react to a real message and successfully send an action.
 The ordinary proactive and direct reply pipelines would otherwise keep working

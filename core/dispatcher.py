@@ -121,6 +121,8 @@ class Dispatcher:
             self.prefix_mode = "strict"
         target_groups = self._normalize_target_groups(config.get("target_group"))
         self._init_llm()
+        if self.llm_service is not None and getattr(self.llm_service, "ai_plugin_manager", None) is not None:
+            self.llm_service.ai_plugin_manager.set_reload_callback(self.reload_ai_plugins)
 
         # Optional dependency injection for command plugins that need to use
         # the already-initialized LLM service. This does not alter router payloads.
@@ -253,6 +255,33 @@ class Dispatcher:
     # =========================================================
     # 🔥 核心 dispatch（融合 auto + command）
     # =========================================================
+    def _dispatch_ai_plugin(self, command, args, context):
+        """Execute a validated AI-authored plugin inside its capability sandbox."""
+        manager = getattr(self.llm_service, "ai_plugin_manager", None) if self.llm_service else None
+        if manager is None or not command:
+            return None
+        try:
+            catalog = manager.list_plugins(include_source=False).get("plugins", [])
+        except Exception:
+            return None
+        command_text = str(command).strip()
+        for item in catalog:
+            if item.get("status") != "valid":
+                continue
+            names = [item.get("command"), *(item.get("aliases") or [])]
+            if command_text not in {str(value).strip() for value in names if value}:
+                continue
+            if not self._module_enabled_for_group(item.get("name"), (context or {}).get("group")):
+                return {"messages": [], "animation": None, "mode": "wechat_text"}
+            result = manager.execute(item.get("name"), args or "", context or {})
+            if not result.get("ok"):
+                return "AI plugin failed: " + str(result.get("error") or "unknown error")[:240]
+            value = result.get("value")
+            if isinstance(value, dict):
+                return {"messages": value.get("messages") or ([value["content"]] if value.get("content") else []), "animation": None, "mode": "wechat_text", "delay_seconds": value.get("delay_seconds", 0), "_ai_plugin": item.get("name")}
+            return value if value is not None else {"messages": [], "animation": None, "mode": "wechat_text"}
+        return None
+
     def dispatch(self, command, args, context):
 
         if self.debug:
@@ -392,6 +421,10 @@ class Dispatcher:
         # =====================================================
         # 4. 未找到 command → fallback auto
         # =====================================================
+        if not plugin and plugins_enabled:
+            ai_result = self._dispatch_ai_plugin(command, args, context)
+            if ai_result is not None:
+                return ai_result
         if not plugin:
             # Auto command-like plugins may consume a command to create a
             # follow-up state. Do not turn that interception into an unknown
@@ -1180,6 +1213,17 @@ class Dispatcher:
     # =========================================================
     # debug
     # =========================================================
+    def reload_ai_plugins(self):
+        """Reload only sandboxed AI plugins after a validated file change."""
+        with self.reload_lock:
+            manager = getattr(self.llm_service, "ai_plugin_manager", None) if self.llm_service else None
+            if manager is None:
+                return {"ok": False, "error": "AI plugin manager unavailable"}
+            # AI plugins are not imported into the normal plugin table. They
+            # are validated/executed by the manager and exposed only through
+            # its constrained result path.
+            return {"ok": True, "reloaded": True, "sandbox": True}
+
     def shutdown(self):
         """Stop LLM-owned background work before process teardown."""
         self._direct_stop.set()

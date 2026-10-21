@@ -198,6 +198,8 @@ class LongTermMemory:
         wxid = _safe(context.get("wxid"), 120)
         if context.get("is_bot") or (wxid and wxid in self.bot_wxids):
             return 0
+        if context.get("learnable") is False or str(context.get("source_kind") or "user_incoming") != "user_incoming":
+            return 0
         group_id = _safe(context.get("group") or context.get("sessionId"), 200)
         message_id = _safe(
             context.get("messageKey") or context.get("message_id")

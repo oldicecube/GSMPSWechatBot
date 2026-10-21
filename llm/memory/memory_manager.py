@@ -33,12 +33,17 @@ class MemoryManager:
         return cjk + max(0, (non_cjk + 3) // 4)
 
     def add_llm_message(self, group_id, nickname, content):
-        """Compatibility wrapper; all new conversation messages use group history."""
+        """Store a delivered LLM reply with an explicit source boundary."""
         return self.add_group_message(
             group_id,
             nickname,
             content,
             is_bot=True,
+            role="assistant",
+            source_kind="llm_assistant",
+            source_origin="llm_service_delivery",
+            learnable=False,
+            prompt_visible=True,
         )
 
     def get_llm_history(self, group_id):
@@ -59,7 +64,9 @@ class MemoryManager:
                           quoted_sender_wxid=None, quoted_content=None,
                           quoted_message_type=None, quoted_timestamp=None,
                           quoted_available=None, quoted_role=None,
-                          quoted_is_bot=None):
+                          quoted_is_bot=None, source_kind="user_incoming",
+                          source_origin="wechat_inbound", learnable=True,
+                          prompt_visible=True):
         with _GROUP_FILE_LOCK:
             group_dir = self._ensure_group_dir(group_id)
             messages_path = os.path.join(group_dir, "group_messages.json")
@@ -86,6 +93,10 @@ class MemoryManager:
                     item[key] = value
             item["is_bot"] = bool(is_bot)
             item["role"] = str(role or ("assistant" if is_bot else "user"))
+            item["source_kind"] = str(source_kind or ("llm_assistant" if is_bot else "user_incoming"))
+            item["source_origin"] = str(source_origin or ("llm_service_delivery" if is_bot else "wechat_inbound"))
+            item["learnable"] = bool(learnable)
+            item["prompt_visible"] = bool(prompt_visible)
             if is_bot or prefix_used or is_at_bot or is_mentioned:
                 item["prefix_used"] = bool(prefix_used)
                 item["is_at_bot"] = bool(is_at_bot)

@@ -124,6 +124,11 @@ prompt.txt
 # Local one-off LLM cache probe output
 /_cache_probe_results.txt
 
+# Test suites are source code and belong in version control.
+!/tests/
+!/tests/**
+/tests/**/__pycache__/
+
 # Locally downloaded VB-CABLE installer cache
 /scripts/vb-cable/
 
@@ -161,6 +166,8 @@ prompt.txt
 !/sample_config.json
 /plugins/home.txt
 /plugins/*_prompt.txt
+/plugins/ai_generated/*
+!/plugins/ai_generated/.gitkeep
 
 # Local production validation reports and private transcripts
 /docs/LLM_*_2026*.md
@@ -170,3 +177,6 @@ prompt.txt
 !/music-source/README.md
 /assets/otto/*
 !/assets/otto/README.md
+
+# Local task tracking
+/TODO.md

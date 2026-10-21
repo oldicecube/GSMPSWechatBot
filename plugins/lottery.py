@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Daily content lottery v2.
 
 Public gameplay is intentionally simple: choose up to five of six daily content

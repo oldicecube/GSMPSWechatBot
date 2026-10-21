@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """/otto voice-generation plugin."""
 
 from __future__ import annotations

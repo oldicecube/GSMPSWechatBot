@@ -721,16 +721,11 @@ def _session_tick(now):
 
 
 def _feed_worker():
-    last_gold_open = None
     while not _STOP.is_set():
         started = time.monotonic()
         try:
             with _FEED_LOCK:
                 _sync_external_feeds()
-            gold_open = _gold_market_open()
-            if last_gold_open is not None and gold_open != last_gold_open:
-                _broadcast_text("🟡 金锭 XAU/USD 行情已恢复更新。" if gold_open else "🟡 金锭 XAU/USD 暂无新报价，暂停开仓并保留最后报价，仍可平仓。")
-            last_gold_open = gold_open
         except Exception:
             _LOG.exception("FX feed worker failed; retrying next cycle")
         _STOP.wait(max(1.0, _FEED_POLL_SECONDS - (time.monotonic() - started)))

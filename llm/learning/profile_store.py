@@ -3828,9 +3828,10 @@ class ProfileStore:
         return True
 
     @_maintenance_serialized
-    def apply_expression_actions(self, group_id, actions) -> int:
+    def apply_expression_actions(self, group_id, actions, valid_source_ids=None) -> int:
         """Apply bounded LLM expression actions at cycle end; returns applied count."""
         group_id = str(group_id or "unknown").strip() or "unknown"
+        valid = {str(item).strip() for item in (valid_source_ids or []) if str(item).strip()}
         now = int(time.time())
         applied = 0
         with self._managed_connection() as connection:
@@ -3839,6 +3840,12 @@ class ProfileStore:
                     continue
                 operation = str(action.get("action") or "keep").strip().lower()
                 if operation == "keep":
+                    continue
+                source_ids = action.get("source_ids")
+                if isinstance(source_ids, str):
+                    source_ids = [source_ids]
+                source_ids = [str(item).strip() for item in (source_ids or []) if str(item).strip()]
+                if not valid or not source_ids or any(item not in valid for item in source_ids):
                     continue
                 situation = _clean_text(action.get("situation"), 160)
                 if not situation:
