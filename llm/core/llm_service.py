@@ -1067,24 +1067,62 @@ class LLMService:
         with lock:
             previous = windows.get(key)
             if previous and signatures[:len(previous["source"])] == previous["source"]:
-                prefix_count, tail_start = previous["prefix_count"], previous["tail_start"]
-                selected_cost = sum(costs[:prefix_count]) + sum(costs[tail_start:]) + gap_cost
-                if tail_start < len(items) and selected_cost <= budget:
+                prefix_count, previous_tail_start = previous["prefix_count"], previous["tail_start"]
+                selected_cost = sum(costs[:prefix_count]) + sum(costs[previous_tail_start:]) + gap_cost
+                if previous_tail_start < len(items) and selected_cost <= budget:
                     windows[key] = {**previous, "source": signatures}
-                    return items[:prefix_count] + [dict(gap)] + items[tail_start:]
-            # Leave 15% capacity for appending newly received turns. The model
-            # still gets the latest message immediately; this is not stale state.
+                    return items[:prefix_count] + [dict(gap)] + items[previous_tail_start:]
+                # The old fixed prefix is more valuable than retaining every
+                # middle record. When new traffic fills the tail budget, keep
+                # the prefix byte-identical and move only the tail boundary
+                # forward so provider prefix caching survives appends.
+                retained_cost = sum(costs[:prefix_count]) + gap_cost
+                if prefix_count and retained_cost < budget:
+                    tail_start, used = len(items), retained_cost
+                    tail_used = 0
+                    for index in range(len(items) - 1, prefix_count - 1, -1):
+                        if tail_used + costs[index] > max(2000, int(budget // 6)) or used + costs[index] > budget:
+                            break
+                        tail_start = index
+                        tail_used += costs[index]
+                        used += costs[index]
+                    if tail_start < len(items):
+                        windows[key] = {
+                            **previous,
+                            "source": signatures,
+                            "tail_start": tail_start,
+                        }
+                        return items[:prefix_count] + [dict(gap)] + items[tail_start:]
+            # Leave room for appending newly received turns. The model still
+            # gets the latest message immediately; this is not stale state.
             target = max(1000, int(budget * 0.85))
-            try: prefix_limit = min(int(self.config.get("cache_prefix_tokens", 24000) or 24000), target // 3)
-            except (TypeError, ValueError): prefix_limit = min(24000, target // 3)
+            # Keep a deliberately large immutable prefix. The old one-third
+            # share left most of a production history in the rewritten tail,
+            # so Chat/Grok reported low cache reads even though record order was
+            # append-only. Reserve one-third for the newest live tail.
+            try:
+                prefix_limit = min(
+                    int(self.config.get("cache_prefix_tokens", 24000) or 24000),
+                    max(1000, target * 2 // 3),
+                )
+            except (TypeError, ValueError):
+                prefix_limit = min(24000, max(1000, target * 2 // 3))
+            # Keep the live tail deliberately small. The latest records are
+            # still retained, but sending the entire newest third made the
+            # provider count a large volatile suffix on every proactive turn.
+            tail_limit = max(2000, target // 6)
             prefix_count, prefix_cost = 0, 0
             for cost in costs:
                 if prefix_cost + cost > prefix_limit: break
                 prefix_count += 1; prefix_cost += cost
             tail_start, used = len(items), prefix_cost + gap_cost
+            tail_used = 0
             for index in range(len(items) - 1, prefix_count - 1, -1):
-                if used + costs[index] > target: break
-                tail_start = index; used += costs[index]
+                if tail_used + costs[index] > tail_limit or used + costs[index] > budget:
+                    break
+                tail_start = index
+                tail_used += costs[index]
+                used += costs[index]
             if tail_start == len(items):
                 # A single giant last record must still be bounded by the normal
                 # fitter, which clips a prompt copy without touching storage.
@@ -2661,6 +2699,59 @@ class LLMService:
             cleaned.append(item)
         return cleaned
 
+    def _learn_reply_style_card(self, group_id, effective_config, human_messages, style_payload, session_id=None):
+        """Run the focused LLM-owned human reply-style learning pass."""
+        if not self.style_learner or not self.style_learner.enabled:
+            return False
+        records = [
+            dict(item) for item in (human_messages or [])
+            if isinstance(item, dict)
+            and not item.get("is_bot")
+            and str(item.get("role") or "user") != "assistant"
+            and str(item.get("content") or "").strip()
+        ]
+        if len(records) < 8:
+            return False
+        from llm.prompt import build_reply_style_learning_messages
+        existing_card = style_payload.get("existing_card") if isinstance(style_payload, dict) else {}
+        style_data = {
+            "human_messages": records[-40:],
+            "style_learning_payload": style_payload if isinstance(style_payload, dict) else {},
+            "existing_style_card": existing_card if isinstance(existing_card, dict) else {},
+        }
+        trusted_system = build_system_prompt(
+            effective_config.get("prompt") or {},
+            identity=effective_config.get("identity") or {},
+            prefixes=effective_config.get("prefixes") or [],
+            persona_guidance=self._persona_guidance(effective_config),
+            persona_active=bool(effective_config.get("temporary_persona_active")),
+        ) + (
+            "\\n\\nTRUSTED INTERNAL OVERRIDE: this request is a maintenance-learning pass, not a chat turn. "
+            "Return only the abstract style_card JSON requested by the user task. Never return messages, slang, expressions, or concrete examples."
+        )
+        try:
+            raw = self._complete_with_tools(
+                [{"role": "system", "content": trusted_system}] + build_reply_style_learning_messages(style_data),
+                current_session_id=session_id,
+                memory_group_id=group_id,
+                cache_namespace="reply-style-learning",
+            )
+            parsed = load_json_lenient(raw)
+            card = parsed.get("style_card") if isinstance(parsed, dict) else None
+            if not isinstance(card, dict):
+                print(f"[LLM STYLE LEARNING] group={group_id} skipped=missing_style_card", flush=True)
+                return False
+            applied = bool(self.style_learner.apply_style_card(group_id, card, len(records)))
+            print(
+                f"[LLM STYLE LEARNING] group={group_id} human_records={len(records)} "
+                f"applied={applied} card_chars={len(json.dumps(card, ensure_ascii=False, separators=(',', ':')))}",
+                flush=True,
+            )
+            return applied
+        except Exception as exc:
+            print(f"[LLM STYLE LEARNING ERROR] group={group_id} {type(exc).__name__}: {exc}", flush=True)
+            return False
+
     def curate_cycle(
         self,
         group_id,
@@ -2856,6 +2947,14 @@ class LLMService:
                 item for item in learning_units
                 if item.get("complete") and item.get("candidate_allowed")
             ]
+            effective_config = self._effective_group_config(group_id)
+            self._learn_reply_style_card(
+                group_id,
+                effective_config,
+                [item for item in prompt_cycle_messages if not item.get("is_bot") and str(item.get("role") or "") != "assistant"],
+                style_payload,
+                session_id=context.get("sessionId"),
+            )
             local_slang_candidates = self._extract_local_slang_candidates(
                 complete_learning_units,
                 known_phrases=[

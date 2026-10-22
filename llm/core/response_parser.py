@@ -49,6 +49,32 @@ def _extract_emoji_suffix(text, valid_set):
     return value, None
 
 
+_REDUNDANT_FOLLOWUP_RE = re.compile(
+    r"^(?:\u53ef\u4ee5|\u80fd\u4e0d\u80fd|\u80fd\u5426)?(?:\u518d)?(?:\u8bf4\u8bf4|\u8bb2\u8bb2|\u89e3\u91ca(?:\u4e00\u4e0b)?|\u5177\u4f53\u8bf4\u8bf4)(?:\u5417|\u5462)?[?\uFF1F!\uFF01\u3002.]*$",
+    re.IGNORECASE,
+)
+
+
+def _remove_redundant_function_repeat(text):
+    """Drop a generic same-line follow-up that repeats an existing question."""
+    value = str(text or "").strip()
+    if not value:
+        return value
+    parts = re.split(r"(?<=[?\uFF1F])\s*", value, maxsplit=1)
+    if len(parts) != 2 or not parts[0].strip():
+        return value
+    first, tail = parts[0].strip(), parts[1].strip()
+    if not re.search(r"[?\uFF1F]$", first):
+        return value
+    if _REDUNDANT_FOLLOWUP_RE.fullmatch(tail):
+        return first
+    # A second alternative question is redundant
+    # when the first clause already asks what the term is.
+    if re.search(r"(?:\u8fd8\u662f|\u8fd8\u662f\u5565|\u4ec0\u4e48|\u5565)", tail) and re.search(r"(?:\u5565|\u4ec0\u4e48)", first):
+        return first
+    return value
+
+
 def _dedupe_messages(items, limit=8):
     """Collapse exact duplicates within one model response (sticker-spam guard).
 
@@ -520,6 +546,7 @@ def parse_llm_response(text: str, emoji_list: list) -> dict:
             return build_raw_response(text, "LLM转发失败：messages必须是字符串数组")
         content = _strip_batch_index_prefix(item)
         if content:
+            content = _remove_redundant_function_repeat(content)
             normalized_messages.extend(_split_chat_message(content))
     normalized_messages, dropped_count = _dedupe_messages(normalized_messages)
     if dropped_count:

@@ -31,7 +31,7 @@ from core.dispatcher import Dispatcher
 REPORT = Path(r'C:\Users\Administrator\.codex\backups\wechatbot-20261020\online-acceptance-20261020.json')
 logging.getLogger('httpx').setLevel(logging.WARNING)
 CFG = get_llm_config()
-ENTRY = next(e for e in CFG['apis'] if e.get('base_url', '').rstrip('/') == 'https://uuapi.net/v1' and e.get('model') == 'gpt-6.1-sol')
+ENTRY = next(e for e in CFG['apis'] if e.get('name') == 'WechatLLM-Grok0.08-3' and e.get('model') == 'grok-4.7')
 CLIENT = ResponsesClient({**ENTRY,'protocol':'responses','responses_explicit_cache_breakpoint':True}) if os.getenv('ACCEPTANCE_PROTOCOL')=='responses' else OpenAICompatibleClient(ENTRY)
 REPORT_DATA = json.loads(REPORT.read_text(encoding='utf-8')) if REPORT.exists() else {}
 REPORT_DATA.update({'endpoint': ENTRY['base_url'], 'model': ENTRY['model'], 'timezone': 'Asia/Shanghai', 'contains_prompt_text': False, 'contains_credentials': False})

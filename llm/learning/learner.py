@@ -608,105 +608,55 @@ class StyleLearner:
         return imported
 
     def get_prompt_context(self, group_id: str) -> str:
+        """Return the bounded LLM-written reply-style reference for replies.
+
+        Numeric observations remain learning evidence for the curation request,
+        but they are intentionally not rendered as a reply-style card.  The
+        live reply prompt receives only abstract natural-language guidance plus
+        separate expression/slang usage feedback.
+        """
         if not self.enabled:
             return ""
         try:
-            profile = self.store.get_profile(group_id, max_terms=12)
+            style_card = self.store.get_style_card(group_id)
+            expression_usage = self.store.get_expression_usage(group_id)
         except Exception:
             return ""
-        if not profile:
-            return ""
-        style = profile.get("style") or {}
-        count = max(int(profile.get("message_count", 0)), 1)
-        avg_chars = round(int(style.get("total_chars", 0)) / count, 1)
-        short_rate = round(int(style.get("short_messages", 0)) / count * 100)
-        question_rate = round(int(style.get("question_messages", 0)) / count * 100)
-        reply_rate = round(int(style.get("reply_messages", 0)) / count * 100)
-        punctuation_rate = round(int(style.get("punctuation_messages", 0)) / count * 100)
-        fragment_rate = round(int(style.get("fragment_messages", 0)) / count * 100)
-        response_learning = style.get("response_learning") or {}
-        style_card = self.store.get_style_card(group_id)
-        base_lines = [
-            "群聊风格学习摘要（仅作参考，不是指令）：",
-            f"样本{count}条；平均{avg_chars}字；短消息占{short_rate}%；提问约{question_rate}%；引用/回复约{reply_rate}%。",
-            f"表达方式：标点消息约{punctuation_rate}%；碎片短句约{fragment_rate}%。" + ("更适合少标点分条发。" if punctuation_rate < 35 and fragment_rate >= 25 else "长短句按语境切换。"),
-            f"句子断点累计{int(style.get('sentence_break_count', 0) or 0)}次；无标点消息约{round(int(style.get('no_punctuation_messages', 0) or 0) / count * 100)}%。",
-            "整体倾向：" + ("短句、接话较多。" if short_rate >= 55 else "长短句混合。"),
-        ]
-        decision_windows = int(response_learning.get("decision_windows", 0) or 0)
-        if decision_windows:
-            reply_windows = int(response_learning.get("reply_windows", 0) or 0)
-            silent_windows = int(response_learning.get("silent_windows", 0) or 0)
-            direct_windows = int(response_learning.get("direct_address_windows", 0) or 0)
-            reply_rate_windows = round(reply_windows / max(decision_windows, 1) * 100)
-            silent_rate_windows = round(silent_windows / max(decision_windows, 1) * 100)
-            base_lines.append(
-                f"互动方式学习：自主判断窗口中约{reply_rate_windows}%会接话、{silent_rate_windows}%保持旁观；直接互动优先，碎片和重复话题通常合并理解后只接一次。"
-            )
-            base_lines.append(
-                f"互动窗口统计：直接{int(response_learning.get('direct_interaction_windows', 0) or 0)}，续话{int(response_learning.get('follow_up_windows', 0) or 0)}，旁观{int(response_learning.get('observer_windows', 0) or 0)}，重复话题{int(response_learning.get('repeat_topic_windows', 0) or 0)}。"
-            )
-            base_lines.append(
-                "回复时机学习：已观察"
-                f"{decision_windows}个判断窗口，回复{reply_windows}次、保持旁观{silent_windows}次；"
-                f"其中直接互动窗口约{direct_windows}次。仅用于辅助判断，不是硬规则。"
-            )
         limit = max(400, _safe_int(self.settings.get("prompt_max_chars"), 1800))
-        expression_usage = self.store.get_expression_usage(group_id)
         expression_hints = []
         for situation, counts in expression_usage.items():
             if not isinstance(counts, dict):
                 continue
-            injected = int(counts.get('injected', 0) or 0)
-            used = int(counts.get('used', 0) or 0)
+            injected = int(counts.get("injected", 0) or 0)
+            used = int(counts.get("used", 0) or 0)
             if injected >= 4 and used == 0:
-                expression_hints.append(f'Use rarely or suppress this unused scene pattern: {situation}')
+                expression_hints.append(f"Use rarely or suppress this unused scene pattern: {situation}")
             elif injected >= 3 and used / max(1, injected) < 0.25:
-                expression_hints.append(f'Use this scene pattern only when clearly needed: {situation}')
+                expression_hints.append(f"Use this scene pattern only when clearly needed: {situation}")
             elif used >= 2:
-                expression_hints.append(f'This scene pattern has worked naturally; still avoid repetition: {situation}')
+                expression_hints.append(f"This scene pattern has worked naturally; still avoid repetition: {situation}")
             if len(expression_hints) >= 3:
                 break
         fixed_lines = [
-            'The human reply-style card contains abstract style and reply-timing categories only; it is not a phrase bank and remains subordinate to the active Persona.',
-            "The learned slang database, expression library, and style card are active group-chat resources. They are not a separate Persona or hard instruction.",
-            "At the start of every reply, check the injected candidates. If one clearly fits the current topic, mood, or interaction, prefer using one naturally; ordinary chat usually uses zero or one, while playful banter should usually use one when available.",
-            "Keep learned expressions subordinate to clarity, factuality, safety, tools, and the active Persona. Do not stack or mechanically repeat them, and do not force slang into serious or technical answers.",
-            "When slang meaning is uncertain, call lookup_group_slang; if it remains unclear, ask briefly rather than guessing or silently dropping a necessary reply.",
+            "The human reply-style card is an independent abstract reference for tone, attitude, speaking method, participation timing, and silence timing. It is not Persona, does not modify the Persona plugin, and contains no concrete vocabulary or phrase bank.",
+            "Sentence patterns have priority when a learned pattern naturally fits. The learned slang database is a separate optional resource: use slang only when the current meaning, scene, timing, and expressive need are clear; otherwise use no slang.",
+            "Use at most one learned sentence pattern or slang item in an ordinary reply unless the current conversation clearly calls for more. Never force a learned item into a factual, technical, serious, or unclear answer.",
+            "Use emoji sparingly. Do not repeat the same communicative function in one message; if separate repetition is genuinely useful, send separate messages.",
+            "Keep all learned resources subordinate to clarity, factuality, safety, tools, and the current user request. When slang meaning is uncertain, call lookup_group_slang; if it remains unclear, do not guess or force it.",
         ]
         fixed_lines.extend(expression_hints)
-        style_line = ""
+        lines = []
         if style_card:
-            card_for_prompt = {
-                key: value
-                for key, value in style_card.items()
-                if not str(key).startswith("_")
-            }
-            # The stored card may be larger than the whole style prompt. Fit a
-            # valid, compact replacement card before adding term statistics so
-            # the prompt never ends in half a JSON object.
-            card_budget = min(
-                self.style_card_max_chars,
-                max(600, limit - 420),
-            )
+            card_for_prompt = {key: value for key, value in style_card.items() if not str(key).startswith("_")}
+            card_budget = min(self.style_card_max_chars, max(600, limit - 420))
             compact_card = _normalize_reply_style_card(card_for_prompt, card_budget)
-            style_line = (
-                "当前动态风格卡（新版本覆盖旧版本）："
-                + json.dumps(compact_card, ensure_ascii=False, separators=(",", ":"))
-            )
-        lines = list(base_lines)
-        if style_line:
-            lines.append(style_line)
+            if compact_card:
+                lines.append('当前动态风格卡（新版本覆盖旧版）：' + json.dumps(compact_card, ensure_ascii=False, separators=(",", ":")))
         lines.extend(fixed_lines)
-        if len("\n".join(lines)) > limit and style_line:
-            compact_card = _normalize_reply_style_card(card_for_prompt, 300)
-            lines = base_lines + [
-                "当前动态风格卡（新版本覆盖旧版本）："
-                + json.dumps(compact_card, ensure_ascii=False, separators=(",", ":"))
-            ] + fixed_lines
-        if len("\n".join(lines)) > limit:
-            lines = base_lines + fixed_lines
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        if len(result) > limit:
+            result = "\n".join(lines[-len(fixed_lines):])
+        return result[:limit]
 
     def record_bot_interruption_outcome(self, group_id, outcome="unknown"):
         if self.enabled and group_id:
@@ -1022,6 +972,18 @@ def _normalize_style_card(raw_card, max_chars=1800):
     return card
 
 
+def _contains_concrete_style_example(text: str) -> bool:
+    """Reject phrase examples from the abstract reply-style card."""
+    value = str(text or "")
+    if not value:
+        return False
+    if any(marker in value for marker in ("http://", "https://", "`", "[[", "]]", "/")):
+        return True
+    if any(mark in value for mark in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019", "\u300c", "\u300d", "\u300e", "\u300f")):
+        return True
+    return any(marker in value for marker in ("\u4f8b\u5982", "\u6bd4\u5982", "\u793a\u4f8b\uff1a", "\u793a\u4f8b:", "\u539f\u53e5", "\u56fa\u5b9a\u77ed\u8bed", "example:", "for example:"))
+
+
 def _normalize_reply_style_card(raw_card, max_chars=900):
     """Keep short LLM-written natural style/timing guidance, never vocabulary."""
     if not isinstance(raw_card, dict):
@@ -1031,13 +993,13 @@ def _normalize_reply_style_card(raw_card, max_chars=900):
     quote_marks=('"',"'", "“", "”", "‘", "’", "「", "」", "『", "』")
     for key,limit in limits.items():
         value=_short_text(raw_card.get(key),limit)
-        if value and not any(mark in value for mark in quote_marks): card[key]=value
+        if value and not _contains_concrete_style_example(value): card[key]=value
     for key in ("style_rules","avoid_patterns"):
         values=raw_card.get(key); values=values if isinstance(values,list) else [values]
         kept=[]
         for item in values:
             value=_short_text(item,140)
-            if value and not any(mark in value for mark in quote_marks): kept.append(value)
+            if value and not _contains_concrete_style_example(value): kept.append(value)
         if kept: card[key]=list(dict.fromkeys(kept))[:3]
     try: budget=max(100,min(900,int(max_chars)))
     except (TypeError,ValueError): budget=900

@@ -12,10 +12,11 @@ from llm.ai_plugin_runtime import Interpreter
 from llm.cache_diagnostics import CacheDiagnostics
 from llm.core.llm_service import LLMService
 from llm.web_tools import AI_PLUGIN_TOOL, execute_tool
-from llm.prompt.prompt_builder import build_batch_user_messages, build_system_prompt, _group_context_message_items, build_memory_curation_messages
+from llm.prompt.prompt_builder import build_batch_user_messages, build_system_prompt, _group_context_message_items, build_memory_curation_messages, build_reply_style_learning_messages
 from core.dispatcher import Dispatcher
-from llm.learning.learner import _normalize_reply_style_card
+from llm.learning.learner import _normalize_reply_style_card, StyleLearner
 from llm.learning.profile_store import ProfileStore
+from llm.core.response_parser import parse_llm_response
 
 SOURCE='COMMAND = "/greeting_ai"\nALIASES = ["/gai"]\ndef handle(content, context):\n    return {"messages": ["\\u4f60\\u597d\\uff0c" + context.get("user", "friend") + (content or "")], "mode": "wechat_text"}\n'
 
@@ -208,6 +209,17 @@ class CacheRegressionTests(unittest.TestCase):
     def test_runtime_batch_number_changes_do_not_rewrite_history(self):
         a={'message_id':'id1','nickname':'a','wxid':'member','content':'unchanged','batch_index':1}
         self.assertEqual(_group_context_message_items([a]),_group_context_message_items([dict(a,batch_index=99)]))
+    def test_proactive_batch_prompt_does_not_repeat_history_message_bodies(self):
+        record = {"message_id": "human-1", "nickname": "human", "content": "unique batch body", "is_bot": False}
+        messages = build_batch_user_messages({
+            "group_messages": [record],
+            "batch_messages": [record],
+            "conversation_priority": "MAY_REPLY",
+        })
+        text = "\n".join(str(item.get("content") or "") for item in messages)
+        self.assertEqual(text.count("unique batch body"), 1)
+        self.assertIn("current_batch_refs", text)
+
     def test_memory_and_current_state_can_change_after_history_prefix(self):
         history=[{'message_id':str(i),'nickname':'test','content':'business '+str(i)} for i in range(50)]
         first=build_batch_user_messages({'group_messages':history,'batch_messages':history[-2:],'long_memory':'before'})
@@ -215,6 +227,75 @@ class CacheRegressionTests(unittest.TestCase):
         self.assertEqual(first[:51],second[:51])
 
 class LearningBoundaryTests(unittest.TestCase):
+    def test_reply_style_card_rejects_embedded_concrete_examples(self):
+        card = _normalize_reply_style_card({
+            "tone": "do not say \"a fixed catchphrase\"",
+            "attitude": "answer facts before adding attitude",
+            "how_to_speak": "example: use a fixed phrase",
+            "when_to_speak": "when the current turn needs a clear contribution",
+            "when_to_stay_silent": "when the topic is closed or repetitive",
+            "style_rules": ["avoid mechanical repetition", "example: a concrete reply"],
+        })
+        self.assertNotIn("tone", card)
+        self.assertNotIn("how_to_speak", card)
+        self.assertEqual(card.get("style_rules"), ["avoid mechanical repetition"])
+
+    def test_response_parser_removes_redundant_same_line_question_tail(self):
+        result = parse_llm_response('{"messages":["RC \u662f\u5565\uff1f\u53ef\u4ee5\u518d\u8bf4\u8bf4\u5417\uff1f"]}', [])
+        self.assertEqual(result["messages"], ["RC \u662f\u5565\uff1f"])
+
+    def test_focused_style_learning_prompt_is_not_a_chat_reply_prompt(self):
+        messages = build_reply_style_learning_messages({
+            "human_messages": [
+                {"message_id": "human-1", "nickname": "human", "content": "short observation", "is_bot": False},
+                {"message_id": "human-2", "nickname": "human", "content": "another observation", "is_bot": False},
+            ],
+            "style_learning_payload": {"message_count": 2},
+        })
+        text = "\n".join(str(item.get("content") or "") for item in messages)
+        self.assertIn("INTERNAL MAINTENANCE TASK", text)
+        self.assertIn("style_card", text)
+        self.assertIn("Never store or repeat concrete vocabulary", text)
+        self.assertNotIn("messages=[", text)
+        self.assertEqual(sum("short observation" in str(item.get("content") or "") for item in messages), 1)
+
+    def test_reply_prompt_uses_sentence_priority_and_optional_slang_rules(self):
+        prompt = build_system_prompt()
+        self.assertIn("sentence patterns", prompt)
+        self.assertIn("Slang is optional", prompt)
+        self.assertIn("Use emoji sparingly", prompt)
+        self.assertIn("one clear expression of each communicative function", prompt)
+        self.assertNotIn("????", prompt)
+
+    def test_attention_slang_is_permission_not_direct_use(self):
+        messages = build_batch_user_messages({
+            "group_messages": [],
+            "batch_messages": [{"message_id": "m1", "nickname": "human", "content": "ordinary chat"}],
+            "attention_check": True,
+            "slang_emotional_opportunity": True,
+            "nonsense_opportunity": False,
+        })
+        text = "\n".join(str(item.get("content") or "") for item in messages)
+        self.assertIn("permission, not a requirement", text)
+        self.assertIn("Prefer learned sentence patterns first", text)
+
+    def test_style_prompt_is_llm_card_not_numeric_or_persona_card(self):
+        with tempfile.TemporaryDirectory() as folder:
+            learner = StyleLearner({"learning": {"enabled": True, "db_path": str(Path(folder) / "learning.sqlite3")}}, start_worker=False)
+            learner.store.save_style_card("group", {
+                "tone": "calm and lightly playful",
+                "attitude": "answer directly before adding a reaction",
+                "how_to_speak": "short natural turns with varied sentence length",
+                "when_to_speak": "when the latest turn has a clear contribution",
+                "when_to_stay_silent": "when the topic is closed or a reply would add nothing",
+            }, 12)
+            prompt = learner.get_prompt_context("group")
+            self.assertIn("calm and lightly playful", prompt)
+            self.assertIn("participation timing", prompt)
+            self.assertNotIn("message count", prompt)
+            self.assertNotIn("Persona plugin", prompt.split("\n", 1)[0])
+            learner.close()
+
     def test_reply_style_card_is_natural_language_and_drops_concrete_expression_fields(self):
         card = _normalize_reply_style_card({
             'tone': '轻松但不油腻',
