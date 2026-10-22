@@ -210,7 +210,7 @@ def _needs_plugin_reference(data: dict) -> bool:
         values.append(str(current.get("content") or ""))
     values.extend(str(item.get("content") or "") for item in (data.get("batch_messages") or []) if isinstance(item, dict))
     text = " ".join(values).casefold()
-    return any(marker in text for marker in ("ai plugin", "??", "????", "????", "manage_ai_plugin"))
+    return any(marker in text for marker in ("ai plugin", "plugin", "manage_ai_plugin"))
 
 
 def _needs_command_reference(data: dict) -> bool:
@@ -611,7 +611,7 @@ def _prompt_sections(data: dict, function_text: str, state_text: str = "") -> li
             dynamic_sections.append("命令参考（只在回答功能请求时使用；不得声称已执行）：\n" + help_text)
     runtime = ["(\"task module\": \"" + function_text + "\")"]
     if _needs_plugin_reference(data):
-        runtime.append(AI_PLUGIN_GUIDANCE)
+        runtime.append('(\"AI plugin module\": \"Use manage_ai_plugin only for an explicit plugin-development or plugin-management request; report only confirmed tool results.\")')
     volatile_runtime = ["当前状态：\n" + (state_text or "普通回复")]
     if lookup_fields:
         runtime.append(
