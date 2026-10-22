@@ -244,6 +244,25 @@ class LearningBoundaryTests(unittest.TestCase):
         result = parse_llm_response('{"messages":["RC \u662f\u5565\uff1f\u53ef\u4ee5\u518d\u8bf4\u8bf4\u5417\uff1f"]}', [])
         self.assertEqual(result["messages"], ["RC \u662f\u5565\uff1f"])
 
+    def test_normal_batch_does_not_inject_plugin_development_spec(self):
+        messages = build_batch_user_messages({
+            "group_messages": [],
+            "batch_messages": [{"message_id": "m1", "content": "ordinary chat"}],
+            "current_message": {"message_id": "m1", "content": "ordinary chat"},
+        })
+        text = "\n".join(str(item.get("content") or "") for item in messages)
+        self.assertNotIn("AI ????????????", text)
+        self.assertNotIn("AI PLUGIN DEVELOPMENT GUIDE", text)
+
+    def test_plugin_prompt_is_injected_only_for_explicit_plugin_request(self):
+        messages = build_batch_user_messages({
+            "group_messages": [],
+            "batch_messages": [{"message_id": "m1", "content": "please develop an AI plugin"}],
+            "current_message": {"message_id": "m1", "content": "please develop an AI plugin"},
+        })
+        text = "\n".join(str(item.get("content") or "") for item in messages)
+        self.assertIn("AI plugin module", text)
+
     def test_focused_style_learning_prompt_is_not_a_chat_reply_prompt(self):
         messages = build_reply_style_learning_messages({
             "human_messages": [
