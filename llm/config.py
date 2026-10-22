@@ -79,6 +79,7 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "extra_headers": {
                     str(k): str(v) for k, v in (item.get("extra_headers") or {}).items()
                 } if isinstance(item.get("extra_headers"), dict) else {},
+                "json_mode": bool(item.get("json_mode", True)),
                 # 协议缓存开关：anthropic 走 cache_control；responses 走 prompt_cache_key。
                 "cache": bool(item.get("cache", True)),
                 "prompt_cache_key": str(item.get("prompt_cache_key") or "").strip(),
