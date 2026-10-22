@@ -830,6 +830,40 @@ class _SimpleFunction:
         self.arguments = arguments
 
 
+def _collect_openai_stream(stream):
+    """Collect an OpenAI SSE stream into the provider's message shape."""
+    text_parts = []
+    tool_state = {}
+    usage = {}
+    for chunk in stream:
+        chunk_usage = getattr(chunk, "usage", None)
+        if chunk_usage is not None:
+            usage = chunk_usage
+        for choice in getattr(chunk, "choices", None) or []:
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            content = getattr(delta, "content", None)
+            if content:
+                text_parts.append(str(content))
+            for call in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(call, "index", 0) or 0)
+                state = tool_state.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                if getattr(call, "id", None):
+                    state["id"] = str(call.id)
+                function = getattr(call, "function", None)
+                if function is not None:
+                    if getattr(function, "name", None):
+                        state["name"] += str(function.name)
+                    if getattr(function, "arguments", None):
+                        state["arguments"] += str(function.arguments)
+    tool_calls = [
+        _SimpleToolCall(state["id"], state["name"], state["arguments"] or "{}")
+        for _, state in sorted(tool_state.items())
+    ]
+    return _SimpleMessage("".join(text_parts), tool_calls=tool_calls, usage=usage)
+
+
 class _SimpleToolCall:
     def __init__(self, id, name, arguments):
         self.id = id
@@ -1019,7 +1053,8 @@ class OpenAICompatibleClient:
                 kwargs["prompt_cache_key"] = cache_key
         if wire_tools:
             kwargs["tools"] = wire_tools
-            kwargs["tool_choice"] = "auto"
+            if not bool(self.entry.get("free_lane")):
+                kwargs["tool_choice"] = "auto"
         elif self.entry.get("json_mode", True):
             kwargs["response_format"] = {"type": "json_object"}
         if bool(self.entry.get("free_lane")):
@@ -1039,6 +1074,10 @@ class OpenAICompatibleClient:
             }
         if isinstance(thinking, dict):
             kwargs.update(thinking)
+        if bool(self.entry.get("free_lane")):
+            # The OpenCode free lane only accepts the streaming wire shape.
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
         if timeout is not None:
             kwargs["timeout"] = max(1.0, float(timeout))
 
@@ -1053,9 +1092,9 @@ class OpenAICompatibleClient:
         try:
             capture_prompt(kwargs["messages"], kind=_current_prompt_capture_kind(), metadata={"api": self.name, "model": self.model, "protocol": "chat", "tools_sha": tools_sha if bool(self.entry.get("cache", True)) else ""})
             response = self._client.chat.completions.create(**kwargs)
-            self._log_usage(response)
+            message = _collect_openai_stream(response) if bool(self.entry.get("free_lane")) else response.choices[0].message
+            self._log_usage(message if bool(self.entry.get("free_lane")) else response)
             diagnostics.usage(request_diag, getattr(self, "last_usage", {}) or {})
-            message = response.choices[0].message
             _log_visible_reasoning(self.name, "openai", message)
             return message
         except httpx.TimeoutException as exc:
