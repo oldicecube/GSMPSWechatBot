@@ -136,6 +136,39 @@ class PluginRepairTests(unittest.TestCase):
         self.assertFalse(self.manager.list_plugins()['plugins'])
 
 class CacheRegressionTests(unittest.TestCase):
+    def test_rate_limit_quarantines_shared_quota_group_in_same_request(self):
+        from llm.provider.deepseek_provider import DeepSeekProvider
+        calls = []
+        def limited(*args, **kwargs):
+            calls.append("limited")
+            error = RuntimeError("Error code: 429 - Too Many Requests")
+            error.status_code = 429
+            raise error
+        def same_group(*args, **kwargs):
+            calls.append("same-group")
+            return SimpleNamespace(content="should-not-run")
+        def other_group(*args, **kwargs):
+            calls.append("other-group")
+            return SimpleNamespace(content="ok")
+        endpoints = [
+            SimpleNamespace(name="grok-4.7", entry={"base_url":"https://uni-token.com/v1","api_key":"key-a"}, chat=limited, last_usage={}),
+            SimpleNamespace(name="grok-4.6", entry={"base_url":"https://uni-token.com/v1","api_key":"key-a"}, chat=same_group, last_usage={}),
+            SimpleNamespace(name="gpt", entry={"base_url":"https://other.invalid/v1","api_key":"key-b"}, chat=other_group, last_usage={}),
+        ]
+        provider = DeepSeekProvider.__new__(DeepSeekProvider)
+        provider._endpoints = endpoints
+        provider._lock = __import__('threading').RLock()
+        provider._failure_counts = [0, 0, 0]
+        provider._demoted_until = [0.0, 0.0, 0.0]
+        provider._failure_demote_threshold = 3
+        provider._failure_demote_seconds = 1800
+        provider._available_indices_in_priority_order = lambda: [0, 1, 2]
+        provider._record_success = lambda index: None
+        result = provider.send_chat([{"role":"user","content":"test"}], thinking={})
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(calls, ["limited", "other-group"])
+        self.assertGreater(provider._demoted_until[0], 0)
+
     def test_endpoint_reasoning_override_does_not_change_global_or_other_endpoints(self):
         from llm.provider.deepseek_provider import DeepSeekProvider
         global_thinking = {'reasoning_effort':'high'}

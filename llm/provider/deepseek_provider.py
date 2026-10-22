@@ -1792,15 +1792,32 @@ class DeepSeekProvider:
         entry = getattr(self._endpoints[index], "entry", {}) or {}
         return bool(entry.get("cache", True)) and getattr(self._endpoints[index], "cache_scope", "none") != "none"
 
-    def _record_failure(self, index):
-        """Record one consecutive failure and demote after the configured limit."""
+    @staticmethod
+    def _rate_limit_error(exc) -> bool:
+        status = getattr(exc, "status_code", None)
+        if status == 429 or str(status) == "429":
+            return True
+        text = f"{type(exc).__name__} {exc}".casefold()
+        return any(marker in text for marker in ("rate limit", "rate_limit", "too many requests", "http 429", "error code: 429"))
+
+    @staticmethod
+    def _quota_group(endpoint) -> tuple:
+        entry = getattr(endpoint, "entry", {}) or {}
+        return (
+            str(entry.get("base_url") or "").rstrip("/").casefold(),
+            str(entry.get("api_key") or "").strip(),
+        )
+
+    def _record_failure(self, index, *, immediate=False):
+        """Record failure; rate limits may quarantine a route immediately."""
         now = time.monotonic()
         with self._lock:
             self._failure_counts[index] += 1
             failures = self._failure_counts[index]
             already_demoted = self._demoted_until[index] > now
-            if failures >= self._failure_demote_threshold and not already_demoted:
-                self._demoted_until[index] = now + self._failure_demote_seconds
+            if (immediate or failures >= self._failure_demote_threshold) and not already_demoted:
+                duration = self._failure_demote_seconds if immediate else self._failure_demote_seconds
+                self._demoted_until[index] = now + duration
             demoted = self._demoted_until[index] > now
         if demoted and not already_demoted:
             print(
@@ -1834,8 +1851,12 @@ class DeepSeekProvider:
             raise PoolExhaustedError(["No configured LLM APIs are available"])
 
         errors = []
+        rate_limited_groups = set()
         for attempt, index in enumerate(indices, start=1):
             endpoint = self._endpoints[index]
+            quota_group = self._quota_group(endpoint)
+            if quota_group in rate_limited_groups:
+                continue
             try:
                 endpoint_tools = self._filter_tools_for_endpoint(endpoint, tools)
                 endpoint_messages = self._filter_messages_for_endpoint(endpoint, messages)
@@ -1875,13 +1896,17 @@ class DeepSeekProvider:
             except Exception as exc:
                 if _shutting_down():
                     raise ProviderShuttingDown("LLM provider is shutting down") from exc
-                failures, demoted = self._record_failure(index)
+                is_rate_limited = self._rate_limit_error(exc)
+                if is_rate_limited:
+                    rate_limited_groups.add(quota_group)
+                failures, demoted = self._record_failure(index, immediate=is_rate_limited)
                 errors.append(f"{endpoint.name}: {type(exc).__name__}: {exc}")
-                if attempt < len(indices):
-                    status = "tail priority for 30m" if demoted else f"failure {failures}/{self._failure_demote_threshold}"
+                remaining = [candidate for candidate in indices[attempt:] if self._quota_group(self._endpoints[candidate]) not in rate_limited_groups]
+                if remaining:
+                    status = "rate-limited; quota group quarantined" if is_rate_limited else ("tail priority for 30m" if demoted else f"failure {failures}/{self._failure_demote_threshold}")
                     print(
                         f"[LLM POOL] API {endpoint.name} failed ({status}); "
-                        f"trying {self._endpoints[indices[attempt]].name} in the same request",
+                        f"trying {self._endpoints[remaining[0]].name} in the same request",
                         flush=True,
                     )
 
