@@ -515,13 +515,17 @@ class LLMService:
 
     def _reply_memory_state_if_needed(self, group_id, text, *, allow=False):
         requested = bool(allow or self._memory_recall_requested(text))
+        state = self._get_group_memory_state(group_id)
         if not requested:
-            return self._empty_reply_memory_state(), False
-        return self._reply_memory_state_for_prompt(
-            group_id,
-            self._get_group_memory_state(group_id),
-            text,
-        ), True
+            # MaiBot-style context: always expose the bounded short-term fact
+            # window, while keeping medium/long memory on-demand to avoid prompt
+            # pollution in ordinary chat.
+            return {
+                "short_memory": str(state.get("short_memory") or ""),
+                "medium_memory": "",
+                "long_memory": "",
+            }, False
+        return self._reply_memory_state_for_prompt(group_id, state, text), True
 
     def _get_person_profile_context(self, group_id, wxid, query=""):
         if not self.long_term_memory or not self.long_term_memory.enabled:
