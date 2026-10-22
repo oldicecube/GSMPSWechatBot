@@ -183,6 +183,16 @@ class LongTermMemory:
                     ON memory_terms(term, memory_id);
                 CREATE INDEX IF NOT EXISTS idx_candidates_pending
                     ON memory_candidates(processed_at, created_at);
+                CREATE VIEW IF NOT EXISTS maibot_person_info AS
+                    SELECT MIN(id) AS id, subject_id AS person_id,
+                           subject_id AS person_name, '' AS platform,
+                           subject_id AS user_id, '' AS user_nickname,
+                           '' AS group_cardname, content AS memory_points,
+                           COUNT(*) AS know_counts, MIN(first_seen) AS first_known_time,
+                           MAX(last_seen) AS last_known_time
+                    FROM memories
+                    WHERE kind='person_fact' AND scope='person' AND status='active'
+                    GROUP BY subject_id, content;
                 """
             )
 

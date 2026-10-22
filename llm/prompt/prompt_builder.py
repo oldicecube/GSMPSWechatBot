@@ -195,6 +195,11 @@ def _group_context_message_items(messages, checkpoint_id="") -> list[dict]:
         rendered.append(message)
     return rendered
 
+def _visible_context_records(records):
+    """Keep real chat records while excluding internal/plugin-only events."""
+    return [item for item in (records or []) if isinstance(item, dict) and item.get("prompt_visible", True) is not False]
+
+
 def _json_block(value, empty="无") -> str:
     if isinstance(value, str):
         return value.strip() or empty
@@ -477,7 +482,7 @@ def _prompt_sections(data: dict, function_text: str, state_text: str = "") -> li
     # 聊天上下文拆成「稳定缓存前缀 + 动态尾部」：前缀取最早消息（固定 token 预算），
     # 跨请求字节稳定，使前缀缓存（anthropic cache_control / OpenAI 自动前缀缓存）
     # 能持续命中；新消息永远落在断点之后的尾部，不会破坏已缓存前缀。
-    group_messages = data.get("group_messages") or []
+    group_messages = _visible_context_records(data.get("group_messages") or [])
     history_prefix, history_tail = _split_group_history(group_messages, _cache_prefix_tokens(data))
     prefix_context = _group_context_text(history_prefix)
     tail_context = _group_context_text(history_tail) if history_tail else ""
@@ -879,7 +884,7 @@ def build_batch_user_prompt(data: dict) -> str:
     """Build the structured context for proactive-reply decisions."""
     data = data or {}
     batch_messages = data.get("batch_messages") or []
-    group_messages = data.get("group_messages") or []
+    group_messages = _visible_context_records(data.get("group_messages") or [])
     force_reply = bool(data.get("force_reply"))
     conversation_priority = str(data.get("conversation_priority") or "MAY_REPLY").upper()
     frequency_exempt = bool(data.get("frequency_exempt"))

@@ -662,6 +662,18 @@ class ProfileStore:
                     ON slang_terms(group_id, safe_to_use, confidence DESC, occurrence_count DESC);
                 CREATE INDEX IF NOT EXISTS idx_slang_scenario_prompt
                     ON slang_scenarios(group_id, status, safe_to_use, confidence DESC, occurrence_count DESC);
+                CREATE VIEW IF NOT EXISTS maibot_expressions AS
+                    SELECT rowid AS id, situation, pattern AS style,
+                           examples_json AS content_list, count, last_active_time,
+                           updated_at AS create_time, group_id AS session_id,
+                           0 AS checked, source AS modified_by
+                    FROM style_expressions WHERE status='active';
+                CREATE VIEW IF NOT EXISTS maibot_jargons AS
+                    SELECT rowid AS id, phrase AS content, meaning, examples_json,
+                           occurrence_count AS count, group_id AS session_id,
+                           safe_to_use AS is_jargon, status, last_seen,
+                           updated_at AS updated_timestamp
+                    FROM slang_scenarios;
                 """
             )
             for table, column, definition in (
