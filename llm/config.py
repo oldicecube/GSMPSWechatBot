@@ -70,6 +70,15 @@ def _normalize_api_entries(llm_config, default_timeout):
                 "supports_images": bool(
                     item.get("supports_images", item.get("image_enabled", False))
                 ),
+                "free_lane": bool(item.get("free_lane", False)),
+                "auth_mode": str(item.get("auth_mode") or "bearer").strip().lower(),
+                "user_agent": str(item.get("user_agent") or "").strip(),
+                "default_headers": {
+                    str(k): str(v) for k, v in (item.get("default_headers") or {}).items()
+                } if isinstance(item.get("default_headers"), dict) else {},
+                "extra_headers": {
+                    str(k): str(v) for k, v in (item.get("extra_headers") or {}).items()
+                } if isinstance(item.get("extra_headers"), dict) else {},
                 # 协议缓存开关：anthropic 走 cache_control；responses 走 prompt_cache_key。
                 "cache": bool(item.get("cache", True)),
                 "prompt_cache_key": str(item.get("prompt_cache_key") or "").strip(),
