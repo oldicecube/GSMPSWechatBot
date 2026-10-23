@@ -17,6 +17,9 @@
 - [x] Removed all compatibility punctuation splitting from the response parser. Sending now follows only the model's JSON `messages` array boundaries; strict single-message and multi-message parser cases both pass.
 - [x] Unified group-chat behavior policy: suppress near-message restatement, actively choose matching learned sentence/slang resources without waiting for an explicit trigger, vary participation modes, and ground surprises in current topic/relationship/persona context.
 - [x] Live 2026-10-24 Kilo acceptance after the policy rewrite: 12/12 HTTP 200; black slang was naturally reused, multi-point reply preserved 3 JSON message elements, direct/other-target/closed-topic/memory/person-profile behavior remained covered.
+- [x] Added distinct OTHER_BOT identity marking and safe other-Bot interaction guidance; external Bot outputs are excluded from human slang/style learning, while observed safe interaction patterns may be learned as `other_bot` behavior evidence.
+- [x] Added bounded retort guidance: direct insults may receive a proportionate reply only in a clearly playful relationship; visible irritation, stop requests, serious context, or rejection of the joke force ordinary language/apology/silence.
+- [x] Live 2026-10-24 other-Bot/retort acceptance: 14/14 Kilo HTTP requests returned 200; the model produced a two-message other-Bot interaction and a direct but non-escalatory retort, while other-target and closed-topic rounds stayed silent.
 
 - [x] 1. MaiBot 风格的适时 @ 与群成员身份验证
 - [x] 2. 自我认知、系统消息、prefix 与 Bot 回显来源隔离

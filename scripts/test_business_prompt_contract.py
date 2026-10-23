@@ -12,6 +12,8 @@ import queue
 from llm.core.response_parser import parse_proactive_response, parse_llm_response
 from llm.core.llm_service import LLMService
 from llm.conversation_pulse import ConversationPulse
+from llm.identity import annotate_records
+from llm.prompt.prompt_builder import _group_context_line
 from llm.learning import StyleLearner
 from llm.memory import LongTermMemory
 from llm.prompt.prompt_builder import (
@@ -78,6 +80,10 @@ class BusinessContract(unittest.TestCase):
         self.assertIn("Do not mechanically restate", text)
         self.assertIn("tease or lightly counter", text)
         self.assertIn("actively prefer using one of them", text)
+        self.assertIn("OTHER_BOT", text)
+        self.assertIn("proportionate playful retort", text)
+        self.assertIn("visible playful cue", text)
+        self.assertIn("real irritation", text)
 
     def test_parser_keeps_multiple_complete_messages(self):
         parsed = parse_proactive_response(
@@ -104,6 +110,17 @@ class BusinessContract(unittest.TestCase):
         ]
         self.assertTrue(service._recent_bot_used_reusable_phrase("g", [], "安心"))
         self.assertFalse(service._recent_bot_used_reusable_phrase("g", [], "回春"))
+
+    def test_external_bot_identity_is_distinct_from_bot_self(self):
+        records = annotate_records([{
+            "nickname": "taffy",
+            "content": "/joke",
+            "role": "user",
+            "wxid": "taffy-wxid",
+        }], {"learning": {"bot_names": ["taffy"]}, "identity": {"name": "GSMPS Bot"}})
+        self.assertFalse(records[0]["is_bot_self"])
+        self.assertTrue(records[0]["is_other_bot"])
+        self.assertIn("OTHER_BOT", _group_context_line(records[0]))
 
     def test_hidden_history_is_excluded_at_final_renderer(self):
         text = "\n".join(m["content"] for m in build_batch_user_messages({

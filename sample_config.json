@@ -87,7 +87,9 @@
     },
     "learning": {
       "enabled": true,
-      "bot_names": [],
+      "bot_names": [
+        "taffy"
+      ],
       "expression_prompt_max_items": 5,
       "expression_selector_enabled": false,
       "idle_content_shadow_mode": true,

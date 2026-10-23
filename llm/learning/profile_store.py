@@ -2823,7 +2823,7 @@ class ProfileStore:
                 if not source_ids or any(item not in valid for item in source_ids):
                     continue
                 actor_type = str(raw.get("actor_type") or "group_collective").strip().lower()
-                if actor_type not in {"other_user", "group_collective", "maibot_self"}:
+                if actor_type not in {"other_user", "group_collective", "other_bot", "maibot_self"}:
                     actor_type = "group_collective"
                 learning_type = str(raw.get("learning_type") or "observed_behavior").strip().lower()
                 if learning_type not in {"observed_behavior", "self_reflection"}:

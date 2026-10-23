@@ -37,10 +37,12 @@ GROUP = "acceptance-synthetic-group"
 
 
 def record(index, content, speaker="human-a", **fields):
-    return dict(message_id=f"s{index}", source_id=f"s{index}", nickname=speaker,
-                wxid=speaker, sender_wxid=speaker, content=content,
-                timestamp=1792700000 + index * 40, role="user", is_bot=False,
-                learnable=True, prompt_visible=True, source_kind="user_incoming", **fields)
+    result = dict(message_id=f"s{index}", source_id=f"s{index}", nickname=speaker,
+                  wxid=speaker, sender_wxid=speaker, content=content,
+                  timestamp=1792700000 + index * 40, role="user", is_bot=False,
+                  learnable=True, prompt_visible=True, source_kind="user_incoming")
+    result.update(fields)
+    return result
 
 
 EVIDENCE = [
@@ -219,6 +221,21 @@ class Acceptance:
             self.save()
 
             self.reply("direct_fact", record(30, "你算一下，7乘以8等于多少？", addressed_to="bot"))
+            other_bot = record(39, "/joke", "taffy", is_bot=True, is_other_bot=True, bot_identity="other")
+            self.reply(
+                "other_bot_interaction",
+                record(40, "taffy又开始复读了，感觉它还没我聪明。"),
+                [other_bot],
+                force=False,
+                style_profile=reloaded.get_prompt_context(GROUP),
+            )
+            self.reply(
+                "retort_after_insult",
+                record(41, "你这机器人怎么这么蠢？", addressed_to="bot"),
+                [other_bot],
+                force=True,
+                style_profile=reloaded.get_prompt_context(GROUP),
+            )
             self.reply("other_addressee", record(31, "你周末有空吗？", reply_to_other=True, directed_to_other=True,
                                                  reply_target="human-b"), force=False)
             self.reply("closed_topic", record(32, "好，问题都处理完了，先这样吧。"),

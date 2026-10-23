@@ -26,6 +26,15 @@ def bot_identity(config):
 
 def annotate_records(records, config):
     wxids, aliases = bot_identity(config)
+    learning = config.get("learning") if isinstance(config.get("learning"), dict) else {}
+    configured_other_bots = config.get("other_bot_names") or learning.get("bot_names") or []
+    if isinstance(configured_other_bots, str):
+        configured_other_bots = [configured_other_bots]
+    other_bot_names = {
+        str(value).strip().lstrip("@＠").casefold()
+        for value in configured_other_bots
+        if str(value).strip()
+    }
     output = []
     for raw in records or []:
         if not isinstance(raw, dict):
@@ -42,6 +51,13 @@ def annotate_records(records, config):
         # override a verified different wxid. Quoting/mentioning self isn't authorship.
         item["is_bot_self"] = self_authored
         item["is_bot"] = self_authored or truth(item.get("is_bot"))
+        item["is_other_bot"] = bool(
+            not self_authored
+            and (
+                truth(item.get("is_other_bot"))
+                or nickname.lstrip("@＠").casefold() in other_bot_names
+            )
+        )
         item["role"] = "assistant" if self_authored else ("user" if role == "assistant" else role or "user")
         item["bot_identity"] = "self" if self_authored else "other"
         if wxid:
