@@ -1,5 +1,16 @@
 # Wechatbot 开发任务 TODO
 
+## 2026-10-23 Business acceptance (in progress)
+
+- Encoding checkpoint: inspected prompt/provider/learner/memory Python and TODO files are strict UTF-8 without BOM. Use apply_patch for Unicode source; never pipe CJK source through PowerShell's default input encoding. Validate UTF-8/no U+FFFD and py_compile after changes. Recheck this rule at every acceptance checkpoint.
+- Preserve the user's uncommitted tests/ deletions. New opt-in synthetic acceptance scripts live under scripts/ and persist complete real API inputs, outputs, HTTP statuses, returned model IDs and production parser results under ignored output/.
+- [~] Re-run learning, persisted resource recall, person-memory native tool round-trip and speaking/silence decisions with valid Chinese input. Prior question-mark-corrupted inputs and string reply_to responses do not count as successful behavioral acceptance.
+- [x] Specify the integer-array reply_to contract in the batch prompt; keep strict parsing rather than guessing message ID mappings.
+- [x] Filter prompt_visible=false records in final structured history rendering, not just its intermediate placeholder.
+- [x] Align expression-learning prompt contract with storage validation: require current human source_ids and conservatively derive them only from literal visible evidence when the model omits the field.
+- [x] Re-run isolated live acceptance through Kilo: HTTP 200 transport, real style-card output, slang persistence/reuse, short-memory recall, person-profile tool lookup, reply/silence decisions, and integer-array reply_to parsing verified. Expression extraction was observed in a live round; the post-fix repeated rounds did not always choose a new expression, so no new expression persistence is claimed from those rounds.
+- [~] Keep observing provider cache telemetry across production traffic; isolated Kilo acceptance reached high reuse on repeated stable sections but mixed first-use/changed-tail requests remain provider-dependent.
+
 - [x] 1. MaiBot 风格的适时 @ 与群成员身份验证
 - [x] 2. 自我认知、系统消息、prefix 与 Bot 回显来源隔离
 - [x] 3. 引用来源人与引用正文的独立上下文

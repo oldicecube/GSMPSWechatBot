@@ -792,6 +792,66 @@ class LLMService:
         ))[:20]
         return dict(action, phrase=phrase, source_ids=source_ids, source_speakers=source_speakers), "ok"
 
+    def _ground_expression_action_in_cycle(self, action, records):
+        """Ground reusable sentence patterns in current human-authored records.
+
+        The store deliberately rejects expression writes without source_ids. The
+        model may omit that field, so derive it only when the proposed pattern,
+        situation, or an example is literally present in a current visible human
+        record. This keeps the adapter conservative instead of guessing sources.
+        """
+        if not isinstance(action, dict):
+            return None, "invalid_action"
+        operation = str(action.get("action") or "keep").strip().lower()
+        if operation == "keep":
+            return dict(action), "keep"
+        pattern = str(action.get("pattern") or "").strip()
+        situation = str(action.get("situation") or "").strip()
+        examples = action.get("examples") or []
+        if isinstance(examples, str):
+            examples = [examples]
+        evidence_terms = [pattern, situation]
+        evidence_terms.extend(str(item).strip() for item in examples if str(item).strip())
+        evidence_keys = [
+            self._slang_evidence_key(item)
+            for item in evidence_terms
+            if self._slang_evidence_key(item)
+        ]
+        if not evidence_keys:
+            return None, "missing_expression_evidence"
+        matches = []
+        for item in records or []:
+            if (
+                not isinstance(item, dict)
+                or item.get("is_bot")
+                or str(item.get("role") or "") == "assistant"
+                or item.get("prompt_visible") is False
+                or item.get("learnable") is False
+                or str(item.get("source_kind") or "").casefold()
+                in {"system_event", "bot_echo_external", "llm_error", "plugin_outbound"}
+            ):
+                continue
+            content_key = self._slang_evidence_key(item.get("content") or "")
+            source_id = str(item.get("source_id") or "").strip()
+            if source_id and content_key and any(term in content_key for term in evidence_keys):
+                matches.append(source_id)
+        matches = list(dict.fromkeys(matches))[:8]
+        requested = action.get("source_ids")
+        if isinstance(requested, str):
+            requested = [requested]
+        requested = list(dict.fromkeys(
+            str(item).strip() for item in (requested or []) if str(item).strip()
+        ))[:8]
+        if requested:
+            source_ids = [item for item in requested if item in matches]
+            if not source_ids:
+                return None, "expression_source_not_in_current_human_record"
+        elif matches:
+            source_ids = matches
+        else:
+            return None, "expression_not_in_current_human_record"
+        return dict(action, source_ids=source_ids), "ok"
+
     def _remove_slang_from_short_memory_actions(self, actions, phrases):
         cleaned = []
         removed = 0
@@ -2077,9 +2137,15 @@ class LLMService:
                 str(item.get("source_id") or "").strip() for item in prompt_records
                 if not item.get("is_bot") and str(item.get("role") or "") != "assistant"
             ]
+            grounded_expressions = []
+            if learning_enabled:
+                for raw_action in expression_actions or []:
+                    grounded, _ = self._ground_expression_action_in_cycle(raw_action, prompt_records)
+                    if grounded is not None:
+                        grounded_expressions.append(grounded)
             expression_applied = int(
                 self.style_learner.apply_expression_actions(
-                    group_id, expression_actions, valid_source_ids=user_source_ids
+                    group_id, grounded_expressions, valid_source_ids=user_source_ids
                 ) or 0
             ) if learning_enabled else 0
             user_source_ids = [
@@ -3159,11 +3225,16 @@ class LLMService:
                 if self.long_term_memory and self.long_term_memory.enabled
                 else {"updated": 0, "deleted": 0, "added": 0}
             )
+            grounded_expressions = []
+            for raw_action in expression_actions or []:
+                grounded, _ = self._ground_expression_action_in_cycle(raw_action, prompt_cycle_messages)
+                if grounded is not None:
+                    grounded_expressions.append(grounded)
             expression_applied = 0
             if self.style_learner:
                 expression_applied = int(
                     self.style_learner.apply_expression_actions(
-                        group_id, expression_actions or [], valid_source_ids=human_source_ids
+                        group_id, grounded_expressions, valid_source_ids=human_source_ids
                     ) or 0
                 )
             behavior_applied = 0
