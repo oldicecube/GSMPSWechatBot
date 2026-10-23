@@ -1074,6 +1074,9 @@ class OpenAICompatibleClient:
             }
         if isinstance(thinking, dict):
             kwargs.update(thinking)
+        configured_max_tokens = int(self.entry.get("max_tokens") or 0)
+        if configured_max_tokens > 0 and "max_tokens" not in kwargs and "max_completion_tokens" not in kwargs:
+            kwargs["max_tokens"] = configured_max_tokens
         if bool(self.entry.get("free_lane")):
             # The OpenCode free lane only accepts the streaming wire shape.
             kwargs["stream"] = True
