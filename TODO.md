@@ -15,6 +15,8 @@
 - [x] Reworked response-shape and participation policy instead of appending a single rule: proportionate detail, 2-3 complete messages for multi-function or multi-point replies, social-scene sentence/slang preference, two-turn reuse suppression, and earlier proactive admission.
 - [x] Live proportionate-chat acceptance: 12 Kilo rounds returned HTTP 200; the multi-point request returned 3 complete messages, the strict parser preserved those 3 JSON array elements without punctuation splitting, and learned slang was reused in the social round.
 - [x] Removed all compatibility punctuation splitting from the response parser. Sending now follows only the model's JSON `messages` array boundaries; strict single-message and multi-message parser cases both pass.
+- [x] Unified group-chat behavior policy: suppress near-message restatement, actively choose matching learned sentence/slang resources without waiting for an explicit trigger, vary participation modes, and ground surprises in current topic/relationship/persona context.
+- [x] Live 2026-10-24 Kilo acceptance after the policy rewrite: 12/12 HTTP 200; black slang was naturally reused, multi-point reply preserved 3 JSON message elements, direct/other-target/closed-topic/memory/person-profile behavior remained covered.
 
 - [x] 1. MaiBot 风格的适时 @ 与群成员身份验证
 - [x] 2. 自我认知、系统消息、prefix 与 Bot 回显来源隔离

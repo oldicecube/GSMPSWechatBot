@@ -74,7 +74,10 @@ class BusinessContract(unittest.TestCase):
         })
         self.assertIn("ultra-short teasing or playful reply", text)
         self.assertIn("previous two Bot replies", text)
-        self.assertIn("two or more independent points", text)
+        self.assertIn("multi-point answer", text)
+        self.assertIn("Do not mechanically restate", text)
+        self.assertIn("tease or lightly counter", text)
+        self.assertIn("actively prefer using one of them", text)
 
     def test_parser_keeps_multiple_complete_messages(self):
         parsed = parse_proactive_response(
