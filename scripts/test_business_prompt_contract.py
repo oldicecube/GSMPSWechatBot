@@ -74,6 +74,24 @@ class BusinessContract(unittest.TestCase):
         })
         self.assertIn("ultra-short teasing or playful reply", text)
         self.assertIn("previous two Bot replies", text)
+        self.assertIn("two or more independent points", text)
+
+    def test_parser_keeps_multiple_complete_messages(self):
+        parsed = parse_proactive_response(
+            '{"should_reply":true,"reply_to":[1],"messages":["先说状态。","再说处理结果。","最后收尾。"],"animation":null}',
+            [],
+        )
+        self.assertEqual(parsed["messages"], ["先说状态。", "再说处理结果。", "最后收尾。"])
+        parsed = parse_proactive_response(
+            '{"should_reply":true,"reply_to":[1],"messages":["任务甲这边没有明确的最新状态，先以群内记录为准。","部署问题也没有新的明确结论，等大家确认后再同步。","先同步到这里，有新进展再更新。"],"animation":null}',
+            [],
+        )
+        self.assertEqual(len(parsed["messages"]), 3)
+        parsed = parse_proactive_response(
+            '{"should_reply":true,"reply_to":[1],"messages":["任务甲没有最新状态，部署问题也没有新结论，等确认后再同步。"],"animation":null}',
+            [],
+        )
+        self.assertEqual(len(parsed["messages"]), 1)
 
     def test_recent_reusable_phrase_is_blocked_for_two_bot_turns(self):
         service = LLMService.__new__(LLMService)

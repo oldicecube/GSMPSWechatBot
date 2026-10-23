@@ -395,41 +395,6 @@ def _load_model_json(text, preferred_keys=None):
     return load_json_lenient(text, preferred_keys=preferred_keys)
 
 
-_CHAT_SPLIT_RE = re.compile(r"[,，;；。！？!?]+")
-
-
-def _split_chat_message(text):
-    """Turn a short multi-clause chat reply into independently sent turns.
-
-    This is deliberately conservative. Long factual or command-like replies,
-    URLs, and code remain one message; ordinary short acknowledgements joined
-    by commas become separate WeChat messages.
-    """
-    value = str(text or "").strip()
-    # Preserve one mention-bearing message as a single WeChat composition; the
-    # sendhook splits it into text/@-selection/text segments without splitting
-    # the final sent message into separate chat bubbles.
-    if "[[WX_AT:" in value:
-        return [value] if value else []
-    if len(value) <= 8 or "http://" in value or "https://" in value:
-        return [value] if value else []
-    if value.startswith("/") or "```" in value or re.search(r"(?<!\w)/[A-Za-z][\w-]*|\s--?[A-Za-z]", value):
-        return [value]
-    parts = [item.strip() for item in _CHAT_SPLIT_RE.split(value) if item.strip()]
-    if len(parts) < 2 or len(parts) > 4:
-        return [value]
-    if len(value) > 120 or max(len(item) for item in parts) > 36:
-        return [value]
-    return parts
-
-
-def _normalize_chat_messages(items):
-    result = []
-    for item in items:
-        result.extend(_split_chat_message(item))
-    return result
-
-
 _STYLE_SWITCH_FIELD_LIMITS = (
     ("scene", 40),
     ("situation", 160),
@@ -541,13 +506,15 @@ def parse_llm_response(text: str, emoji_list: list) -> dict:
         return build_raw_response(text, "LLM转发失败：animation字段格式错误")
 
     normalized_messages = []
+    # Message boundaries are authoritative: one JSON array element becomes one
+    # outgoing message. Never infer extra bubbles from punctuation or clauses.
     for item in data.get("messages", []):
         if not isinstance(item, str):
             return build_raw_response(text, "LLM转发失败：messages必须是字符串数组")
         content = _strip_batch_index_prefix(item)
         if content:
             content = _remove_redundant_function_repeat(content)
-            normalized_messages.extend(_split_chat_message(content))
+            normalized_messages.append(content)
     normalized_messages, dropped_count = _dedupe_messages(normalized_messages)
     if dropped_count:
         print(

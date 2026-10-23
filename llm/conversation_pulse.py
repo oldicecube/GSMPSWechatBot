@@ -203,7 +203,7 @@ class ConversationPulse:
             score -= 35
         score -= learned_penalty
 
-        cooldown = self._int("pulse_plan_cooldown_seconds", 35, 0, 3600)
+        cooldown = self._int("pulse_plan_cooldown_seconds", 18, 0, 3600)
         fragment_cooldown = self._int("fragmented_chat_min_interval_seconds", 240, 30, 86400)
         # The pulse is a provider-work scheduler, not the reply author.  In the
         # normal mode the LLM must see the batch and decide whether to speak;

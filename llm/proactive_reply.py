@@ -675,7 +675,7 @@ class ProactiveReplyManager:
             return False, "substantive"
         context = context if isinstance(context, dict) else {}
         try:
-            soft_cooldown = max(0.0, float(self.settings.get("reply_soft_cooldown_seconds", 18) or 18))
+            soft_cooldown = max(0.0, float(self.settings.get("reply_soft_cooldown_seconds", 12) or 12))
         except (TypeError, ValueError):
             soft_cooldown = 18.0
         last_reply = float(self.last_llm_reply_at.get(str(context.get("group") or "")) or 0.0)
@@ -713,10 +713,10 @@ class ProactiveReplyManager:
             return True
 
         now = self.clock()
-        cooldown = self._reply_penalty_float("reply_cooldown_seconds", 30.0, 0.0)
+        cooldown = self._reply_penalty_float("reply_cooldown_seconds", 18.0, 0.0)
         window = self._reply_penalty_float("reply_burst_window_seconds", 90.0, 1.0)
-        burst_limit = self._reply_penalty_int("reply_burst_limit", 2, 1)
-        penalty_seconds = self._reply_penalty_float("reply_penalty_seconds", 90.0, 0.0)
+        burst_limit = self._reply_penalty_int("reply_burst_limit", 3, 1)
+        penalty_seconds = self._reply_penalty_float("reply_penalty_seconds", 45.0, 0.0)
         with self.lock:
             events = [
                 float(item) for item in (self.llm_reply_events.get(group_key) or [])

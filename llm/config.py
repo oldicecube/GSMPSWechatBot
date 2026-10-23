@@ -376,7 +376,7 @@ def get_llm_config():
         "style_card_max_chars": max(300, min(900, _safe_int(learning.get("style_card_max_chars", 900), 900))),
         "expression_recall_scan_limit": max(200, _safe_int(learning.get("expression_recall_scan_limit", 2000), 2000)),
         "expression_pool_size": max(4, min(_safe_int(learning.get("expression_pool_size", 12), 12), 24)),
-        "expression_prompt_max_items": max(1, min(_safe_int(learning.get("expression_prompt_max_items", 3), 3), 8)),
+        "expression_prompt_max_items": max(1, min(_safe_int(learning.get("expression_prompt_max_items", 5), 5), 8)),
         "expression_prompt_max_chars": max(400, min(_safe_int(learning.get("expression_prompt_max_chars", 1400), 1400), 4000)),
         "expression_eval_enabled": bool(learning.get("expression_eval_enabled", False)),
         "expression_eval_max_items": max(1, min(_safe_int(learning.get("expression_eval_max_items", 6), 6), 12)),

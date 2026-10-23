@@ -232,6 +232,15 @@ class Acceptance:
             reuse["recalled_slang"] = slang
             reuse["recalled_expressions"] = expressions
             self.save()
+            self.reply(
+                "multi_point_reply",
+                record(38, "请告诉我任务甲现在的状态，再说说部署问题怎么样了，最后给群里一句收尾。", addressed_to_bot=True),
+                [record(37, "大家刚刚都在等结果。", "human-b")],
+                force=True,
+                slang_context=slang,
+                expression_list=expressions,
+                style_profile=reloaded.get_prompt_context(GROUP),
+            )
             low_info = record(37, "回春了就好，安心。", directed_to_bot=False)
             low_info_slang = reloaded.store.get_context_slang(GROUP, [low_info], max_chars=1500)
             low_info_expressions = reloaded.get_context_expressions(GROUP, [low_info])

@@ -12,16 +12,16 @@ DEFAULTS = {
     "density_gate_enabled": True,
     "density_low_messages_per_minute": 3,
     "density_high_messages_per_minute": 8,
-    "density_low_accumulate_messages": 4,
-    "density_low_accumulate_seconds": 600,
-    "density_low_cooldown_seconds": 600,
-    "density_medium_batch_messages": 3,
+    "density_low_accumulate_messages": 2,
+    "density_low_accumulate_seconds": 240,
+    "density_low_cooldown_seconds": 240,
+    "density_medium_batch_messages": 2,
     "density_high_batch_messages": 2,
     "density_burst_seconds": 120,
     "density_burst_idle_seconds": 60,
-    "density_request_interval_seconds": 20,
-    "density_burst_max_requests": 4,
-    "density_burst_cooldown_seconds": 180,
+    "density_request_interval_seconds": 12,
+    "density_burst_max_requests": 5,
+    "density_burst_cooldown_seconds": 90,
 }
 
 

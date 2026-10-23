@@ -12,6 +12,9 @@
 - [~] Keep observing provider cache telemetry across production traffic; isolated Kilo acceptance reached high reuse on repeated stable sections but mixed first-use/changed-tail requests remain provider-dependent.
 - [x] Make proactive low-information participation more positive: release single short social turns earlier, allow one optional ultra-short teasing reply from a matching sentence pattern or slang, and block the same reusable wording from the previous two Bot replies.
 - [x] Live acceptance after this change: 11 Kilo requests returned HTTP 200; a non-direct low-information round returned a short social reply with a recalled slang candidate, while direct factual, addressed-to-other, closed-topic, technical, memory, and person-profile rounds retained expected behavior.
+- [x] Reworked response-shape and participation policy instead of appending a single rule: proportionate detail, 2-3 complete messages for multi-function or multi-point replies, social-scene sentence/slang preference, two-turn reuse suppression, and earlier proactive admission.
+- [x] Live proportionate-chat acceptance: 12 Kilo rounds returned HTTP 200; the multi-point request returned 3 complete messages, the strict parser preserved those 3 JSON array elements without punctuation splitting, and learned slang was reused in the social round.
+- [x] Removed all compatibility punctuation splitting from the response parser. Sending now follows only the model's JSON `messages` array boundaries; strict single-message and multi-message parser cases both pass.
 
 - [x] 1. MaiBot 风格的适时 @ 与群成员身份验证
 - [x] 2. 自我认知、系统消息、prefix 与 Bot 回显来源隔离

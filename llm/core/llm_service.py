@@ -1304,7 +1304,7 @@ class LLMService:
         # expression on every turn.  Keep that behavior lightweight: suppress
         # only candidates whose actual wording was delivered very recently;
         # leave the library and learning data untouched.
-        recent_self = self._recent_self_messages_for_prompt(group_id, messages, limit=8)
+        recent_self = self._recent_self_messages_for_prompt(group_id, messages, limit=2)
         recent_text = [re.sub(r"\s+", "", str(item or "").casefold()) for item in recent_self]
         filtered = []
         for item in result or []:

@@ -88,7 +88,7 @@
     "learning": {
       "enabled": true,
       "bot_names": [],
-      "expression_prompt_max_items": 3,
+      "expression_prompt_max_items": 5,
       "expression_selector_enabled": false,
       "idle_content_shadow_mode": true,
       "idle_content_cache_max_age_seconds": 43200,
@@ -106,16 +106,16 @@
       "density_gate_enabled": true,
       "density_low_messages_per_minute": 3,
       "density_high_messages_per_minute": 8,
-      "density_low_accumulate_messages": 4,
-      "density_low_accumulate_seconds": 600,
-      "density_low_cooldown_seconds": 600,
-      "density_medium_batch_messages": 3,
+      "density_low_accumulate_messages": 2,
+      "density_low_accumulate_seconds": 240,
+      "density_low_cooldown_seconds": 240,
+      "density_medium_batch_messages": 2,
       "density_high_batch_messages": 2,
       "density_burst_seconds": 120,
       "density_burst_idle_seconds": 60,
-      "density_request_interval_seconds": 20,
-      "density_burst_max_requests": 4,
-      "density_burst_cooldown_seconds": 180
+      "density_request_interval_seconds": 12,
+      "density_burst_max_requests": 5,
+      "density_burst_cooldown_seconds": 90
     },
     "group_profiles": {
       "Your Target Group Name": {
@@ -125,13 +125,13 @@
           "style": "Natural, concise, and context-aware",
           "rules": [
             "Follow the surrounding context and group tone.",
-            "Prefer a short social reply in casual banter; answer clearly when a real question is asked."
+            "Match response length to the moment: casual banter may use one to three complete messages, while real questions should receive a sufficiently complete answer. Do not compress useful participation into a token acknowledgement."
           ]
         },
-        "reply_style": "Natural and concise; adapt to the group rather than using a fixed persona.",
+        "reply_style": "Natural and proportionate; adapt to the group, add a connected reaction or angle when useful, and avoid both canned verbosity and token replies.",
         "behavior_style": "Judge the whole context before replying. Do not rely only on a name or keyword.",
         "group_prompt": "Participate naturally in this group chat without changing the router message format.",
-        "private_prompt": "Reply naturally and briefly in private chat.",
+        "private_prompt": "Reply naturally and with proportionate detail in private chat.",
         "auto_reply": {
           "enabled": false,
           "reply_trigger_mode": "conversation_pulse",
