@@ -230,7 +230,7 @@ class ConversationPulse:
                     "model_led_low_signal_min_density", 2, 1, 60
                 )
                 low_signal_silence = self._int(
-                    "model_led_low_signal_silence_seconds", 90, 0, 86400
+                    "model_led_low_signal_silence_seconds", 45, 0, 86400
                 )
                 low_signal = bool(
                     not question
@@ -244,7 +244,7 @@ class ConversationPulse:
                 if low_signal:
                     enough_live_context = bool(
                         len(batch) >= 2
-                        or density >= min_low_signal_density
+                        or density >= max(1, min_low_signal_density - 1)
                         or seconds_since_bot_reply >= low_signal_silence
                     )
                     if enough_live_context and not cooldown_active:

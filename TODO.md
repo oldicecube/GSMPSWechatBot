@@ -10,6 +10,8 @@
 - [x] Align expression-learning prompt contract with storage validation: require current human source_ids and conservatively derive them only from literal visible evidence when the model omits the field.
 - [x] Re-run isolated live acceptance through Kilo: HTTP 200 transport, real style-card output, slang persistence/reuse, short-memory recall, person-profile tool lookup, reply/silence decisions, and integer-array reply_to parsing verified. Expression extraction was observed in a live round; the post-fix repeated rounds did not always choose a new expression, so no new expression persistence is claimed from those rounds.
 - [~] Keep observing provider cache telemetry across production traffic; isolated Kilo acceptance reached high reuse on repeated stable sections but mixed first-use/changed-tail requests remain provider-dependent.
+- [x] Make proactive low-information participation more positive: release single short social turns earlier, allow one optional ultra-short teasing reply from a matching sentence pattern or slang, and block the same reusable wording from the previous two Bot replies.
+- [x] Live acceptance after this change: 11 Kilo requests returned HTTP 200; a non-direct low-information round returned a short social reply with a recalled slang candidate, while direct factual, addressed-to-other, closed-topic, technical, memory, and person-profile rounds retained expected behavior.
 
 - [x] 1. MaiBot 风格的适时 @ 与群成员身份验证
 - [x] 2. 自我认知、系统消息、prefix 与 Bot 回显来源隔离

@@ -232,6 +232,21 @@ class Acceptance:
             reuse["recalled_slang"] = slang
             reuse["recalled_expressions"] = expressions
             self.save()
+            low_info = record(37, "回春了就好，安心。", directed_to_bot=False)
+            low_info_slang = reloaded.store.get_context_slang(GROUP, [low_info], max_chars=1500)
+            low_info_expressions = reloaded.get_context_expressions(GROUP, [low_info])
+            self.reply(
+                "low_info_banter",
+                low_info,
+                [record(33, "问题解决了，大家先歇会儿。", "human-b")],
+                force=False,
+                slang_context=low_info_slang,
+                expression_list=low_info_expressions,
+                style_profile=reloaded.get_prompt_context(GROUP),
+            )
+            self.report["rounds"][-1]["recalled_slang"] = low_info_slang
+            self.report["rounds"][-1]["recalled_expressions"] = low_info_expressions
+            self.save()
             self.reply("technical_no_forced_slang", record(34, "把十进制15转换成二进制。", directed_to_bot=True),
                        slang_context=slang, expression_list=expressions, style_profile=reloaded.get_prompt_context(GROUP))
             state, _ = service._reply_memory_state_if_needed(GROUP, "之前任务甲进展如何？")

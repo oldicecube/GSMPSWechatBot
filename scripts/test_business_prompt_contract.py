@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 import queue
 from llm.core.response_parser import parse_proactive_response, parse_llm_response
 from llm.core.llm_service import LLMService
+from llm.conversation_pulse import ConversationPulse
 from llm.learning import StyleLearner
 from llm.memory import LongTermMemory
 from llm.prompt.prompt_builder import (
@@ -56,6 +57,32 @@ class BusinessContract(unittest.TestCase):
         }, records)
         self.assertIsNone(rejected)
         self.assertEqual(reason, "expression_not_in_current_human_record")
+
+    def test_low_signal_social_turn_can_reach_llm_earlier(self):
+        pulse = ConversationPulse({"proactive_decision_by_llm": True})
+        now = pulse.clock()
+        batch = [{"content": "哈哈", "timestamp": now, "is_bot": False}]
+        decision, detail = pulse.decide("g", batch, group_messages=batch)
+        self.assertEqual(decision, "plan")
+        self.assertEqual(detail["mode"], "llm_judges_low_signal_context")
+
+    def test_prompt_allows_short_reusable_banter_without_repetition(self):
+        from llm.prompt.prompt_builder import build_batch_user_prompt
+        text = build_batch_user_prompt({
+            "batch_messages": [{"message_id": "b1", "content": "大家还在聊"}],
+            "group_messages": [{"message_id": "h1", "content": "大家还在聊"}],
+        })
+        self.assertIn("ultra-short teasing or playful reply", text)
+        self.assertIn("previous two Bot replies", text)
+
+    def test_recent_reusable_phrase_is_blocked_for_two_bot_turns(self):
+        service = LLMService.__new__(LLMService)
+        service._recent_self_messages_for_prompt = lambda group_id, messages, limit=2: [
+            "安心安心。",
+            "刚才也说安心了。",
+        ]
+        self.assertTrue(service._recent_bot_used_reusable_phrase("g", [], "安心"))
+        self.assertFalse(service._recent_bot_used_reusable_phrase("g", [], "回春"))
 
     def test_hidden_history_is_excluded_at_final_renderer(self):
         text = "\n".join(m["content"] for m in build_batch_user_messages({

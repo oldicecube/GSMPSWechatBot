@@ -963,6 +963,8 @@ def build_batch_user_prompt(data: dict) -> str:
         + "如需切换当前已选风格/黑话/句式，可附带可选的 style_switch 字段（scene/situation/slang_type/emotion 或 clear）；不切换就不要输出该字段。"
          + "Decide whether this batch needs a reply; a prefix is not required. Prefer learned sentence patterns first. Slang is optional: use it only when meaning, scene, timing, and a present expressive need are all clear; otherwise do not use slang. For factual questions, commands, safety matters, or unclear meanings, do not output slang-only. Output JSON: {\"should_reply\":true|false,\"reply_to\":[batch_index],\"messages\":[\"short reply\"],\"animation\":\"string or null\"}. Do not include batch indexes or [#N] in visible messages; emoji identifiers belong only in animation."
         + "Classify the batch before replying: for banter, memes, teasing, or an absurd premise, prefer a short group-member-style continuation or playful observation. For real questions or tasks, answer what is needed first, then add personality only if it fits. Do not sound like customer support, do not ask a routine follow-up, and do not revive an old topic without a fresh hook.\n"
+        + "For an ongoing low-information social moment where no concrete evaluation, fact, task, or decision is needed, you may be more proactive: one ultra-short teasing or playful reply made only from one currently matching learned sentence pattern or slang may be the entire reply. Prefer a sentence pattern before slang; this is optional, use at most one reusable item, and do not use it for direct questions, technical/factual tasks, commands, safety matters, unclear meanings, or ended topics.\n"
+        + "Before using learned wording, compare it with the latest delivered Bot messages. Do not use the same sentence pattern or slang as the immediately previous Bot reply; if it appeared in either of the previous two Bot replies, choose another contribution or stay silent.\n"
         "通常只回复一次；不需要回复时 should_reply=false、messages=[]、animation=null。"
     )
     data = dict(data)
@@ -1013,7 +1015,7 @@ def build_batch_user_messages(data: dict) -> list[dict]:
         "The local gate released this batch. Read the complete current context, decide whether to reply, "
         "and answer only the current active topic. Do not revive stale topics, invent facts, or call tools merely to create a reason to speak. "
         "Prefer learned sentence patterns first; prefer them before slang. Slang is permission, not a requirement; use it only when meaning, scene, timing, and expressive need are clear. "
-        "Use few emoji and avoid repeating one communicative function. "
+        "Use few emoji and avoid repeating one communicative function. In an ongoing low-information social moment, one optional ultra-short teasing reply made only from a matching learned sentence pattern or slang is allowed; prefer sentence patterns before slang, and never reuse the same item from the previous two Bot replies. "
         "Return JSON: should_reply is boolean; reply_to is an array of integer batch_index values from current_batch_refs (empty when silent), never a message ID or null; messages is an array of strings; animation is null or an available identifier. Do not put internal indexes or IDs in visible messages."
     )
     if force_reply:

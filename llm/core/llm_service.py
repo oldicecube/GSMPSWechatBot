@@ -933,7 +933,27 @@ class LLMService:
                 seen.add(key)
         except Exception:
             candidates = []
+        candidates = [
+            item for item in candidates
+            if isinstance(item, dict)
+            and not self._recent_bot_used_reusable_phrase(
+                group_id,
+                messages,
+                str(item.get("phrase") or item.get("normalized_phrase") or ""),
+            )
+        ]
         return json.dumps(candidates[:12], ensure_ascii=False, separators=(",", ":"))
+
+    def _recent_bot_used_reusable_phrase(self, group_id, messages, phrase, limit=2):
+        """Return whether a reusable phrase appeared in either recent Bot reply."""
+        compact_phrase = re.sub(r"\s+", "", str(phrase or "").casefold())
+        if len(compact_phrase) < 2:
+            return False
+        recent = self._recent_self_messages_for_prompt(group_id, messages, limit=max(1, int(limit or 2)))
+        return any(
+            compact_phrase in re.sub(r"\s+", "", str(text or "").casefold())
+            for text in recent
+        )
 
     @staticmethod
     def _estimate_group_history_item_tokens(item):
@@ -5193,6 +5213,15 @@ class LLMService:
                     )
                 except Exception:
                     slang_emotional_candidates = []
+                slang_emotional_candidates = [
+                    item for item in slang_emotional_candidates
+                    if isinstance(item, dict)
+                    and not self._recent_bot_used_reusable_phrase(
+                        group_id,
+                        prompt_group_messages or batch_messages,
+                        str(item.get("phrase") or item.get("normalized_phrase") or ""),
+                    )
+                ]
 
             idle_content_candidates = (
                 self._idle_content_candidates(group_id)
