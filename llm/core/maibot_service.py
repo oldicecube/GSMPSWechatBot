@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
@@ -108,7 +109,7 @@ class MaibotLLMService:
         if not self.config.get("enabled", True):
             return {"messages": [], "should_reply": False, "error": "LLM disabled"}
         try:
-            result = asyncio.run(self._get_client().generate_response(self._build_prompt(nickname, content, str(group_id or ""), message_context), session_id=str(session_id or group_id or "")))
+            result = self._generate_with_retry(self._build_prompt(nickname, content, str(group_id or ""), message_context), str(session_id or group_id or ""))
             text = str(getattr(result, "content", None) or getattr(result, "text", None) or self._extract_result_text(result) or "").strip()
             return {"messages": [{"type": "text", "content": text}] if text else [], "should_reply": bool(text), "animation": None, "maibot_model": getattr(result, "model_name", "")}
         except Exception as exc:
@@ -127,8 +128,20 @@ class MaibotLLMService:
         from src.services.llm_service import LLMServiceClient
 
         client = LLMServiceClient(task_name=task_name, request_type="wechat.auxiliary")
-        result = asyncio.run(client.generate_response(prompt, session_id="wechat-auxiliary"))
+        result = self._generate_with_retry(prompt, "wechat-auxiliary", client=client)
         return SimpleNamespace(content=self._extract_result_text(result))
+
+    def _generate_with_retry(self, prompt: str, session_id: str, *, client=None):
+        client = client or self._get_client()
+        last_error = None
+        for attempt in range(3):
+            try:
+                return asyncio.run(client.generate_response(prompt, session_id=session_id))
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        raise last_error
 
     def _provider_call_low_priority(self, messages, **kwargs: Any):
         return self._provider_call(messages, task_name="utils", **kwargs)

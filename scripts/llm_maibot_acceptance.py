@@ -29,7 +29,7 @@ def main() -> None:
     emoji_files = len(list((MAIBOT / "data" / "emoji").glob("*")))
     assert emoji_count == emoji_files == 16, (emoji_count, emoji_files)
     changed = os.popen(f'git -C "{ROOT}" diff 5258467 --name-only').read().splitlines()
-    allowed = {"TODO_LLM_MIGRATION.md", "llm/core/__init__.py", "llm/core/maibot_service.py", "plugins/emoji.py", "plugins/jane.py"}
+    allowed = {"TODO_LLM_MIGRATION.md", "llm/core/__init__.py", "llm/core/maibot_service.py", "plugins/emoji.py", "plugins/jane.py", "scripts/llm_maibot_acceptance.py", "docs/llm-migration-acceptance.json"}
     assert set(changed) <= allowed, changed
     report = {"status": "passed", "model": result.get("maibot_model"), "reply": result["messages"][0]["content"], "emoji_count": emoji_count, "external_files_changed": changed}
     out = ROOT / "docs" / "llm-migration-acceptance.json"
