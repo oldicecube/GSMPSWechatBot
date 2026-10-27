@@ -12,11 +12,13 @@
 ## Plan
 
 - [ ] Verify remote `dev` SHA when credentials/network are available; record it without modifying source history until verified.
-- [x] Add a local MaiBot core runtime import boundary and an explicit WeChat message adapter: `llm/core/maibot_service.py`.
+- [x] Vendor MaiBot's `src/` core, native prompts/assets/locales and native config schemas into this repository; runtime no longer imports `D:\\maibot`.
+- [x] Add an embedded native MaiBot/MaiSaka runtime and keep the WeChat ingress/egress conversion at the adapter boundary.
 - [x] Define an old-dispatcher → MaiBot prompt/session mapping.
 - [x] Define MaiBot response text → old sender result mapping, preserving the existing sender/HTTP payload path.
 - [x] Replace the dispatcher-visible `LLMService` import with the MaiBot adapter.
-- [x] Map old persona, group/private prompts and reply style into MaiBot native config/context; old memory/learning stores remain outside the bridge and MaiBot owns new persistence.
+- [x] Generate `config/bot_config.toml` and `config/model_config.toml` from the legacy `config.json` LLM settings before importing native MaiBot config.
+- [x] Route native MaiSaka chat history, memory automation, expression/jargon learning, context compaction, planner/replyer policy and built-in tools through the embedded runtime.
 - [x] Route auxiliary plugin LLM calls (`jane`, `emoji`, `lottery`, `fx`, `persona`) through the MaiBot-backed service facade; no plugin imports `DeepSeekProvider` directly.
 - [x] Preserve all non-LLM plugins, `auto/`, services, data stores, RCON and media paths; source diff is limited to the LLM facade, dependent auxiliary plugins, TODO and acceptance report.
 - [x] Add a send-independent MaiBot API contract test: prompt `请只回复OK` returned `OK` through `MaibotLLMService` using the configured Kilo model.
@@ -32,3 +34,4 @@
 
 - Remote `origin/dev` SHA cannot be confirmed until GitHub authentication/network access works.
 - Real WeChat receive/send verification requires a running WeFlow account; outbound tests remain intercepted until explicitly changed.
+- External model availability remains a deployment concern; the local native runtime was observed reaching MaiSaka planner and model selection, but configured free endpoints returned HTTP 429/503 during the test window.

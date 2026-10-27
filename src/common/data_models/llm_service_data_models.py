@@ -1,0 +1,300 @@
+"""LLM 服务层与编排层共享数据模型。
+
+该模块集中定义 LLM 服务层与底层编排器共同使用的请求、选项与结果对象，
+用于替代散落在各层之间的复杂元组返回值。
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, TypeAlias
+
+import asyncio
+import uuid
+
+from src.common.data_models import BaseDataModel
+from src.llm_models.payload_content.context_item import (
+    ContextItem,
+    ContextToolCall,
+    ModelOutputItem,
+    ProviderActivityItem,
+    build_portable_output_items,
+    get_response_reasoning,
+    get_response_text,
+    get_response_tool_calls,
+)
+from src.llm_models.model_client.base_client import GenerationAttempt, GenerationTrace, ResponseRequest
+from src.llm_models.payload_content.native_tool import NativeToolCallSummary
+from src.llm_models.payload_content.resp_format import RespFormat
+from src.llm_models.payload_content.tool_option import ToolCall, ToolDefinitionInput
+
+PromptMessage: TypeAlias = Dict[str, Any]
+"""统一的原始提示消息结构。"""
+
+PromptInput: TypeAlias = str | List[PromptMessage]
+"""统一的提示输入类型。"""
+
+ContextFactory: TypeAlias = Callable[..., List[ContextItem] | Awaitable[List[ContextItem]]]
+"""统一的 Context Item 工厂类型。"""
+
+
+@dataclass(slots=True)
+class LLMServiceRequest(BaseDataModel):
+    """LLM 服务层统一请求对象。"""
+
+    task_name: str
+    request_type: str
+    session_id: str = ""
+    prompt: PromptInput | None = None
+    context_factory: ContextFactory | None = None
+    model_name: str | None = None
+    tool_options: List[ToolDefinitionInput] | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    response_format: RespFormat | None = None
+    interrupt_flag: asyncio.Event | None = None
+
+    def __post_init__(self) -> None:
+        """校验请求对象的必要字段。
+
+        Raises:
+            ValueError: 当 `task_name` 为空，或 `prompt` 与 `context_factory`
+                的组合非法时抛出。
+        """
+        self.task_name = self.task_name.strip()
+        self.session_id = str(self.session_id or "").strip()
+        if not self.task_name:
+            raise ValueError("`task_name` 不能为空")
+        has_prompt = self.prompt is not None
+        has_context_factory = self.context_factory is not None
+        if has_prompt == has_context_factory:
+            raise ValueError("`prompt` 与 `context_factory` 必须且只能提供一个")
+
+
+@dataclass(slots=True)
+class LLMResponseResult(BaseDataModel):
+    """单次 LLM 响应结果。"""
+
+    output_items: tuple[ModelOutputItem, ...] = ()
+    generation_trace: GenerationTrace | None = None
+    generation_attempts: tuple[GenerationAttempt, ...] = ()
+    model_name: str = field(default_factory=str)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+    prompt_cache_reported: bool = False
+    provider_response: Dict[str, Any] | None = field(default=None, repr=False)
+    wire_protocol: str = ""
+    request_wire_payload: Any = field(default=None, repr=False)
+    request_snapshot: ResponseRequest | None = field(default=None, repr=False)
+
+    @property
+    def response(self) -> str:
+        """只读派生模型可见正文。"""
+
+        return get_response_text(self.output_items)
+
+    @property
+    def reasoning(self) -> str:
+        """只读派生可展示 reasoning。"""
+
+        return get_response_reasoning(self.output_items)
+
+    @property
+    def tool_calls(self) -> List[ToolCall] | None:
+        """只读派生通用工具调用。"""
+
+        context_tool_calls = get_response_tool_calls(self.output_items)
+        if not context_tool_calls:
+            return None
+        return [
+            ToolCall(
+                call_id=tool_call.call_id,
+                func_name=tool_call.func_name,
+                args=tool_call.materialize_args(),
+                extra_content=tool_call.materialize_extra_content(),
+            )
+            for tool_call in context_tool_calls
+        ]
+
+    @property
+    def native_tool_calls(self) -> List[NativeToolCallSummary]:
+        """只读派生 Provider 原生活动摘要。"""
+
+        return [
+            NativeToolCallSummary(
+                tool_type=item.provider_type,
+                call_id=item.call_id,
+                status=item.status,
+                action_type=item.action_type,
+                details=list(item.details),
+                source_count=item.source_count,
+            )
+            for item in self.output_items
+            if isinstance(item, ProviderActivityItem)
+        ]
+
+    @classmethod
+    def from_portable_output(
+        cls,
+        *,
+        response: str = "",
+        reasoning: str = "",
+        tool_calls: List[ToolCall] | None = None,
+        **kwargs: Any,
+    ) -> "LLMResponseResult":
+        """供无原生 Items 的边界结果创建规范化输出。"""
+
+        context_tool_calls = [
+            ContextToolCall.create(
+                call_id=tool_call.call_id,
+                func_name=tool_call.func_name,
+                args=tool_call.args,
+                extra_content=tool_call.extra_content,
+            )
+            for tool_call in (tool_calls or [])
+        ]
+        logical_turn_id = uuid.uuid4().hex
+        portable_items = build_portable_output_items(
+            content=response,
+            reasoning=reasoning,
+            tool_calls=context_tool_calls,
+            logical_turn_id=logical_turn_id,
+        )
+        if not portable_items:
+            return cls(**kwargs)
+
+        return cls(
+            output_items=portable_items,
+            **kwargs,
+        )
+
+
+@dataclass(slots=True)
+class LLMServiceResult(BaseDataModel):
+    """LLM 服务层统一响应对象。"""
+
+    success: bool = False
+    completion: LLMResponseResult = field(default_factory=LLMResponseResult)
+    error: str | None = None
+
+    @classmethod
+    def from_response_result(cls, completion: LLMResponseResult) -> "LLMServiceResult":
+        """从单次 LLM 响应结果构建服务响应。
+
+        Args:
+            completion: 单次 LLM 响应结果。
+
+        Returns:
+            LLMServiceResult: 标记为成功的服务响应对象。
+        """
+        return cls(
+            success=True,
+            completion=completion,
+            error=None,
+        )
+
+    @classmethod
+    def from_error(cls, error_message: str, error_detail: str | None = None) -> "LLMServiceResult":
+        """构建失败的服务响应对象。
+
+        Args:
+            error_message: 对上层展示的错误消息。
+            error_detail: 底层错误详情。
+
+        Returns:
+            LLMServiceResult: 标记为失败的服务响应对象。
+        """
+        return cls(
+            success=False,
+            completion=LLMResponseResult.from_portable_output(response=error_message),
+            error=error_detail or error_message,
+        )
+
+    def to_capability_payload(self) -> Dict[str, Any]:
+        """转换为插件能力层可直接返回的结构。
+
+        Returns:
+            Dict[str, Any]: 标准化后的能力返回值。
+        """
+        payload: Dict[str, Any] = {
+            "success": self.success,
+            "response": self.completion.response,
+            "reasoning": self.completion.reasoning,
+            "model_name": self.completion.model_name,
+            "prompt_tokens": self.completion.prompt_tokens,
+            "completion_tokens": self.completion.completion_tokens,
+            "total_tokens": self.completion.total_tokens,
+            "prompt_cache_hit_tokens": self.completion.prompt_cache_hit_tokens,
+            "prompt_cache_miss_tokens": self.completion.prompt_cache_miss_tokens,
+        }
+        if self.completion.tool_calls is not None:
+            payload["tool_calls"] = [
+                {
+                    "id": tool_call.call_id,
+                    "function": {
+                        "name": tool_call.func_name,
+                        "arguments": tool_call.args or {},
+                    },
+                    **({"extra_content": tool_call.extra_content} if tool_call.extra_content else {}),
+                }
+                for tool_call in self.completion.tool_calls
+            ]
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(slots=True)
+class LLMGenerationOptions(BaseDataModel):
+    """LLM 文本生成选项。"""
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    model_name: str | None = None
+    tool_options: List[ToolDefinitionInput] | None = None
+    response_format: RespFormat | None = None
+    interrupt_flag: asyncio.Event | None = None
+    raise_when_empty: bool = True
+    force_stream_mode: bool = False
+
+
+@dataclass(slots=True)
+class LLMImageOptions(BaseDataModel):
+    """LLM 图像理解选项。"""
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    interrupt_flag: asyncio.Event | None = None
+
+
+@dataclass(slots=True)
+class LLMAudioTranscriptionResult(BaseDataModel):
+    """LLM 音频转写结果。"""
+
+    text: str | None = None
+
+
+@dataclass(slots=True)
+class LLMEmbeddingResult(BaseDataModel):
+    """LLM 向量生成结果。"""
+
+    embedding: List[float] = field(default_factory=list)
+    model_name: str = field(default_factory=str)
+    model_identifier: str = field(default_factory=str)
+    api_provider: str = field(default_factory=str)
+    request_protocol_hash: str = field(default_factory=str)
+
+
+__all__ = [
+    "LLMAudioTranscriptionResult",
+    "LLMEmbeddingResult",
+    "LLMGenerationOptions",
+    "LLMImageOptions",
+    "LLMResponseResult",
+    "LLMServiceRequest",
+    "LLMServiceResult",
+    "ContextFactory",
+    "PromptInput",
+    "PromptMessage",
+]

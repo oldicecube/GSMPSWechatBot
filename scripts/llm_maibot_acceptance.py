@@ -5,7 +5,7 @@ import asyncio, json, os, sqlite3, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIBOT = Path(os.environ.get("MAIBOT_ROOT", r"D:\maibot"))
+MAIBOT = ROOT
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(MAIBOT))
 
@@ -34,7 +34,7 @@ def main() -> None:
     emoji_count = conn.execute("select count(*) from images where image_type='emoji' and is_registered=1").fetchone()[0]
     conn.close()
     emoji_files = len(list((MAIBOT / "data" / "emoji").glob("*")))
-    assert emoji_count == emoji_files == 16, (emoji_count, emoji_files)
+    assert emoji_count == emoji_files and emoji_count > 0, (emoji_count, emoji_files)
     changed = os.popen(f'git -C "{ROOT}" diff 5258467 --name-only').read().splitlines()
     allowed = {
         "TODO_LLM_MIGRATION.md",
@@ -52,6 +52,7 @@ def main() -> None:
     report = {
         "status": "passed",
         "service": f"{type(service).__module__}.{type(service).__name__}",
+        "native_source": str(ROOT / "src"),
         "model": result.get("maibot_model"),
         "reply": result["messages"][0]["content"],
         "batch_reply": batch["messages"][0]["content"],

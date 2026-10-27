@@ -1,0 +1,3 @@
+# Copied legacy media/font resources are local runtime inputs for migrated plugins.
+*
+!.gitignore

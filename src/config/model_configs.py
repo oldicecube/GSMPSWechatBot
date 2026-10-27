@@ -1,0 +1,546 @@
+from enum import Enum
+from typing import Any, List, Literal, Tuple
+
+from src.common.i18n import t
+from src.web_search.config import WebSearchTaskConfig
+
+from .config_base import ConfigBase, Field
+
+
+class OpenAICompatibleAuthType(str, Enum):
+    """OpenAI 兼容接口的鉴权方式。"""
+
+    BEARER = "bearer"
+    HEADER = "header"
+    QUERY = "query"
+    NONE = "none"
+
+
+class ReasoningParseMode(str, Enum):
+    """推理内容解析策略。"""
+
+    AUTO = "auto"
+    NATIVE = "native"
+    THINK_TAG = "think_tag"
+    NONE = "none"
+
+
+class ToolArgumentParseMode(str, Enum):
+    """工具调用参数的解析策略。"""
+
+    AUTO = "auto"
+    STRICT = "strict"
+    REPAIR = "repair"
+    DOUBLE_DECODE = "double_decode"
+
+
+class APIProvider(ConfigBase):
+    """API提供商配置类"""
+
+    name: str = Field(
+        default="",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """API服务商名称 (可随意命名, 在models的api-provider中需使用这个命名)"""
+
+    base_url: str = Field(
+        default="",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """API服务商的BaseURL"""
+
+    api_key: str = Field(
+        default_factory=str,
+        repr=False,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """API密钥。对于不需要鉴权的兼容端点，可将 `auth_type` 设为 `none`。"""
+
+    client_type: str = Field(
+        default="openai",
+        json_schema_extra={
+            "x-widget": "select",
+        },
+    )
+    """客户端类型。内置支持 openai、openai_responses 和 gemini，也可由插件扩展。"""
+
+    auth_type: str = Field(
+        default=OpenAICompatibleAuthType.BEARER.value,
+        json_schema_extra={
+            "x-widget": "select",
+        },
+    )
+    """OpenAI 兼容接口的鉴权方式。可选值：`bearer`、`header`、`query`、`none`。"""
+
+    auth_header_name: str = Field(
+        default="Authorization",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """当 `auth_type` 为 `header` 时使用的请求头名称。"""
+
+    auth_header_prefix: str = Field(
+        default="Bearer",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """当 `auth_type` 为 `header` 时使用的请求头前缀。留空表示直接发送原始密钥。"""
+
+    auth_query_name: str = Field(
+        default="api_key",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """当 `auth_type` 为 `query` 时使用的查询参数名称。"""
+
+    default_headers: dict[str, str] = Field(
+        default_factory=dict,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """所有请求默认附带的 HTTP Header。"""
+
+    default_query: dict[str, str] = Field(
+        default_factory=dict,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """所有请求默认附带的查询参数。"""
+
+    organization: str | None = Field(
+        default=None,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """OpenAI 官方接口可选的 `organization`。"""
+
+    project: str | None = Field(
+        default=None,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """OpenAI 官方接口可选的 `project`。"""
+
+    model_list_endpoint: str = Field(
+        default="/models",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """模型列表端点路径。适用于 OpenAI 兼容接口的探测与管理。"""
+
+    reasoning_parse_mode: str = Field(
+        default=ReasoningParseMode.AUTO.value,
+        json_schema_extra={
+            "x-widget": "select",
+        },
+    )
+    """推理内容解析模式。可选值：`auto`、`native`、`think_tag`、`none`。"""
+
+    tool_argument_parse_mode: str = Field(
+        default=ToolArgumentParseMode.AUTO.value,
+        json_schema_extra={
+            "x-widget": "select",
+        },
+    )
+    """工具参数解析模式。可选值：`auto`、`strict`、`repair`、`double_decode`。"""
+
+    max_retry: int = Field(
+        default=3,
+        ge=0,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """最大尝试次数 (单个模型API调用失败时, 含首次请求在内最多发送的请求总数, 设为 0 或 1 表示不重试)"""
+
+    timeout: int = Field(
+        default=120,
+        ge=1,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 1,
+        },
+    )
+    """API调用的超时时长 (超过这个时长, 本次请求将被视为"请求超时", 单位: 秒)"""
+
+    retry_interval: int = Field(
+        default=4,
+        ge=1,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 1,
+        },
+    )
+    """重试间隔 (如果API调用失败, 重试的间隔时间, 单位: 秒)"""
+
+    def model_post_init(self, context: Any = None) -> None:
+        """执行 API 提供商配置的后置校验。
+
+        Args:
+            context: Pydantic 传入的上下文对象。
+
+        Raises:
+            ValueError: 当配置项缺失或组合不合法时抛出。
+        """
+        if self.auth_type != OpenAICompatibleAuthType.NONE and not self.api_key:
+            raise ValueError(t("config.api_key_empty"))
+        if not self.base_url and self.client_type != "gemini":  # TODO: 允许gemini使用base_url
+            raise ValueError(t("config.api_base_url_empty"))
+        if not self.name:
+            raise ValueError(t("config.api_provider_name_empty"))
+        if self.auth_type == OpenAICompatibleAuthType.HEADER and not self.auth_header_name.strip():
+            raise ValueError("当 auth_type=header 时，auth_header_name 不能为空")
+        if self.auth_type == OpenAICompatibleAuthType.QUERY and not self.auth_query_name.strip():
+            raise ValueError("当 auth_type=query 时，auth_query_name 不能为空")
+        super().model_post_init(context)
+
+
+class ModelPricePeriod(ConfigBase):
+    """每天重复的模型价格时段。"""
+
+    start_time: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    """开始时间，服务器本地时间 HH:MM，包含该时刻。"""
+
+    end_time: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    """结束时间，服务器本地时间 HH:MM，不包含该时刻；早于开始时间表示跨午夜。"""
+
+    price_in: float = Field(ge=0, allow_inf_nan=False)
+    """该时段的普通输入价格，单位：元 / M token。"""
+
+    price_out: float = Field(ge=0, allow_inf_nan=False)
+    """该时段的输出价格，单位：元 / M token。"""
+
+    cache_price_in: float = Field(ge=0, allow_inf_nan=False)
+    """该时段的缓存命中输入价格，单位：元 / M token；0 表示缓存命中免费，未命中部分按 price_in 计费。"""
+
+    def model_post_init(self, context: Any = None) -> None:
+        if self.start_time == self.end_time:
+            raise ValueError("价格时段的开始时间和结束时间不能相同")
+        super().model_post_init(context)
+
+
+class ModelInfo(ConfigBase):
+    """单个模型信息配置类"""
+
+    _validate_any: bool = False
+    suppress_any_warning: bool = True
+
+    model_type: Literal["llm", "embedding", "image_embedding"] = Field(
+        json_schema_extra={"x-widget": "select"},
+    )
+    """模型类型：LLM、文本嵌入或图片嵌入；必填，旧配置由版本升级钩子一次性标注。"""
+
+    model_identifier: str = Field(
+        default="",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """模型标识符 (API服务商提供的模型标识符)"""
+
+    name: str = Field(
+        default="",
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """模型名称 (可随意命名, 在models中需使用这个命名)"""
+
+    api_provider: str = Field(
+        default="",
+        json_schema_extra={
+            "x-widget": "select",
+        },
+    )
+    """API服务商名称 (对应在api_providers中配置的服务商名称)"""
+
+    price_in: float = Field(
+        default=0.0,
+        ge=0,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 0.001,
+        },
+    )
+    """输入价格 (用于API调用统计, 单位：元/ M token) (可选, 若无该字段, 默认值为0)"""
+
+    cache: bool = Field(
+        default=False,
+    )
+    """遗留兼容字段，不参与任何逻辑：是否按缓存价计费由 cache_price_in 决定，统计页是否展示缓存用量由服务商是否在响应中返回缓存字段自动探测。"""
+
+    cache_price_in: float = Field(
+        default=0.0,
+        ge=0,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 0.001,
+        },
+    )
+    """缓存命中输入价格 (用于API调用统计, 单位：元/ M token)。0 表示缓存命中免费，未命中部分按 price_in 计费；WebUI 中留空按输入价格解析。"""
+
+    price_out: float = Field(
+        default=0.0,
+        ge=0,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 0.001,
+        },
+    )
+    """输出价格 (用于API调用统计, 单位：元/ M token) (可选, 若无该字段, 默认值为0)"""
+
+    price_periods: List[ModelPricePeriod] = Field(default_factory=list)
+    """分时价格组合，每天按服务器本地时间重复，以成功请求尝试的开始时间计价。
+    每项包含 start_time、end_time（HH:MM）、price_in、price_out、cache_price_in，价格单位：元 / M token。
+    时段包含开始、不包含结束，支持跨午夜，开始和结束不能相同，时段之间不能重叠。
+    未匹配时段时使用模型默认价格；空列表表示全天使用默认价格。时段的缓存单价为 0 表示缓存命中免费。"""
+
+    temperature: float | None = Field(
+        default=None,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """模型级别温度（可选），会覆盖任务配置中的温度"""
+
+    send_temperature: bool = Field(
+        default=True,
+        json_schema_extra={
+            "x-widget": "switch",
+            "advanced": True,
+        },
+    )
+    """是否向模型服务发送由 MaiBot 管理的 temperature 参数。"""
+
+    max_tokens: int | None = Field(
+        default=None,
+        json_schema_extra={
+            "x-widget": "input",
+        },
+    )
+    """模型级别最大token数（可选），会覆盖任务配置中的max_tokens"""
+
+    force_stream_mode: bool = Field(
+        default=False,
+        json_schema_extra={
+            "x-widget": "switch",
+            "advanced": True,
+        },
+    )
+    """强制流式输出模式 (若模型不支持非流式输出, 请设置为true启用强制流式输出, 默认值为false)"""
+
+    visual: bool = Field(
+        default=False,
+        json_schema_extra={
+            "x-widget": "switch",
+        },
+    )
+    """是否为多模态模型。开启后表示该模型支持视觉输入。"""
+
+    extra_params: dict[str, Any] = Field(
+        default_factory=dict,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """额外参数 (用于API调用时的额外配置)。
+    OpenAI 兼容客户端会将该字典拆分为请求附加项：headers 会作为请求头传入，query 会作为 URL 查询参数传入，body 会合并到请求体。
+    未放入 headers/query/body 的普通键，也会作为请求体额外字段传入；例如 {enable_thinking = "false"} 会传为请求体字段 enable_thinking。
+    该字段不会以 extra_params 这个键整体发送给模型服务商。
+    temperature 和 max_tokens 也可写在此处作为模型级默认值，但更推荐使用同名独立配置项。
+    Gemini 客户端会按自身支持的字段筛选并映射到 GenerateContentConfig、EmbedContentConfig 或音频请求配置中。"""
+
+    def model_post_init(self, context: Any = None):
+        self.model_identifier = self.model_identifier.strip()
+        if not self.model_identifier:
+            raise ValueError(t("config.model_identifier_empty_generic"))
+        if not self.name:
+            raise ValueError(t("config.model_name_empty"))
+        if not self.api_provider:
+            raise ValueError(t("config.model_api_provider_empty"))
+
+        # 将跨午夜的时段拆开，统一检查半开区间是否重叠。
+        intervals: List[Tuple[str, str, int]] = []
+        for index, period in enumerate(self.price_periods, start=1):
+            if period.start_time < period.end_time:
+                intervals.append((period.start_time, period.end_time, index))
+            else:
+                intervals.append((period.start_time, "24:00", index))
+                if period.end_time != "00:00":
+                    intervals.append(("00:00", period.end_time, index))
+        intervals.sort()
+        for previous, current in zip(intervals, intervals[1:], strict=False):
+            if current[0] < previous[1]:
+                raise ValueError(f"价格时段 {previous[2]} 与 {current[2]} 重叠")
+        return super().model_post_init(context)
+
+
+class TaskConfig(ConfigBase):
+    """任务配置类"""
+
+    model_list: list[str] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """使用的模型列表, 每个元素对应上面的模型名称(name)"""
+
+    max_tokens: int = Field(
+        default=4096,
+        ge=1,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 1,
+        },
+    )
+    """任务最大输出token数"""
+
+    temperature: float = Field(
+        default=0.7,
+        ge=0,
+        le=2,
+        json_schema_extra={
+            "x-widget": "slider",
+            "step": 0.1,
+        },
+    )
+    """模型温度"""
+
+    selection_strategy: str = Field(
+        default="balance",
+        json_schema_extra={
+            "x-widget": "select",
+            "options": ["balance", "random", "sequential"],
+        },
+    )
+    """模型选择策略：balance（负载均衡）、random（随机选择）或 sequential（按配置顺序优先选择）"""
+
+    hard_timeout: float = Field(
+        default=240.0,
+        ge=1.0,
+        json_schema_extra={
+            "x-widget": "input",
+            "step": 1.0,
+            "advanced": True,
+        },
+    )
+    """任务硬超时（秒），到点未返回则取消请求并尝试切换下一个模型；防止上游代理静默排队导致主循环饥饿"""
+
+
+class ModelTaskConfig(ConfigBase):
+    """模型配置类"""
+
+    web_search: WebSearchTaskConfig = Field(
+        default_factory=WebSearchTaskConfig,
+        json_schema_extra={"x-widget": "custom", "label": {"zh_CN": "联网搜索 (web_search)"}},
+    )
+    """选择已定义的联网服务，用于搜索和网页读取；未分配时不开放统一联网工具。"""
+
+    replyer: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """回复模型，影响麦麦的回复表现"""
+
+    planner: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """规划模型，决定麦麦的行动，需要有一定Agent能力的模型"""
+
+    memory: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """记忆模型配置，用于长期记忆总结、抽取、写回等高记忆任务；留空时由调用方按需回退"""
+
+    utils: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """执行文本概括，整理等小任务，是麦麦必须的模型。可以选择速度快的小尺寸模型"""
+
+    learner: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """学习模型配置，用于表达方式学习和黑话学习；留空时用 utils 模型"""
+
+    fast_model: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """快速模型配置，用于表达方式选择、回复断句等需要快速完成的小任务，建议选择响应快的模型；留空时用 utils 模型"""
+
+    emoji: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """表情包发送模型配置；留空时保持原有 planner/vlm 选择逻辑"""
+
+    vlm: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """视觉模型，需要能够识图的模型"""
+
+    voice: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """语音识别模型"""
+
+    embedding: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+        },
+    )
+    """嵌入模型；可选择文本或图片嵌入类型，不可使用 LLM，所选模型需支持文本向量化"""
+
+    image_embedding: TaskConfig = Field(
+        default_factory=TaskConfig,
+        json_schema_extra={
+            "x-widget": "custom",
+            "advanced": True,
+        },
+    )
+    """图片嵌入模型；可选择文本或图片嵌入类型，不可使用 LLM，留空时不启用；所选模型必须实现图片输入到向量的协议"""

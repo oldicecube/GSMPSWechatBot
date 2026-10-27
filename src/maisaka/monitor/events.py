@@ -1,0 +1,805 @@
+"""MaiSaka 实时监控事件广播模块。
+
+通过统一 WebSocket 将 MaiSaka 推理引擎各阶段状态实时推送给前端监控界面。
+"""
+
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
+import asyncio
+import json
+import time
+import weakref
+
+from src.common.logger import get_logger
+from src.maisaka.context.usage import ContextSectionUsage
+from src.maisaka.display.display_utils import format_tool_call_for_display
+
+logger = get_logger("maisaka_monitor")
+
+MONITOR_DOMAIN = "maisaka_monitor"
+MONITOR_TOPIC = "main"
+NON_PERSISTED_EVENTS = {"stage.status", "stage.removed", "stage.snapshot"}
+
+# asyncio.Lock 绑定事件循环，按循环分别持有，循环销毁后自动回收
+_broadcast_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _get_broadcast_lock() -> asyncio.Lock:
+    """获取当前事件循环的广播锁。"""
+
+    loop = asyncio.get_running_loop()
+    lock = _broadcast_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _broadcast_locks[loop] = lock
+    return lock
+
+
+def _normalize_payload_value(value: Any) -> Any:
+    """将事件载荷中的任意值规范化为可序列化结构。"""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        normalized_dict: Dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_dict[str(key)] = _normalize_payload_value(item)
+        return normalized_dict
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_payload_value(item) for item in value]
+    if hasattr(value, "model_dump"):
+        try:
+            return _normalize_payload_value(value.model_dump())
+        except Exception:
+            return str(value)
+    if hasattr(value, "__dict__"):
+        try:
+            return _normalize_payload_value(dict(value.__dict__))
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _extract_text_content(content: Any) -> Optional[str]:
+    """从消息内容中提取纯文本表示。"""
+
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get("type", "")
+                if block_type == "text":
+                    text_parts.append(str(block.get("text", "")))
+                elif block_type == "image_url":
+                    text_parts.append("[图片，识别中.....]")
+                else:
+                    text_parts.append(f"[{block_type}]")
+            elif isinstance(block, str):
+                text_parts.append(block)
+        return "\n".join(text_parts) if text_parts else None
+    return str(content)
+
+
+def _normalize_tool_call_arguments(arguments: Any) -> tuple[Any, Optional[str]]:
+    """标准化工具调用参数，兼容 JSON 字符串和对象。"""
+
+    if isinstance(arguments, str):
+        raw_arguments = arguments
+        try:
+            parsed_arguments = json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            return {}, raw_arguments
+        return _normalize_payload_value(parsed_arguments), raw_arguments
+    return _normalize_payload_value(arguments or {}), None
+
+
+def _serialize_single_tool_call(tool_call: Any) -> Dict[str, Any]:
+    """将不同来源的 tool_call 标准化为前端可直接展示的结构。"""
+
+    display_payload = format_tool_call_for_display(tool_call)
+    if isinstance(tool_call, dict):
+        function_info = tool_call.get("function")
+        if isinstance(function_info, dict):
+            raw_arguments = function_info.get("arguments", tool_call.get("arguments", tool_call.get("args", {})))
+            name = function_info.get("name", tool_call.get("name", tool_call.get("func_name", "unknown")))
+        else:
+            raw_arguments = tool_call.get("arguments", tool_call.get("args", {}))
+            name = tool_call.get("name", tool_call.get("func_name", "unknown"))
+
+        arguments, arguments_raw = _normalize_tool_call_arguments(raw_arguments)
+        serialized: Dict[str, Any] = {
+            "id": str(tool_call.get("id", tool_call.get("call_id", ""))),
+            "name": str(name or "unknown"),
+            "arguments": arguments,
+        }
+        if arguments_raw is not None:
+            serialized["arguments_raw"] = arguments_raw
+        for key in ("source", "source_label", "extra_content"):
+            if display_payload.get(key):
+                serialized[key] = display_payload[key]
+        return serialized
+
+    raw_arguments = getattr(tool_call, "args", None)
+    if raw_arguments is None:
+        raw_arguments = getattr(tool_call, "arguments", None)
+    arguments, arguments_raw = _normalize_tool_call_arguments(raw_arguments)
+    serialized = {
+        "id": str(getattr(tool_call, "id", None) or getattr(tool_call, "call_id", "")),
+        "name": str(getattr(tool_call, "func_name", None) or getattr(tool_call, "name", "unknown")),
+        "arguments": arguments,
+    }
+    if arguments_raw is not None:
+        serialized["arguments_raw"] = arguments_raw
+    for key in ("source", "source_label", "extra_content"):
+        if display_payload.get(key):
+            serialized[key] = display_payload[key]
+    return serialized
+
+
+def _serialize_tool_calls_from_objects(tool_calls: List[Any]) -> List[Dict[str, Any]]:
+    """将工具调用对象列表序列化为字典列表。"""
+
+    return [_serialize_single_tool_call(tool_call) for tool_call in tool_calls]
+
+
+def _serialize_tool_calls_from_dicts(tool_calls: List[Any]) -> List[Dict[str, Any]]:
+    """将工具调用字典列表标准化为可传输格式。"""
+
+    return [_serialize_single_tool_call(tool_call) for tool_call in tool_calls]
+
+
+def _serialize_message(message: Any) -> Dict[str, Any]:
+    """将单条消息序列化为可通过 WebSocket 传输的字典。"""
+
+    if isinstance(message, dict):
+        serialized: Dict[str, Any] = {
+            "role": str(message.get("role", "unknown")),
+            "content": _extract_text_content(message.get("content")),
+        }
+        if message.get("tool_call_id"):
+            serialized["tool_call_id"] = str(message["tool_call_id"])
+        if message.get("tool_calls"):
+            serialized["tool_calls"] = _serialize_tool_calls_from_dicts(message["tool_calls"])
+        return serialized
+
+    raw_role = getattr(message, "role", "unknown")
+    role_str = raw_role.value if hasattr(raw_role, "value") else str(raw_role)
+
+    serialized = {
+        "role": role_str,
+        "content": _extract_text_content(getattr(message, "content", None)),
+    }
+    tool_call_id = getattr(message, "tool_call_id", None)
+    if tool_call_id:
+        serialized["tool_call_id"] = str(tool_call_id)
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        serialized["tool_calls"] = _serialize_tool_calls_from_objects(tool_calls)
+
+    return serialized
+
+
+def _serialize_messages(messages: List[Any]) -> List[Dict[str, Any]]:
+    """批量序列化消息列表。"""
+
+    return [_serialize_message(message) for message in messages]
+
+
+def _enrich_session_identity(data: Dict[str, Any]) -> Dict[str, Any]:
+    """为监控事件补充会话展示所需的群/用户标识。"""
+
+    session_id = data.get("session_id")
+    if not session_id:
+        return data
+
+    try:
+        from src.chat.message_receive.chat_manager import chat_manager
+
+        chat_stream = chat_manager.get_session_by_session_id(str(session_id))
+    except Exception:
+        return data
+
+    if chat_stream is None:
+        return data
+
+    session_name = chat_manager.get_session_name(str(session_id))
+    if session_name:
+        data.setdefault("session_name", session_name)
+    data.setdefault("is_group_chat", chat_stream.is_group_session)
+    data.setdefault("group_id", chat_stream.group_id)
+    data.setdefault("user_id", chat_stream.user_id)
+    data.setdefault("platform", chat_stream.platform)
+    return data
+
+
+def _serialize_tool_results(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """标准化最终 planner 卡中的工具结果列表。"""
+
+    serialized_tools: List[Dict[str, Any]] = []
+    for tool in tools:
+        serialized_tool = {
+            **({"session_id": str(tool["session_id"]), "session_name": str(tool.get("session_name", ""))}
+               if tool.get("session_id") else {}),
+            "tool_call_id": str(tool.get("tool_call_id", "")),
+            "tool_name": str(tool.get("tool_name", "")),
+            "tool_args": _normalize_payload_value(tool.get("tool_args", {})),
+            "tool_call_source": str(tool.get("tool_call_source", "")),
+            "tool_call_source_label": str(tool.get("tool_call_source_label", "")),
+            "success": bool(tool.get("success", False)),
+            "stop_after_execution": bool(tool.get("stop_after_execution", False)),
+            "duration_ms": float(tool.get("duration_ms", 0.0) or 0.0),
+            "summary": str(tool.get("summary", "")),
+        }
+        detail = tool.get("detail")
+        for key in ("started_at", "ended_at"):
+            if key in tool:
+                serialized_tool[key] = float(tool[key])
+        if tool.get("images"):
+            serialized_tool["images"] = _normalize_payload_value(tool["images"])
+        if isinstance(detail, dict):
+            metrics = detail.get("metrics")
+            if isinstance(metrics, dict) and metrics.get("model_name"):
+                # 模型名属于卡片摘要，增量传输裁掉 detail 后仍需保留。
+                serialized_tool["model_name"] = str(metrics["model_name"]).strip()
+        prompt_html_uri = str(tool.get("prompt_html_uri") or "").strip()
+        if not prompt_html_uri and isinstance(detail, dict):
+            prompt_html_uri = str(detail.get("prompt_html_uri") or "").strip()
+        if prompt_html_uri:
+            serialized_tool["prompt_html_uri"] = prompt_html_uri
+        if detail is not None:
+            serialized_tool["detail"] = _normalize_payload_value(detail)
+        if serialized_tool["tool_name"] == "tool_search" and serialized_tool["success"]:
+            serialized_tool["matched_tool_names"] = _normalize_payload_value(tool["matched_tool_names"])
+            serialized_tool["newly_discovered_tool_names"] = _normalize_payload_value(
+                tool["newly_discovered_tool_names"]
+            )
+        serialized_tools.append(serialized_tool)
+    return serialized_tools
+
+
+def _serialize_native_tool_calls(tool_calls: List[Any]) -> List[Dict[str, Any]]:
+    """序列化 Provider 原生工具摘要，不读取 Item 的原生 replay fragment。"""
+
+    serialized_calls: List[Dict[str, Any]] = []
+    for tool_call in tool_calls:
+        if isinstance(tool_call, dict):
+            tool_type = tool_call.get("tool_type", "")
+            call_id = tool_call.get("call_id", "")
+            status = tool_call.get("status", "")
+            action_type = tool_call.get("action_type", "")
+            details = tool_call.get("details", [])
+            source_count = tool_call.get("source_count", 0)
+        else:
+            tool_type = getattr(tool_call, "tool_type", "")
+            call_id = getattr(tool_call, "call_id", "")
+            status = getattr(tool_call, "status", "")
+            action_type = getattr(tool_call, "action_type", "")
+            details = getattr(tool_call, "details", [])
+            source_count = getattr(tool_call, "source_count", 0)
+        serialized_calls.append(
+            {
+                "tool_type": str(tool_type),
+                "call_id": str(call_id),
+                "status": str(status),
+                "action_type": str(action_type),
+                "details": [str(item) for item in list(details or [])],
+                "source_count": int(source_count or 0),
+            }
+        )
+    return serialized_calls
+
+
+def _serialize_context_sections(sections: Optional[List[ContextSectionUsage]]) -> List[Dict[str, Any]]:
+    """标准化提示词分段用量列表。"""
+
+    return [
+        {"key": section.key, "chars": int(section.chars), "count": int(section.count)}
+        for section in list(sections or [])
+    ]
+
+
+def _serialize_request_block(
+    messages: Optional[List[Any]],
+    selected_history_count: Optional[int],
+    tool_count: Optional[int],
+    context_sections: Optional[List[ContextSectionUsage]] = None,
+) -> Optional[Dict[str, Any]]:
+    """标准化请求区块。"""
+
+    if messages is None and selected_history_count is None and tool_count is None:
+        return None
+
+    return {
+        "messages": _serialize_messages(list(messages or [])),
+        "selected_history_count": int(selected_history_count or 0),
+        "tool_count": int(tool_count or 0),
+        "context_sections": _serialize_context_sections(context_sections),
+    }
+
+
+def _serialize_planner_block(
+    content: Optional[str],
+    tool_calls: Optional[List[Any]],
+    native_tool_calls: Optional[List[Any]],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    total_tokens: Optional[int],
+    duration_ms: Optional[float],
+    prompt_html_uri: Optional[str] = None,
+    prompt_cache_hit_tokens: Optional[int] = None,
+    prompt_cache_miss_tokens: Optional[int] = None,
+    model_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """标准化 planner 结果区块。"""
+
+    if (
+        content is None
+        and tool_calls is None
+        and native_tool_calls is None
+        and prompt_tokens is None
+        and completion_tokens is None
+        and total_tokens is None
+        and duration_ms is None
+        and prompt_html_uri is None
+        and model_name is None
+    ):
+        return None
+
+    return {
+        "content": content,
+        "model_name": model_name,
+        "tool_calls": _serialize_tool_calls_from_objects(list(tool_calls or [])),
+        "native_tool_calls": _serialize_native_tool_calls(list(native_tool_calls or [])),
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+        "total_tokens": int(total_tokens or 0),
+        "prompt_cache_hit_tokens": int(prompt_cache_hit_tokens or 0),
+        "prompt_cache_miss_tokens": int(prompt_cache_miss_tokens or 0),
+        "duration_ms": float(duration_ms or 0.0),
+        "prompt_html_uri": str(prompt_html_uri or ""),
+    }
+
+
+async def _broadcast(event: str, data: Dict[str, Any]) -> None:
+    """通过统一 WebSocket 管理器向监控主题广播事件。"""
+
+    try:
+        from src.webui.routers.websocket.manager import websocket_manager
+
+        data = _enrich_session_identity(data)
+        # 写库分配 event_id 与广播须在同一临界区内完成，保证前端按 event_id 递增收到事件；
+        # 否则并发广播可能乱序，前端补发游标越过尚未送达的事件，断线重连后该事件永久丢失。
+        async with _get_broadcast_lock():
+            broadcast_data = data
+            if event not in NON_PERSISTED_EVENTS:
+                from src.maisaka.monitor.event_store import record_monitor_event
+
+                broadcast_data = await asyncio.to_thread(record_monitor_event, event, data)
+            await websocket_manager.broadcast_to_topic(
+                domain=MONITOR_DOMAIN,
+                topic=MONITOR_TOPIC,
+                event=event,
+                data=broadcast_data,
+            )
+    except Exception as exc:
+        logger.warning(f"MaiSaka 监控事件广播失败: {exc}", exc_info=True)
+
+
+async def emit_session_start(
+    session_id: str,
+    session_name: str,
+    *,
+    is_group_chat: bool,
+    group_id: Optional[str],
+    user_id: Optional[str],
+    platform: str,
+) -> None:
+    """广播会话开始事件。"""
+
+    await _broadcast("session.start", {
+        "session_id": session_id,
+        "session_name": session_name,
+        "is_group_chat": is_group_chat,
+        "group_id": group_id,
+        "user_id": user_id,
+        "platform": platform,
+        "timestamp": time.time(),
+    })
+
+
+async def emit_stage_status(
+    *,
+    session_id: str,
+    session_name: str,
+    stage: str,
+    detail: str = "",
+    round_text: str = "",
+    agent_state: str = "",
+    wait_until: float | None = None,
+    stage_started_at: float,
+    updated_at: float,
+    timestamp: float,
+) -> None:
+    """广播单个聊天流的当前阶段状态。"""
+
+    await _broadcast("stage.status", {
+        "session_id": session_id,
+        "session_name": session_name,
+        "stage": stage,
+        "detail": detail,
+        "round_text": round_text,
+        "agent_state": agent_state,
+        "wait_until": wait_until,
+        "stage_started_at": stage_started_at,
+        "updated_at": updated_at,
+        "timestamp": timestamp,
+    })
+
+
+async def emit_stage_removed(
+    *,
+    session_id: str,
+    session_name: str = "",
+) -> None:
+    """广播聊天流阶段状态移除事件。"""
+
+    await _broadcast("stage.removed", {
+        "session_id": session_id,
+        "session_name": session_name,
+        "timestamp": time.time(),
+    })
+
+
+async def emit_flow_step(
+    *,
+    session_id: str,
+    run_id: str,
+    step: str,
+    title: str,
+    detail: str,
+    cycle_id: Optional[int] = None,
+    trim: Optional[Dict[str, Any]] = None,
+) -> None:
+    """广播可回放的思考流程节点，可携带裁切及后台学习进度。"""
+
+    await _broadcast("flow.step", {
+        "session_id": session_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "step": step,
+        "title": title,
+        "detail": detail,
+        "timestamp": time.time(),
+        **({"trim": trim} if trim is not None else {}),
+    })
+
+
+async def emit_llm_retry(
+    *,
+    session_id: str,
+    task_name: str,
+    request_type: str,
+    model_name: str,
+    attempt: int,
+    max_attempts: int,
+    reason: str,
+    retry_interval: float,
+) -> None:
+    """广播模型请求失败后的重试进度。"""
+
+    await _broadcast("llm.retry", {
+        "session_id": session_id,
+        "task_name": task_name,
+        "request_type": request_type,
+        "model_name": model_name,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "reason": reason,
+        "retry_interval": retry_interval,
+        "timestamp": time.time(),
+    })
+
+
+async def emit_llm_error(
+    *,
+    session_id: str,
+    task_name: str,
+    request_type: str,
+    model_name: str,
+    message: str,
+) -> None:
+    """广播模型请求最终失败。"""
+
+    await _broadcast("llm.error", {
+        "session_id": session_id,
+        "task_name": task_name,
+        "request_type": request_type,
+        "model_name": model_name,
+        "message": message,
+        "timestamp": time.time(),
+    })
+
+
+async def emit_message_ingested(
+    session_id: str,
+    speaker_name: str,
+    content: str,
+    message_id: str,
+    timestamp: float,
+    *,
+    received_at: Optional[float] = None,
+    platform: str = "",
+    user_id: str = "",
+    group_id: str = "",
+    reply_to: Optional[Dict[str, Any]] = None,
+    media: Optional[list[Dict[str, Any]]] = None,
+) -> None:
+    """广播新消息注入事件，分别保留平台消息时间与主程序实际接收时间。"""
+
+    await _broadcast("message.ingested", {
+        "session_id": session_id,
+        "speaker_name": speaker_name,
+        "content": content,
+        "message_id": message_id,
+        "platform": platform,
+        "user_id": user_id,
+        "group_id": group_id,
+        "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
+        "media": _normalize_payload_value(media) if media else [],
+        "timestamp": timestamp,
+        "received_at": received_at,
+    })
+
+
+async def emit_message_sent(
+    session_id: str,
+    speaker_name: str,
+    content: str,
+    message_id: str,
+    timestamp: float,
+    source_kind: str = "",
+    *,
+    platform: str = "",
+    user_id: str = "",
+    group_id: str = "",
+    reply_to: Optional[Dict[str, Any]] = None,
+    media: Optional[list[Dict[str, Any]]] = None,
+) -> None:
+    """广播 MaiSaka 自己发送的消息事件。"""
+
+    await _broadcast("message.sent", {
+        "session_id": session_id,
+        "speaker_name": speaker_name,
+        "content": content,
+        "message_id": message_id,
+        "source_kind": source_kind,
+        "platform": platform,
+        "user_id": user_id,
+        "group_id": group_id,
+        "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
+        "media": _normalize_payload_value(media) if media else [],
+        "timestamp": timestamp,
+    })
+
+
+async def emit_message_updated(
+    session_id: str,
+    speaker_name: str,
+    content: str,
+    message_id: str,
+    timestamp: float,
+    source_kind: str = "",
+    *,
+    received_at: Optional[float] = None,
+    platform: str = "",
+    user_id: str = "",
+    group_id: str = "",
+    reply_to: Optional[Dict[str, Any]] = None,
+    media: Optional[list[Dict[str, Any]]] = None,
+) -> None:
+    """广播已有消息内容更新事件。"""
+
+    await _broadcast("message.updated", {
+        "session_id": session_id,
+        "speaker_name": speaker_name,
+        "content": content,
+        "message_id": message_id,
+        "source_kind": source_kind,
+        "platform": platform,
+        "user_id": user_id,
+        "group_id": group_id,
+        "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
+        "media": _normalize_payload_value(media) if media else [],
+        "timestamp": timestamp,
+        "received_at": received_at,
+    })
+
+
+async def emit_planner_snapshot(
+    *,
+    event_type: Literal["planner.progress", "planner.finalized"],
+    session_id: str,
+    cycle_id: int,
+    run_id: str,
+    planner_request_messages: Optional[List[Any]],
+    planner_selected_history_count: Optional[int],
+    planner_tool_count: Optional[int],
+    planner_content: Optional[str],
+    planner_tool_calls: Optional[List[Any]],
+    planner_native_tool_calls: Optional[List[Any]],
+    planner_prompt_tokens: Optional[int],
+    planner_completion_tokens: Optional[int],
+    planner_total_tokens: Optional[int],
+    planner_duration_ms: Optional[float],
+    planner_prompt_html_uri: Optional[str] = None,
+    planner_started_at: Optional[float] = None,
+    planner_ended_at: Optional[float] = None,
+    planner_model_name: Optional[str] = None,
+    planner_prompt_cache_hit_tokens: Optional[int] = None,
+    planner_prompt_cache_miss_tokens: Optional[int] = None,
+    planner_context_sections: Optional[List[ContextSectionUsage]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    time_records: Optional[Dict[str, float]] = None,
+    agent_state: str = "",
+    planner_interrupted: bool = False,
+    end_reason: str = "",
+    end_detail: str = "",
+    active_tool_call_id: str = "",
+    focus_scope_id: str = "",
+    focus_session_ids: Optional[List[str]] = None,
+) -> None:
+    """广播 Planner 过程或结束时的快照。"""
+
+    await _broadcast(event_type, {
+        **({"focus_scope_id": focus_scope_id, "focus_session_ids": list(focus_session_ids or [])}
+           if focus_scope_id else {}),
+        "session_id": session_id,
+        "cycle_id": cycle_id,
+        "run_id": run_id,
+        "planner_started_at": planner_started_at,
+        "planner_ended_at": planner_ended_at,
+        "timestamp": time.time(),
+        "request": _serialize_request_block(
+            planner_request_messages,
+            planner_selected_history_count,
+            planner_tool_count,
+            planner_context_sections,
+        ),
+        "planner": _serialize_planner_block(
+            planner_content,
+            planner_tool_calls,
+            planner_native_tool_calls,
+            planner_prompt_tokens,
+            planner_completion_tokens,
+            planner_total_tokens,
+            planner_duration_ms,
+            planner_prompt_html_uri,
+            planner_prompt_cache_hit_tokens,
+            planner_prompt_cache_miss_tokens,
+            model_name=planner_model_name,
+        ),
+        "tools": _serialize_tool_results(list(tools or [])),
+        "active_tool_call_id": active_tool_call_id,
+        "interrupted": planner_interrupted,
+        "final_state": {
+            "time_records": _normalize_payload_value(time_records or {}),
+            "agent_state": agent_state,
+            "end_reason": end_reason,
+            "end_detail": end_detail,
+        },
+    })
+
+
+# 子代理事件里单段文字、单条工具结果摘要的上限，避免观察事件体积过大
+SUBAGENT_EVENT_TEXT_MAX_CHARS = 2000
+SUBAGENT_EVENT_TOOL_SUMMARY_MAX_CHARS = 600
+
+
+def _clip_subagent_event_text(text: str, max_chars: int) -> str:
+    """截断子代理事件里的长文本，并标明被省略的字数。"""
+
+    normalized_text = str(text or "")
+    if len(normalized_text) <= max_chars:
+        return normalized_text
+    return f"{normalized_text[:max_chars]}…（已省略 {len(normalized_text) - max_chars} 字）"
+
+
+async def emit_subagent_started(
+    *,
+    session_id: str,
+    task_id: str,
+    call_id: str,
+    description: str,
+    granted_tools: List[str],
+    background: bool,
+    max_rounds: int,
+) -> None:
+    """广播子代理任务开始；call_id 是 Planner 发起这次派发的工具调用 id。"""
+
+    await _broadcast("subagent.started", {
+        "session_id": session_id,
+        "task_id": task_id,
+        "call_id": call_id,
+        "description": _clip_subagent_event_text(description, SUBAGENT_EVENT_TEXT_MAX_CHARS),
+        "granted_tools": list(granted_tools),
+        "background": background,
+        "max_rounds": max_rounds,
+        "timestamp": time.time(),
+    })
+
+
+async def emit_subagent_round(
+    *,
+    session_id: str,
+    task_id: str,
+    round_index: int,
+    content: str,
+    tool_calls: List[Any],
+) -> None:
+    """广播子代理一轮模型输出：这一轮的文字和它发起的工具调用。"""
+
+    await _broadcast("subagent.round", {
+        "session_id": session_id,
+        "task_id": task_id,
+        "round_index": round_index,
+        "content": _clip_subagent_event_text(content, SUBAGENT_EVENT_TEXT_MAX_CHARS),
+        "tool_calls": _serialize_tool_calls_from_objects(tool_calls),
+        "timestamp": time.time(),
+    })
+
+
+async def emit_subagent_tool_result(
+    *,
+    session_id: str,
+    task_id: str,
+    round_index: int,
+    call_id: str,
+    tool_name: str,
+    success: bool,
+    summary: str,
+    duration_ms: float,
+) -> None:
+    """广播子代理内部一次工具调用的结果摘要。"""
+
+    await _broadcast("subagent.tool_result", {
+        "session_id": session_id,
+        "task_id": task_id,
+        "round_index": round_index,
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "success": success,
+        "summary": _clip_subagent_event_text(summary, SUBAGENT_EVENT_TOOL_SUMMARY_MAX_CHARS),
+        "duration_ms": float(duration_ms),
+        "timestamp": time.time(),
+    })
+
+
+async def emit_subagent_finished(
+    *,
+    session_id: str,
+    task_id: str,
+    status: str,
+    conclusion: str,
+    error_message: str,
+    tool_usage: Dict[str, int],
+    duration_ms: float,
+) -> None:
+    """广播子代理任务结束：完成、失败或被终止。"""
+
+    await _broadcast("subagent.finished", {
+        "session_id": session_id,
+        "task_id": task_id,
+        "status": status,
+        "conclusion": _clip_subagent_event_text(conclusion, SUBAGENT_EVENT_TEXT_MAX_CHARS),
+        "error_message": error_message,
+        "tool_usage": dict(tool_usage),
+        "duration_ms": float(duration_ms),
+        "timestamp": time.time(),
+    })

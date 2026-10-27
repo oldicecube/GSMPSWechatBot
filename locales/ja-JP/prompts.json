@@ -1,0 +1,8 @@
+{
+  "prompt.duplicate_template_name": "Promptテンプレート名 '{name}' が重複しています: {path_a} と {path_b}",
+  "prompt.format_failed": "Promptテンプレート '{name}' のレンダリングに失敗しました: {error}",
+  "prompt.invalid_category": "Promptカテゴリ '{category}' は無効です",
+  "prompt.invalid_name": "Prompt名 '{name}' は無効です",
+  "prompt.missing_placeholder": "Promptテンプレート '{name}' にプレースホルダー '{placeholder}' がありません",
+  "prompt.template_not_found": "ロケール '{locale}' にPromptテンプレート '{name}' が見つかりません"
+}

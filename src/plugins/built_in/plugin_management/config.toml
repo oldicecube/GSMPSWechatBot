@@ -1,0 +1,10 @@
+[plugin]
+config_version = "1.2.0"
+enabled = true
+
+[aliases]
+management_prefixes = ["/插件管理"]
+
+[aliases.shortcuts]
+
+[aliases.command_aliases]

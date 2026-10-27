@@ -1,0 +1,128 @@
+[inner]
+version = "1.17.24"
+
+[[models]]
+model_type = "llm"
+model_identifier = "deepseek-v4.1-flash-free"
+name = "wechat_deepseek_v4_1_flash_free"
+api_provider = "WechatBot_wechatllm_free_deepseek_v4_1_flash"
+price_in = 0.0
+price_out = 0.0
+cache = true
+visual = true
+
+[models.extra_params]
+reasoning_effort = "high"
+
+[[models]]
+model_type = "llm"
+model_identifier = "kilo-auto/free"
+name = "wechat_kilo_auto_free"
+api_provider = "WechatBot_wechatllm_free_kilo_auto"
+price_in = 0.0
+price_out = 0.0
+cache = true
+visual = false
+max_tokens = 1024
+
+[[models]]
+model_type = "llm"
+model_identifier = "glm-5.3-flash-free"
+name = "wechat_glm_5_3_flash_free"
+api_provider = "WechatBot_wechatllm_free_glm_5_3_flash"
+price_in = 0.0
+price_out = 0.0
+cache = true
+visual = false
+
+[[models]]
+model_type = "llm"
+model_identifier = "mimo-v2.6-flash-free"
+name = "wechat_mimo_v2_6_flash_free"
+api_provider = "WechatBot_wechatllm_free_mimo_v2_6_flash"
+price_in = 0.0
+price_out = 0.0
+cache = true
+visual = false
+
+[[api_providers]]
+name = "WechatBot_wechatllm_free_deepseek_v4_1_flash"
+base_url = "https://opencode.ai/inference/v1"
+api_key = "public"
+client_type = "openai"
+auth_type = "bearer"
+timeout = 90
+max_retry = 1
+retry_interval = 1
+
+[[api_providers]]
+name = "WechatBot_wechatllm_free_kilo_auto"
+base_url = "https://api.kilo.ai/api/gateway"
+api_key = "placeholder"
+client_type = "openai"
+auth_type = "none"
+timeout = 90
+max_retry = 1
+retry_interval = 1
+
+[[api_providers]]
+name = "WechatBot_wechatllm_free_glm_5_3_flash"
+base_url = "https://opencode.ai/inference/v1"
+api_key = "public"
+client_type = "openai"
+auth_type = "bearer"
+timeout = 90
+max_retry = 1
+retry_interval = 1
+
+[[api_providers]]
+name = "WechatBot_wechatllm_free_mimo_v2_6_flash"
+base_url = "https://opencode.ai/inference/v1"
+api_key = "public"
+client_type = "openai"
+auth_type = "bearer"
+timeout = 90
+max_retry = 1
+retry_interval = 1
+
+[model_task_config.planner]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 1024
+temperature = 0.7
+selection_strategy = "sequential"
+hard_timeout = 90.0
+
+[model_task_config.replyer]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 4096
+temperature = 0.8
+selection_strategy = "sequential"
+hard_timeout = 90.0
+
+[model_task_config.utils]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 1024
+temperature = 0.5
+selection_strategy = "sequential"
+hard_timeout = 90.0
+
+[model_task_config.learner]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 1024
+temperature = 0.7
+selection_strategy = "sequential"
+hard_timeout = 90.0
+
+[model_task_config.memory]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 2048
+temperature = 0.3
+selection_strategy = "sequential"
+hard_timeout = 90.0
+
+[model_task_config.vlm]
+model_list = ["wechat_deepseek_v4_1_flash_free", "wechat_kilo_auto_free", "wechat_glm_5_3_flash_free", "wechat_mimo_v2_6_flash_free"]
+max_tokens = 2048
+temperature = 0.7
+selection_strategy = "sequential"
+hard_timeout = 90.0

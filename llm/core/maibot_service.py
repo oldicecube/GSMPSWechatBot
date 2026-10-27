@@ -1,8 +1,9 @@
-"""MaiBot-backed LLM service for the legacy WeChat dispatcher.
+"""Native MaiBot service entry point used by the WeChat dispatcher.
 
-Only the dispatcher-facing request/response shape is translated here. Message
-transport remains in the existing WeChat sender path. MaiBot owns the actual
-model client, request scheduling, provider selection and response parsing.
+The full MaiBot source tree is vendored under this repository's ``src``
+package. This module only translates WeChat ingress/egress records into the
+native MaiSaka runtime; planning, memory, learning, context and tools remain
+MaiBot-owned.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
 from utils.runtime_trace import trace_runtime
+from .maibot_native_config import sync_native_config
 
 
 logger = logging.getLogger("maibot_core_bridge")
@@ -43,13 +45,18 @@ class MaibotLLMService:
     """Dispatcher-compatible facade over MaiBot's ``LLMServiceClient``."""
 
     def __init__(self) -> None:
+        self._native_config_summary = sync_native_config()
         self.config = self._load_legacy_llm_config()
         self.proactive_reply = _ProactiveShim()
         self.ai_plugin_manager = SimpleNamespace(set_reload_callback=lambda *_args, **_kwargs: None)
         self._proactive_callback = None
         self._scheduled_callback = None
         self._client = None
-        self._log("initialized enabled=%s maibot_root=%s", self.config.get("enabled", True), os.environ.get("MAIBOT_ROOT", r"D:\maibot"))
+        from .maibot_runtime import native_runtime
+        self._native_runtime = native_runtime
+        self._native_runtime._ensure_thread()
+        self._log("native_runtime_started thread=%s", self._native_runtime._thread.name if self._native_runtime._thread else "unknown")
+        self._log("native_core_initialized enabled=%s package=src models=%s providers=%s", self.config.get("enabled", True), len(self._native_config_summary.get("models", [])), self._native_config_summary.get("providers", 0))
 
     @staticmethod
     def _load_legacy_llm_config() -> Dict[str, Any]:
@@ -63,9 +70,6 @@ class MaibotLLMService:
 
     def _get_client(self):
         if self._client is None:
-            maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
-            if maibot_root not in sys.path:
-                sys.path.insert(0, maibot_root)
             from src.services.llm_service import LLMServiceClient
 
             self._client = LLMServiceClient(task_name="planner", request_type="wechat.dispatcher")
@@ -80,9 +84,6 @@ class MaibotLLMService:
         private_prompt = str(self.config.get("private_prompt") or "").strip()
         bot_nickname = ""
         try:
-            maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
-            if maibot_root not in sys.path:
-                sys.path.insert(0, maibot_root)
             from src.config.config import config_manager
 
             native = config_manager.get_global_config()
@@ -113,19 +114,16 @@ class MaibotLLMService:
         return "\n".join(item for item in lines if item)
 
     def handle_message(self, group_id, nickname, content, wxid="", session_id=None, message_context=None, force_reply=False):
-        del wxid, force_reply
+        del message_context, force_reply
         if not self.config.get("enabled", True):
             self._log("request_skipped reason=disabled")
             return {"messages": [], "should_reply": False, "error": "LLM disabled"}
-        self._log("request task=planner mode=direct group=%s chars=%s", group_id or session_id or "unknown", len(str(content or "")))
-        trace_runtime("maibot_core_request", task="planner", mode="direct", group=str(group_id or session_id or "unknown"))
         try:
-            result = self._generate_with_retry(self._build_prompt(nickname, content, str(group_id or ""), message_context), str(session_id or group_id or ""))
-            text = str(getattr(result, "content", None) or getattr(result, "text", None) or self._extract_result_text(result) or "").strip()
-            model = getattr(result, "model_name", "")
-            self._log("response task=planner mode=direct model=%s chars=%s", model or "unknown", len(text))
-            trace_runtime("maibot_core_response", task="planner", mode="direct", model=str(model or ""), chars=len(text))
-            return {"messages": [{"type": "text", "content": text}] if text else [], "should_reply": bool(text), "animation": None, "maibot_model": model}
+            self._log("native_request task=maisaka.planner mode=direct group=%s chars=%s", group_id or session_id or "unknown", len(str(content or "")))
+            trace_runtime("maibot_native_request", task="maisaka.planner", mode="direct", group=str(group_id or session_id or "unknown"))
+            result = self._native_runtime.handle_message(str(group_id or ""), str(nickname or "未知用户"), str(content or ""), str(wxid or ""), str(session_id or "") or None)
+            self._log("native_response task=maisaka.planner mode=direct chars=%s", len(str((result.get("messages") or [{}])[0].get("content") or "")))
+            return result
         except Exception as exc:
             self._log("error task=planner mode=direct type=%s error=%s", type(exc).__name__, exc)
             trace_runtime("maibot_core_error", task="planner", mode="direct", error=f"{type(exc).__name__}: {exc}")
@@ -158,9 +156,6 @@ class MaibotLLMService:
         """Compatibility-shaped auxiliary call; execution remains MaiBot-native."""
         del thinking, kwargs
         prompt = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages or [])
-        maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
-        if maibot_root not in sys.path:
-            sys.path.insert(0, maibot_root)
         from src.services.llm_service import LLMServiceClient
 
         client = LLMServiceClient(task_name=task_name, request_type="wechat.auxiliary")

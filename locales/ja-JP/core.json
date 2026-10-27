@@ -1,0 +1,8 @@
+{
+  "core.not_found": "リソースが見つかりません",
+  "core.operation_failed": "操作に失敗しました: {error}",
+  "core.tasks_cancelled": {
+    "one": "{count} 件のタスクをキャンセルしました",
+    "other": "{count} 件のタスクをキャンセルしました"
+  }
+}

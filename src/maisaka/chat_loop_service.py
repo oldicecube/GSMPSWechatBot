@@ -1,0 +1,1598 @@
+"""Maisaka 对话循环服务。"""
+
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, List, Optional, Sequence
+
+import asyncio
+import time
+
+from rich.console import RenderableType
+
+from src.common.data_models.llm_service_data_models import LLMGenerationOptions
+from src.common.data_models.message_component_data_model import AtComponent
+from src.common.i18n import get_locale
+from src.common.logger import get_logger
+from src.common.prompt_i18n import load_prompt
+from src.common.utils.utils_config import ChatConfigUtils
+from src.common.utils.system_utils import is_bot_self
+from src.config.config import global_config
+from src.core.tooling import ToolAvailabilityContext, ToolRegistry
+from src.llm_models.model_client.base_client import BaseClient, GenerationAttempt
+from src.llm_models.payload_content.context_item import (
+    CONTEXT_ITEM_SCHEMA_VERSION,
+    ContextItem,
+    ContextItemBuilder,
+    FunctionCallItem,
+    FunctionCallOutputItem,
+    ProviderActivityItem,
+    RoleType,
+    UserMessageItem,
+    bind_output_items_to_turn,
+    get_response_reasoning,
+    get_response_text,
+    get_response_tool_calls,
+)
+from src.llm_models.payload_content.context_protocol import ContextProtocolMode
+from src.llm_models.payload_content.native_tool import NativeToolCallSummary
+from src.llm_models.payload_content.resp_format import RespFormat
+from src.llm_models.payload_content.tool_option import ToolCall, ToolDefinitionInput, ToolOption, normalize_tool_options
+from src.plugin_runtime.hook_payloads import (
+    deserialize_prompt_items,
+    serialize_prompt_items,
+    serialize_tool_definitions,
+)
+from src.plugin_runtime.hook_schema_utils import build_object_schema
+from src.plugin_runtime.host.hook_spec_registry import HookSpec, HookSpecRegistry
+from src.services.llm_service import LLMServiceClient
+
+from src.maisaka.builtin_tool import get_builtin_tools
+from src.maisaka.context.history import collect_tool_turn_anchor_indices, normalize_tool_call_result_pairs
+from src.maisaka.context.messages import (
+    IMAGE_QUALITY_MAX_SIDE,
+    LLMContextMessage,
+    ModelOutputContextMessage,
+    ReferenceMessage,
+    ReferenceMessageType,
+    SessionBackedMessage,
+    ToolResultMessage,
+    build_model_output_context_messages,
+    build_context_items_from_history_entry,
+)
+from src.maisaka.context.usage import (
+    ContextSectionUsage,
+    measure_request_sections,
+    resolve_tool_definition_name,
+)
+from src.maisaka.display.prompt_cli_renderer import PromptCLIVisualizer
+from src.maisaka.context.compaction import ContextSummaryMessage, PlannerRequestSnapshot
+from src.maisaka.context.post_processor import MIN_RETAINED_CHAT_MESSAGES
+from src.maisaka.focus import focus_mode_manager
+from src.maisaka.visual.message_limiter import limit_latest_images_in_messages
+from src.maisaka.visual.deferred_images import defer_context_image_encoding
+from src.maisaka.context.emoji_candidates import EmojiCandidateMessage
+from src.maisaka.visual.mode_utils import resolve_enable_visual_planner
+
+from .attention_drift import build_attention_drift_prompt_block
+
+REQUEST_TYPE_BY_REQUEST_KIND = {
+    "emotion": "emoji.selector",
+    "expression_selector": "expression.selector",
+    "planner": "maisaka.planner",
+    "sub_agent": "maisaka.sub_agent",
+}
+MODEL_TASK_NAME_BY_REQUEST_KIND: dict[str, str] = {
+    "expression_selector": "fast_model",
+}
+PROMPT_PREVIEW_CATEGORY_BY_REQUEST_KIND = {
+    "planner": "planner",
+    "expression_selector": "expression_selector",
+    "emotion": "emotion",
+    "sub_agent": "sub_agent",
+}
+CONTEXT_SELECTION_CACHE_STABILITY_RATIO = 2.0
+FOCUS_PLANNER_FINAL_USER_REMINDER_TEMPLATE = (
+    "你需要输出对{bot_name}发言的分析，视情况输出文本内容的分析，思考是否进行工具调用"
+)
+PLANNER_FINAL_USER_REMINDER = "请你进行分析，是不调用工具，进行思考和等待\n还是使用工具搜集处理信息或使用reply回复"
+PASSIVE_PLANNER_FINAL_USER_REMINDERS = {
+    "zh-CN": "需要信息或操作时调用工具；决定发言时直接输出指导正文，不附带工具调用；不发言用 stop，需要稍后判断用 wait。",
+    "en-US": "Use tools for information or actions. To speak, output guidance without tool calls. Use stop to stay silent, or wait to reconsider later.",
+    "ja-JP": "情報や操作が必要ならツールを使い、発言する場合はツール呼び出しを伴わない指針本文を出力してください。発言しない場合は stop、後で再判断する場合は wait を使ってください。",
+}
+
+
+@dataclass(slots=True)
+class ChatResponse:
+    """LLM 对话循环单步响应。"""
+
+    output_items: tuple[ContextItem, ...]
+    request_messages: List[ContextItem]
+    selected_history_count: int
+    tool_count: int
+    prompt_tokens: int
+    built_message_count: int
+    completion_tokens: int
+    total_tokens: int
+    model_name: str = ""
+    duration_ms: float = 0.0
+    prompt_section: Optional[RenderableType] = None
+    prompt_html_uri: Optional[str] = None
+    generation_attempts: tuple[GenerationAttempt, ...] = ()
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+    context_sections: tuple[ContextSectionUsage, ...] = ()
+
+    @property
+    def content(self) -> Optional[str]:
+        """从 Items 派生 Planner 可见正文。"""
+
+        return get_response_text(self.output_items) or None
+
+    @property
+    def reasoning(self) -> str:
+        """从 Items 派生 Provider reasoning 展示文本。"""
+
+        return get_response_reasoning(self.output_items)
+
+    @property
+    def tool_calls(self) -> List[ToolCall]:
+        """从 Items 派生通用工具调用。"""
+
+        return [
+            ToolCall(
+                call_id=tool_call.call_id,
+                func_name=tool_call.func_name,
+                args=tool_call.materialize_args(),
+                extra_content=tool_call.materialize_extra_content(),
+            )
+            for tool_call in get_response_tool_calls(self.output_items)
+        ]
+
+    @property
+    def raw_messages(self) -> List[ModelOutputContextMessage]:
+        """按 Item 粒度派生可写入 Maisaka 历史的 envelope。"""
+
+        return build_model_output_context_messages(self.output_items)
+
+    @property
+    def native_tool_calls(self) -> List[NativeToolCallSummary]:
+        """从 Provider activity Items 派生原生工具摘要。"""
+
+        return [
+            NativeToolCallSummary(
+                tool_type=item.provider_type,
+                call_id=item.call_id,
+                status=item.status,
+                action_type=item.action_type,
+                details=list(item.details),
+                source_count=item.source_count,
+            )
+            for item in self.output_items
+            if isinstance(item, ProviderActivityItem)
+        ]
+
+
+logger = get_logger("maisaka_chat_loop")
+
+
+def register_maisaka_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
+    """注册 Maisaka 规划器与 replyer 内置 Hook 规格。
+
+    Args:
+        registry: 目标 Hook 规格注册中心。
+
+    Returns:
+        List[HookSpec]: 实际注册的 Hook 规格列表。
+    """
+
+    return registry.register_hook_specs(
+        [
+            HookSpec(
+                name="maisaka.planner.before_request",
+                description="在 Maisaka 向模型发起规划请求前触发，可改写 Context Items 与工具定义。",
+                parameters_schema=build_object_schema(
+                    {
+                        "items": {
+                            "type": "array",
+                            "description": "即将发给模型的 Context Item 列表；不包含 replay payload。",
+                        },
+                        "item_schema_version": {
+                            "type": "integer",
+                            "description": "Context Item Hook 载荷版本。",
+                        },
+                        "tool_definitions": {
+                            "type": "array",
+                            "description": "当前候选工具定义列表。",
+                        },
+                        "selected_history_count": {
+                            "type": "integer",
+                            "description": "当前选中的上下文消息数量。",
+                        },
+                        "built_message_count": {
+                            "type": "integer",
+                            "description": "实际发送给模型的消息数量。",
+                        },
+                        "selection_reason": {
+                            "type": "string",
+                            "description": "上下文选择说明。",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                    },
+                    required=[
+                        "items",
+                        "item_schema_version",
+                        "tool_definitions",
+                        "selected_history_count",
+                        "built_message_count",
+                        "selection_reason",
+                        "session_id",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+            HookSpec(
+                name="maisaka.planner.after_response",
+                description="在 Maisaka 收到模型响应后触发，可按 Item 调整输出。",
+                parameters_schema=build_object_schema(
+                    {
+                        "output_items": {
+                            "type": "array",
+                            "description": "模型返回的 Context Output Items；不包含 replay payload。",
+                        },
+                        "item_schema_version": {
+                            "type": "integer",
+                            "description": "Context Item Hook 载荷版本。",
+                        },
+                        "selected_history_count": {
+                            "type": "integer",
+                            "description": "当前选中的上下文消息数量。",
+                        },
+                        "built_message_count": {
+                            "type": "integer",
+                            "description": "实际发送给模型的消息数量。",
+                        },
+                        "selection_reason": {
+                            "type": "string",
+                            "description": "上下文选择说明。",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                        "prompt_tokens": {
+                            "type": "integer",
+                            "description": "输入 Token 数。",
+                        },
+                        "completion_tokens": {
+                            "type": "integer",
+                            "description": "输出 Token 数。",
+                        },
+                        "total_tokens": {
+                            "type": "integer",
+                            "description": "总 Token 数。",
+                        },
+                    },
+                    required=[
+                        "output_items",
+                        "item_schema_version",
+                        "selected_history_count",
+                        "built_message_count",
+                        "selection_reason",
+                        "session_id",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+            HookSpec(
+                name="maisaka.replyer.before_request",
+                description="在 Maisaka replyer 向模型发起请求前触发，可读取或改写本次 reply 工具透传参数。",
+                parameters_schema=build_object_schema(
+                    {
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                        "request_type": {
+                            "type": "string",
+                            "description": "当前 replyer 请求类型。",
+                        },
+                        "task_name": {
+                            "type": "string",
+                            "description": "本次 replyer 请求使用的模型任务名；Hook 可改写该值。",
+                        },
+                        "model_name": {
+                            "type": "string",
+                            "description": "本次 replyer 请求指定使用的具体模型名；留空时按任务策略选择。",
+                        },
+                        "extra_prompt": {
+                            "type": "string",
+                            "description": "Hook 可追加到本次 replyer 提示词中的额外回复要求。",
+                        },
+                        "attempt": {
+                            "type": "integer",
+                            "description": "当前生成尝试序号，从 1 开始。",
+                        },
+                        "retry_count": {
+                            "type": "integer",
+                            "description": "当前已经重新生成的次数。",
+                        },
+                        "max_retries": {
+                            "type": "integer",
+                            "description": "本轮 replyer 最多允许重新生成多少次。",
+                        },
+                        "reply_message_id": {
+                            "type": "string",
+                            "description": "被回复消息 ID；无目标消息时为空字符串。",
+                        },
+                        "reply_reason": {
+                            "type": "string",
+                            "description": "本次 replyer 生成的回复理由。",
+                        },
+                        "selected_expression_ids": {
+                            "type": "array",
+                            "description": "本次 replyer 选中的表达方式编号列表。",
+                        },
+                        "reply_tool_args": {
+                            "type": "object",
+                            "description": "reply 工具透传给 replyer 的额外参数，不含目标消息 ID 等内部参数。",
+                        },
+                    },
+                    required=[
+                        "session_id",
+                        "request_type",
+                        "task_name",
+                        "model_name",
+                        "extra_prompt",
+                        "attempt",
+                        "retry_count",
+                        "max_retries",
+                        "reply_message_id",
+                        "reply_reason",
+                        "selected_expression_ids",
+                        "reply_tool_args",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+            HookSpec(
+                name="maisaka.replyer.before_model_request",
+                description="在 Maisaka replyer 构造完本次模型请求后触发，可改写实际发送的 Context Items。",
+                parameters_schema=build_object_schema(
+                    {
+                        "items": {
+                            "type": "array",
+                            "description": "即将发给模型的 Context Items；不包含 replay payload。",
+                        },
+                        "item_schema_version": {
+                            "type": "integer",
+                            "description": "Context Item Hook 载荷版本。",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                        "request_type": {
+                            "type": "string",
+                            "description": "当前 replyer 请求类型。",
+                        },
+                        "task_name": {
+                            "type": "string",
+                            "description": "本次 replyer 实际使用的模型任务名。",
+                        },
+                        "requested_model_name": {
+                            "type": "string",
+                            "description": "before_request Hook 请求指定的具体模型名；留空表示按任务策略选择。",
+                        },
+                        "selected_model_name": {
+                            "type": "string",
+                            "description": "当前尝试实际选中的模型名；未进入具体模型尝试时为空字符串。",
+                        },
+                        "selected_model_visual": {
+                            "type": "boolean",
+                            "description": "当前尝试选中的模型是否启用 visual 能力。",
+                        },
+                        "attempt": {
+                            "type": "integer",
+                            "description": "当前生成尝试序号，从 1 开始。",
+                        },
+                        "retry_count": {
+                            "type": "integer",
+                            "description": "当前已经重新生成的次数。",
+                        },
+                        "max_retries": {
+                            "type": "integer",
+                            "description": "本轮 replyer 最多允许重新生成多少次。",
+                        },
+                        "reply_message_id": {
+                            "type": "string",
+                            "description": "被回复消息 ID；无目标消息时为空字符串。",
+                        },
+                        "reply_reason": {
+                            "type": "string",
+                            "description": "本次 replyer 生成的回复理由。",
+                        },
+                        "selected_expression_ids": {
+                            "type": "array",
+                            "description": "本次 replyer 选中的表达方式编号列表。",
+                        },
+                        "reply_tool_args": {
+                            "type": "object",
+                            "description": "reply 工具透传给 replyer 的额外参数，不含目标消息 ID 等内部参数。",
+                        },
+                    },
+                    required=[
+                        "items",
+                        "item_schema_version",
+                        "session_id",
+                        "request_type",
+                        "task_name",
+                        "requested_model_name",
+                        "selected_model_name",
+                        "selected_model_visual",
+                        "attempt",
+                        "retry_count",
+                        "max_retries",
+                        "reply_message_id",
+                        "reply_reason",
+                        "selected_expression_ids",
+                        "reply_tool_args",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+            HookSpec(
+                name="maisaka.replyer.after_response",
+                description="在 Maisaka replyer 收到模型响应后触发，可要求重新生成或改写回复文本。",
+                parameters_schema=build_object_schema(
+                    {
+                        "response": {
+                            "type": "string",
+                            "description": "replyer 可见正文的兼容只读投影；改写时仅替换正文 Item。",
+                        },
+                        "output_items": {
+                            "type": "array",
+                            "description": "replyer 模型返回的 Context Output Items；不包含 replay payload。",
+                        },
+                        "item_schema_version": {
+                            "type": "integer",
+                            "description": "Context Item Hook 载荷版本。",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                        "request_type": {
+                            "type": "string",
+                            "description": "当前 replyer 请求类型。",
+                        },
+                        "task_name": {
+                            "type": "string",
+                            "description": "本次 replyer 实际使用的模型任务名。",
+                        },
+                        "requested_model_name": {
+                            "type": "string",
+                            "description": "Hook 请求指定的具体模型名；留空表示按任务策略选择。",
+                        },
+                        "attempt": {
+                            "type": "integer",
+                            "description": "当前生成尝试序号，从 1 开始。",
+                        },
+                        "retry_count": {
+                            "type": "integer",
+                            "description": "当前已经重新生成的次数。",
+                        },
+                        "max_retries": {
+                            "type": "integer",
+                            "description": "本轮 replyer 最多允许重新生成多少次。",
+                        },
+                        "reply_message_id": {
+                            "type": "string",
+                            "description": "被回复消息 ID；无目标消息时为空字符串。",
+                        },
+                        "selected_expression_ids": {
+                            "type": "array",
+                            "description": "本次 replyer 选中的表达方式编号列表。",
+                        },
+                        "reply_tool_args": {
+                            "type": "object",
+                            "description": "reply 工具透传给 replyer 的额外参数，不含目标消息 ID 等内部参数。",
+                        },
+                        "prompt_tokens": {
+                            "type": "integer",
+                            "description": "输入 Token 数。",
+                        },
+                        "completion_tokens": {
+                            "type": "integer",
+                            "description": "输出 Token 数。",
+                        },
+                        "total_tokens": {
+                            "type": "integer",
+                            "description": "总 Token 数。",
+                        },
+                        "retry": {
+                            "type": "boolean",
+                            "description": "Hook 处理器可置为 true，要求 replyer 重新生成。",
+                        },
+                        "retry_reason": {
+                            "type": "string",
+                            "description": "可选的重新生成约束原因；留空时只重新生成，不追加下一轮 replyer 提示词。",
+                        },
+                        "matched_regex": {
+                            "type": "string",
+                            "description": "触发重新生成的正则或规则名称。",
+                        },
+                        "matched_regex_pattern": {
+                            "type": "string",
+                            "description": "触发重新生成的正则文本。",
+                        },
+                        "matched_regex_description": {
+                            "type": "string",
+                            "description": "触发重新生成的规则说明。",
+                        },
+                    },
+                    required=[
+                        "response",
+                        "output_items",
+                        "item_schema_version",
+                        "session_id",
+                        "request_type",
+                        "task_name",
+                        "requested_model_name",
+                        "attempt",
+                        "retry_count",
+                        "max_retries",
+                        "reply_message_id",
+                        "selected_expression_ids",
+                        "reply_tool_args",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+            HookSpec(
+                name="maisaka.reply.before_post_process",
+                description="在 Maisaka 对最终可见回复执行文本后处理前触发，可按本次回复调整后处理策略。",
+                parameters_schema=build_object_schema(
+                    {
+                        "response": {
+                            "type": "string",
+                            "description": "即将执行文本后处理的最终回复正文。",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "当前会话 ID。",
+                        },
+                        "reply_message_id": {
+                            "type": "string",
+                            "description": "被回复消息 ID。",
+                        },
+                        "reply_tool_args": {
+                            "type": "object",
+                            "description": "本次 reply 工具除内部参数外的透传参数。",
+                        },
+                        "skip_post_process": {
+                            "type": "boolean",
+                            "description": "是否跳过本次回复的全部文本后处理。",
+                        },
+                        "enable_splitter": {
+                            "type": "boolean",
+                            "description": "本次回复是否允许按全局配置进行文本拆分。",
+                        },
+                        "enable_chinese_typo": {
+                            "type": "boolean",
+                            "description": "本次回复是否允许按全局配置注入中文错别字。",
+                        },
+                    },
+                    required=[
+                        "response",
+                        "session_id",
+                        "reply_message_id",
+                        "reply_tool_args",
+                        "skip_post_process",
+                        "enable_splitter",
+                        "enable_chinese_typo",
+                    ],
+                ),
+                default_timeout_ms=6000,
+                allow_abort=False,
+                allow_kwargs_mutation=True,
+            ),
+        ]
+    )
+
+
+class MaisakaChatLoopService:
+    """负责 Maisaka 主对话循环、系统提示词和终端渲染。"""
+
+    def __init__(
+        self,
+        chat_system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+        is_group_chat: Optional[bool] = None,
+        model_task_name: str = "planner",
+    ) -> None:
+        """初始化 Maisaka 对话循环服务。
+
+        Args:
+            chat_system_prompt: 可选的系统提示词。
+            session_id: 当前会话 ID，用于匹配会话级额外提示。
+            is_group_chat: 当前会话是否为群聊。
+        """
+        self._model_task_name = model_task_name.strip() or "planner"
+        self._is_group_chat = is_group_chat
+        self._session_id = session_id or ""
+        self._bot_platform = ""
+        self._bot_platform_nickname = ""
+        self._bot_group_cardname = ""
+        self._extra_tools: List[ToolOption] = []
+        self._interrupt_flag: asyncio.Event | None = None
+        self._tool_registry: ToolRegistry | None = None
+        self._active_tool_names: tuple[str, ...] = ()
+        self._custom_chat_system_prompt = chat_system_prompt
+        self._prompt_load_lock = asyncio.Lock()
+        self._llm_chat_clients: dict[str, LLMServiceClient] = {}
+        self.planner_request_snapshot: PlannerRequestSnapshot | None = None
+        self.passive_replyer_override: Optional[bool] = None
+
+    @property
+    def behavior_style_prompt(self) -> str:
+        """返回 Planner 使用的行为风格提示词。"""
+
+        return global_config.personality.behavior_style.strip()
+
+    @staticmethod
+    def _resolve_llm_request_type(request_kind: str) -> str:
+        """根据 Maisaka 请求类型解析 LLM 统计口径。"""
+
+        normalized_request_kind = str(request_kind or "").strip()
+        if not normalized_request_kind:
+            normalized_request_kind = "planner"
+        request_type = REQUEST_TYPE_BY_REQUEST_KIND.get(normalized_request_kind)
+        if request_type is None:
+            raise ValueError(f"未注册的 Maisaka LLM request_kind: {normalized_request_kind}")
+        return request_type
+
+    @staticmethod
+    def _resolve_prompt_preview_category(request_kind: str) -> str:
+        """根据请求类型决定 Prompt 预览落盘目录，避免子代理混入 planner。"""
+
+        normalized_request_kind = str(request_kind or "").strip().lower()
+        if not normalized_request_kind:
+            return "planner"
+        return PROMPT_PREVIEW_CATEGORY_BY_REQUEST_KIND.get(normalized_request_kind, normalized_request_kind)
+
+    def _resolve_model_task_name(self, request_kind: str) -> str:
+        """根据请求类型解析模型任务配置名。"""
+
+        normalized_request_kind = str(request_kind or "").strip().lower()
+        return MODEL_TASK_NAME_BY_REQUEST_KIND.get(normalized_request_kind, self._model_task_name)
+
+    def _get_llm_chat_client(self, request_kind: str) -> LLMServiceClient:
+        """获取当前请求类型对应的 LLM 客户端。"""
+
+        request_type = self._resolve_llm_request_type(request_kind)
+        model_task_name = self._resolve_model_task_name(request_kind)
+        client_key = f"{model_task_name}:{request_type}"
+        llm_client = self._llm_chat_clients.get(client_key)
+        if llm_client is None:
+            llm_client = LLMServiceClient(
+                task_name=model_task_name,
+                request_type=request_type,
+                session_id=self._session_id,
+            )
+            self._llm_chat_clients[client_key] = llm_client
+        return llm_client
+
+    @staticmethod
+    def _get_runtime_manager() -> Any:
+        """获取插件运行时管理器。
+
+        Returns:
+            Any: 插件运行时管理器单例。
+        """
+
+        from src.plugin_runtime.integration import get_plugin_runtime_manager
+
+        return get_plugin_runtime_manager()
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int) -> int:
+        """将任意值安全转换为整数。
+
+        Args:
+            value: 待转换的输入值。
+            default: 转换失败时的默认值。
+
+        Returns:
+            int: 转换后的整数结果。
+        """
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _log_prompt_cache_usage(
+        *,
+        request_kind: str,
+        prompt_tokens: int,
+        prompt_cache_hit_tokens: int,
+        prompt_cache_miss_tokens: int,
+    ) -> None:
+        """记录模型 KV cache 命中情况。"""
+
+        prompt_cache_total_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
+        prompt_cache_hit_rate = (
+            prompt_cache_hit_tokens / prompt_cache_total_tokens * 100 if prompt_cache_total_tokens > 0 else 0
+        )
+        logger.info(
+            f"Planner缓存 [{request_kind}] 输入={prompt_tokens} "
+            f"命中={prompt_cache_hit_tokens} 未命中={prompt_cache_miss_tokens} "
+            f"命中率={prompt_cache_hit_rate:.2f}%"
+        )
+
+    async def ensure_chat_prompt_loaded(self, tools_section: str = "") -> None:
+        """确保主聊天提示词已经加载完成。
+
+        Args:
+            tools_section: 额外注入到提示词中的工具说明片段。
+        """
+        async with self._prompt_load_lock:
+            self._build_chat_system_prompt(tools_section)
+
+    def _build_chat_system_prompt(self, tools_section: str = "", bot_nickname_notice: str = "") -> str:
+        """基于当前配置实时构造主聊天系统提示词。
+
+        Args:
+            tools_section: 额外注入到提示词中的工具说明片段。
+            bot_nickname_notice: 普通聊天模板中紧跟在名字之后的平台昵称说明；其他模板不使用。
+        """
+
+        system_prompt = load_prompt(
+            self._get_chat_prompt_name(),
+            **self.build_prompt_template_context(tools_section, bot_nickname_notice),
+        )
+        # 每轮读取实验开关，普通与专注模式共用同一份本地化风格指令。
+        if attention_drift := build_attention_drift_prompt_block():
+            system_prompt += f"\n\n{attention_drift}"
+        return system_prompt
+
+    def _build_planner_final_user_reminder(self) -> str:
+        """构造每轮 Planner 请求末尾的一次性 user 提醒。"""
+
+        prompt_name = self._get_chat_prompt_name()
+        if prompt_name == "maisaka_chat_passive":
+            return PASSIVE_PLANNER_FINAL_USER_REMINDERS.get(get_locale(), PASSIVE_PLANNER_FINAL_USER_REMINDERS["zh-CN"])
+        if prompt_name == "maisaka_chat":
+            return PLANNER_FINAL_USER_REMINDER
+        return FOCUS_PLANNER_FINAL_USER_REMINDER_TEMPLATE.format(bot_name=global_config.bot.nickname.strip())
+
+    def _get_chat_prompt_name(self) -> str:
+        """选择当前聊天使用的 Planner 模板。"""
+
+        if focus_mode_manager.is_enabled_for_session(self._session_id, is_group_chat=self._is_group_chat):
+            return "maisaka_chat_focus"
+        passive_replyer = (
+            self.passive_replyer_override if self.passive_replyer_override is not None
+            else global_config.experimental.passive_replyer
+        )
+        if passive_replyer:
+            return "maisaka_chat_passive"
+        return "maisaka_chat"
+
+    def _build_bot_alias_notice(self) -> str:
+        """构造普通聊天模板中紧跟在名字之后的别名说明；没有配置别名时为空。"""
+
+        alias_names = [alias_name.strip() for alias_name in global_config.bot.alias_names if alias_name.strip()]
+        if not alias_names:
+            return ""
+        return self._localized_text(
+            {
+                "en-US": f"; some people also call you {', '.join(alias_names)}",
+                "ja-JP": f"（{'、'.join(alias_names)}と呼ぶ人もいます）",
+                "zh-CN": f"，还有人叫你{'、'.join(alias_names)}",
+            }
+        )
+
+    def build_prompt_template_context(self, tools_section: str = "", bot_nickname_notice: str = "") -> dict[str, str]:
+        """构造 Maisaka prompt 模板的公共渲染参数。"""
+
+        return {
+            "bot_name": global_config.bot.nickname,
+            "bot_alias_notice": self._build_bot_alias_notice(),
+            # 昵称说明另起一行跟在名字、人格特征和行为风格之后；没有需要说明的昵称时不占行
+            "bot_nickname_notice": f"\n{bot_nickname_notice}" if bot_nickname_notice else "",
+            "personality": global_config.personality.personality.strip(),
+            "behavior_style": self.behavior_style_prompt,
+            "file_tools_section": tools_section,
+            "group_chat_attention_block": self._build_group_chat_attention_block(),
+            "planner_idle_focus_rule": self._build_planner_idle_focus_rule(),
+            "query_memory_rule": self._build_query_memory_rule(),
+            "subagent_rule": self._build_subagent_rule(),
+        }
+
+    @staticmethod
+    def _build_time_user_message(timestamp: datetime) -> str:
+        """构建统一格式的时间提示消息。"""
+
+        return f"时间：{timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+
+    @staticmethod
+    def _build_current_time_user_message() -> str:
+        """构建追加到请求末尾的当前时间消息。"""
+
+        return MaisakaChatLoopService._build_time_user_message(datetime.now())
+
+    @staticmethod
+    def _append_time_user_message(items: List[ContextItem], timestamp: datetime) -> None:
+        """向请求消息列表追加一条时间提示。"""
+
+        items.append(
+            ContextItemBuilder()
+            .set_role(RoleType.User)
+            .add_text_content(MaisakaChatLoopService._build_time_user_message(timestamp))
+            .build()
+        )
+
+    def _build_group_chat_attention_block(self) -> str:
+        """构建当前聊天场景下的额外注意事项块。"""
+
+        prompt_lines: List[str] = []
+
+        if self._is_group_chat is True:
+            if group_chat_prompt := str(global_config.chat.reply_style.group_chat_prompt or "").strip():
+                prompt_lines.append(group_chat_prompt)
+        elif self._is_group_chat is False:
+            if private_chat_prompt := str(global_config.chat.reply_style.private_chat_prompts or "").strip():
+                prompt_lines.append(private_chat_prompt)
+
+        if not prompt_lines:
+            return ""
+
+        return "\n\n".join(prompt_lines) + "\n"
+
+    @staticmethod
+    def _localized_text(texts: dict[str, str]) -> str:
+        """按当前语言读取文案，默认中文。"""
+
+        return texts.get(get_locale(), texts["zh-CN"])
+
+    def _build_planner_idle_focus_rule(self) -> str:
+        """构造 Focus 模式下空闲等待动作提示。"""
+
+        return self._localized_text(
+            {
+                "en-US": "Consider all chats in the shared context. Every tool requires its target session_id. Use wait only to pause the entire group; otherwise finish this thought when no action is needed.",
+                "ja-JP": "共有コンテキスト内の全チャットを判断してください。すべてのツールに対象の session_id が必要です。wait はグループ全体を待機させる場合だけ使い、行動が不要なら思考を終了してください。",
+                "zh-CN": "结合共享上下文中的所有聊天判断，每个工具填写目标 session_id；只有需要整个组暂停等待时才使用 wait，没有需要执行的动作时结束本轮思考。",
+            }
+        )
+
+    def _build_query_memory_rule(self) -> str:
+        """按当前聊天类型构造记忆检索提示。"""
+
+        if self._is_group_chat:
+            return self._localized_text(
+                {
+                    "en-US": "- query_memory(): Use it only when the reply clearly depends on past group conversation, shared experiences, public agreements, task progress, or recent clues. Do not retrieve memory for greetings, immediate emotional responses, light banter, or content that can be answered from recent messages alone. Do not bring private-chat or personal-privacy memories into a group chat.",
+                    "ja-JP": "- query_memory()：返信がグループ内の過去会話、共有した経験、公開された約束、タスクの進捗、最近の手がかりに明確に依存する場合だけ使ってください。挨拶、その場の感情への反応、軽いやり取り、最近のメッセージだけで答えられる内容では検索しないでください。個人チャットや私的な記憶をグループチャットに持ち込まないでください。",
+                    "zh-CN": "- query_memory()：只有回复明显依赖群内过去对话、共同经历、公开约定、任务进展或近期线索时使用；不要为了寒暄、即时情绪回应、轻松接话、只看最近消息就能回答的内容而检索。不要把私聊或个人隐私记忆带到群聊里。",
+                }
+            )
+
+        return self._localized_text(
+            {
+                "en-US": '- query_memory(): Consider retrieval more actively when the other person mentions signals like "before", "last time", "recently", "do you remember", "I like", or "I said", or when the reply depends on long-term preferences, prior promises, shared experiences, or long-term information about a person.',
+                "ja-JP": "- query_memory()：相手が「前に」「この前」「最近」「覚えてる？」「好き」「言った」などの合図を出した場合、または返信が長期的な好み、以前の約束、共有した経験、人物の長期的な情報に依存する場合は、より積極的に検索を検討できます。",
+                "zh-CN": "- query_memory()：当对方提到“之前”“上次”“最近”“还记得吗”“我喜欢”“我说过”等信号，或回复依赖长期偏好、先前承诺、共同经历、人物长期信息时，可以更积极检索。",
+            }
+        )
+
+    def _build_subagent_rule(self) -> str:
+        """开启子代理时说明何时该把任务交给 subagent；未开启时为空，不占提示词。"""
+
+        if not global_config.capabilities.planner_subagent:
+            return ""
+        rule = self._localized_text(
+            {
+                "en-US": "- subagent(): When something needs looking up before you can answer or judge it (reading docs, searching the web, checking version or plugin information, finding images, verifying a claim, and so on), prefer handing it to a sub-agent: state clearly what to find out and grant it the tools it may need. It only hands you its conclusion. Call a tool directly only for things that take a single step.",
+                "ja-JP": "- subagent()：答えたり判断したりする前に調べものが必要なこと（ドキュメントの確認、ウェブ検索、バージョンやプラグイン情報の確認、画像探し、ある主張の検証など）は、サブエージェントに任せることを優先してください。何を調べるかを明確に書き、使えそうなツールを許可します。サブエージェントは結論だけをあなたに渡します。一手で済むことだけ、該当するツールを直接呼び出してください。",
+                "zh-CN": "- subagent()：遇到需要查资料才能回答或判断的事（查文档、搜网页、查版本或插件信息、找图、核实某个说法等），优先交给子代理：写清楚要查什么，把用得上的工具授权给它；它查完只把结论交给你。只有一步就能完成的事才直接调用对应工具。",
+            }
+        )
+        if global_config.capabilities.advanced_sub_agent:
+            rule += self._localized_text(
+                {
+                    "en-US": " The sub-agent runs in the background: after dispatching it you do not need to wait and can keep chatting; its conclusion will be sent back to you later.",
+                    "ja-JP": "サブエージェントはバックグラウンドで動作します。依頼したあとは待つ必要はなく、会話を続けてかまいません。結論は後であなたに返されます。",
+                    "zh-CN": "子代理在后台运行，派发后不用等它，可以继续聊天，结论稍后会送回给你。",
+                }
+            )
+        return f"\n{rule}"
+
+    def _build_current_chat_attention_tail_message(self) -> str:
+        """构建追加到请求末尾的当前聊天专属注意事项。"""
+
+        if not self._session_id:
+            return ""
+        chat_prompt = self._get_chat_prompt_for_chat(self._session_id, self._is_group_chat).strip()
+        if not chat_prompt:
+            return ""
+        return f"当前聊天额外注意事项：\n{chat_prompt}"
+
+    @staticmethod
+    def _get_chat_prompt_for_chat(chat_id: str, is_group_chat: Optional[bool]) -> str:
+        """根据聊天流 ID 获取匹配的额外提示。"""
+        return ChatConfigUtils.get_chat_prompt_for_chat(chat_id, is_group_chat)
+
+    def set_extra_tools(self, tools: Sequence[ToolDefinitionInput]) -> None:
+        """设置额外工具定义。
+
+        Args:
+            tools: 兼容旧接口的额外工具定义列表。
+        """
+
+        self._extra_tools = normalize_tool_options(list(tools)) or []
+
+    def set_tool_registry(self, tool_registry: ToolRegistry | None) -> None:
+        """设置统一工具注册表。
+
+        Args:
+            tool_registry: 统一工具注册表；传入 ``None`` 时退回旧工具列表模式。
+        """
+
+        self._tool_registry = tool_registry
+
+    def set_interrupt_flag(self, interrupt_flag: asyncio.Event | None) -> None:
+        """设置当前 planner 请求使用的中断标记。"""
+        self._interrupt_flag = interrupt_flag
+
+    def _build_bot_nickname_notice(
+        self,
+        history: Sequence[LLMContextMessage],
+        *,
+        skip_same_as_bot_name: bool = False,
+    ) -> str:
+        """从本会话的真实 @ 信息更新昵称，在上下文前说明 bot 的平台身份。
+
+        Args:
+            history: 已选中的上下文消息列表。
+            skip_same_as_bot_name: 是否省略与配置名字相同的昵称；提示词里已经写明名字时不需要重复。
+        """
+
+        # 按历史顺序更新，保留最近一次明确提供的昵称；不要把配置昵称当成平台信息。
+        for entry in history:
+            if not isinstance(entry, SessionBackedMessage):
+                continue
+            message = entry.original_message
+            if not self._session_id or message.session_id != self._session_id:
+                continue
+            for component in message.raw_message.components:
+                if not isinstance(component, AtComponent) or not is_bot_self(message.platform, component.target_user_id):
+                    continue
+                if component.uses_configured_bot_nickname:
+                    continue
+                self._bot_platform = message.platform
+                if component.target_user_nickname:
+                    self._bot_platform_nickname = component.target_user_nickname
+                if self._is_group_chat and component.target_user_cardname:
+                    self._bot_group_cardname = component.target_user_cardname
+
+        bot_name = global_config.bot.nickname.strip()
+        lines: List[str] = []
+        if self._bot_platform_nickname and not (skip_same_as_bot_name and self._bot_platform_nickname == bot_name):
+            lines.append(self._localized_text({
+                "zh-CN": f"你在 {self._bot_platform} 平台的昵称是“{self._bot_platform_nickname}”。",
+                "en-US": f'Your nickname on {self._bot_platform} is "{self._bot_platform_nickname}".',
+                "ja-JP": f"{self._bot_platform} でのあなたのニックネームは「{self._bot_platform_nickname}」です。",
+            }))
+        if (
+            self._is_group_chat
+            and self._bot_group_cardname
+            and not (skip_same_as_bot_name and self._bot_group_cardname == bot_name)
+        ):
+            lines.append(self._localized_text({
+                "zh-CN": f"你在本群的昵称是“{self._bot_group_cardname}”。",
+                "en-US": f'Your nickname in this group is "{self._bot_group_cardname}".',
+                "ja-JP": f"このグループでのあなたのニックネームは「{self._bot_group_cardname}」です。",
+            }))
+        return (" " if get_locale() == "en-US" else "").join(lines)
+
+    @defer_context_image_encoding(lambda result: result[0])
+    def _build_request_messages(
+        self,
+        selected_history: List[LLMContextMessage],
+        *,
+        enable_visual_message: bool,
+        include_day_boundary_time_messages: bool = False,
+        injected_user_messages: Sequence[str] | None = None,
+        tail_user_messages: Sequence[str] | None = None,
+        final_user_message: str | None = None,
+        system_prompt: Optional[str] = None,
+    ) -> tuple[List[ContextItem], int]:
+        """构造发给大模型的消息列表。
+
+        Args:
+            selected_history: 已选中的上下文消息列表。
+
+        Returns:
+            tuple[List[ContextItem], int]: 发送给大模型的 Context Items，以及紧随系统提示词之后的历史消息条数。
+        """
+
+        items: List[ContextItem] = []
+        system_item = ContextItemBuilder().set_role(RoleType.System)
+        uses_builtin_system_prompt = system_prompt is None and self._custom_chat_system_prompt is None
+        if uses_builtin_system_prompt and self._get_chat_prompt_name() in {"maisaka_chat", "maisaka_chat_passive"}:
+            # 普通聊天模板自己写明了名字：昵称说明跟在名字之后，且只说明与名字不同的昵称
+            bot_nickname_notice = self._build_bot_nickname_notice(selected_history, skip_same_as_bot_name=True)
+            resolved_system_prompt = self._build_chat_system_prompt(bot_nickname_notice=bot_nickname_notice)
+        else:
+            if system_prompt is not None:
+                resolved_system_prompt = system_prompt
+            elif self._custom_chat_system_prompt is not None:
+                resolved_system_prompt = self._custom_chat_system_prompt
+            else:
+                resolved_system_prompt = self._build_chat_system_prompt()
+            bot_nickname_notice = self._build_bot_nickname_notice(selected_history)
+            if bot_nickname_notice:
+                resolved_system_prompt = f"{bot_nickname_notice}\n\n{resolved_system_prompt}"
+        system_item.add_text_content(resolved_system_prompt)
+        items.append(system_item.build())
+
+        previous_context_timestamp: datetime | None = None
+        deferred_boundary_timestamps: List[datetime] = []
+        history_context_items: List[ContextItem] = []
+        for msg in selected_history:
+            context_items = build_context_items_from_history_entry(
+                msg,
+                enable_visual_message=enable_visual_message,
+                limit_emoji_size=True,
+                max_image_side=IMAGE_QUALITY_MAX_SIDE[global_config.visual.image_quality],
+            )
+            if not context_items:
+                continue
+
+            # assistant tool_calls 与其连续 tool 结果是协议原子段，跨日时间提示必须延后到整个结果段之后。
+            is_tool_result_entry = all(isinstance(item, FunctionCallOutputItem) for item in context_items)
+            if not is_tool_result_entry and deferred_boundary_timestamps:
+                for boundary_timestamp in deferred_boundary_timestamps:
+                    self._append_time_user_message(items, boundary_timestamp)
+                deferred_boundary_timestamps.clear()
+
+            if (
+                include_day_boundary_time_messages
+                and previous_context_timestamp is not None
+                and previous_context_timestamp.date() != msg.timestamp.date()
+            ):
+                if is_tool_result_entry:
+                    deferred_boundary_timestamps.append(msg.timestamp)
+                else:
+                    self._append_time_user_message(items, msg.timestamp)
+
+            items.extend(context_items)
+            history_context_items.extend(context_items)
+            previous_context_timestamp = msg.timestamp
+
+        for boundary_timestamp in deferred_boundary_timestamps:
+            self._append_time_user_message(items, boundary_timestamp)
+
+        # 历史上下文到此结束，后续追加的都是当轮即时提示
+        history_item_count = len(items) - 1
+
+        normalized_injected_items: List[ContextItem] = []
+        current_chat_attention = self._build_current_chat_attention_tail_message()
+        final_user_messages = [
+            *(injected_user_messages or []),
+            self._build_current_time_user_message(),
+            *(tail_user_messages or []),
+            current_chat_attention,
+        ]
+        for injected_message in final_user_messages:
+            normalized_message = str(injected_message or "").strip()
+            if not normalized_message:
+                continue
+            normalized_injected_items.append(
+                ContextItemBuilder().set_role(RoleType.User).add_text_content(normalized_message).build()
+            )
+
+        if normalized_injected_items:
+            items.extend(normalized_injected_items)
+
+        normalized_final_user_message = str(final_user_message or "").strip()
+        if normalized_final_user_message:
+            items.append(
+                ContextItemBuilder()
+                .set_role(RoleType.User)
+                .add_text_content(normalized_final_user_message)
+                .build()
+            )
+
+        # 跨日时间提示由本方法生成，不能代替真实 user 消息充当工具调用锚点
+        self._validate_function_call_context_anchors(history_context_items)
+        if enable_visual_message:
+            items = limit_latest_images_in_messages(
+                items,
+                max_image_num=global_config.visual.max_image_num,
+                preserved_item_ids={
+                    msg.item.meta.item_id for msg in selected_history if isinstance(msg, EmojiCandidateMessage)
+                },
+            )
+        return items, history_item_count
+
+    @staticmethod
+    def _validate_function_call_context_anchors(items: Sequence[ContextItem]) -> None:
+        """禁止请求历史从缺少 user/function output 锚点的工具调用开始。"""
+
+        has_function_call_anchor = False
+        for item in items:
+            if isinstance(item, (UserMessageItem, FunctionCallOutputItem)):
+                has_function_call_anchor = True
+                continue
+            if isinstance(item, FunctionCallItem) and not has_function_call_anchor:
+                raise ValueError(
+                    f"请求上下文中的 function call 缺少前置 user/function output 锚点: call_id={item.tool_call.call_id}"
+                )
+
+    async def chat_loop_step(
+        self,
+        chat_history: List[LLMContextMessage],
+        *,
+        injected_user_messages: Sequence[str] | None = None,
+        request_kind: str = "planner",
+        response_format: RespFormat | None = None,
+        tool_definitions: Sequence[ToolDefinitionInput] | None = None,
+        max_context_size: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tail_user_messages: Sequence[str] | None = None,
+        logical_turn_id: str | None = None,
+    ) -> ChatResponse:
+        """执行一轮 Maisaka 规划器请求。
+
+        Args:
+            chat_history: 当前对话历史。
+
+        Returns:
+            ChatResponse: 本轮规划器返回结果。
+        """
+
+        enable_visual_message = self._resolve_enable_visual_message(request_kind)
+        # 拼图仅在调用工具时追加；不因后续图片增加而替换历史图片、破坏 KV 缓存前缀。
+        preserved_image_item_ids = {
+            message.item.meta.item_id for message in chat_history if isinstance(message, EmojiCandidateMessage)
+        }
+        selected_history, selection_reason = self.select_llm_context_messages(
+            chat_history,
+            request_kind=request_kind,
+            enable_visual_message=enable_visual_message,
+            max_context_size=max_context_size,
+            is_group_chat=self._is_group_chat,
+        )
+        # 上下文可能触发表情包解码、缩放和缓存等待，在线程池执行，避免阻塞事件循环。
+        built_messages, history_item_count = await asyncio.to_thread(
+            self._build_request_messages,
+            selected_history,
+            enable_visual_message=enable_visual_message,
+            include_day_boundary_time_messages=request_kind == "planner",
+            injected_user_messages=injected_user_messages,
+            tail_user_messages=tail_user_messages,
+            final_user_message=(
+                self._build_planner_final_user_reminder() if request_kind == "planner" else None
+            ),
+            system_prompt=system_prompt,
+        )
+        if enable_visual_message:
+            built_messages = limit_latest_images_in_messages(
+                built_messages,
+                max_image_num=global_config.visual.max_image_num,
+                preserved_item_ids=preserved_image_item_ids,
+            )
+
+        def context_factory(_client: BaseClient) -> List[ContextItem]:
+            """返回当前轮次已经构建好的请求 Context Items。
+
+            Args:
+                _client: 当前模型客户端；此处不依赖客户端能力。
+
+            Returns:
+                List[ContextItem]: 已经构建好的 Context Items。
+            """
+
+            del _client
+            return built_messages
+
+        all_tools: List[ToolDefinitionInput]
+        tool_provider_types: List[str]
+        if tool_definitions is not None:
+            all_tools = list(tool_definitions)
+            # 由调用方直接给出的定义无法追溯工具来源
+            tool_provider_types = [""] * len(all_tools)
+        elif self._tool_registry is not None:
+            availability_context = ToolAvailabilityContext(
+                session_id=self._session_id,
+                stream_id=self._session_id,
+                is_group_chat=self._is_group_chat,
+            )
+            tool_specs = await self._tool_registry.list_tools(availability_context)
+            all_tools = [tool_spec.to_llm_definition() for tool_spec in tool_specs]
+            tool_provider_types = [tool_spec.provider_type for tool_spec in tool_specs]
+        else:
+            availability_context = ToolAvailabilityContext(
+                session_id=self._session_id,
+                stream_id=self._session_id,
+                is_group_chat=self._is_group_chat,
+            )
+            builtin_definitions = get_builtin_tools(availability_context)
+            all_tools = [*builtin_definitions, *self._extra_tools]
+            tool_provider_types = ["builtin"] * len(builtin_definitions) + [""] * len(self._extra_tools)
+
+        tool_provider_by_name = {
+            resolve_tool_definition_name(definition): provider_type
+            for definition, provider_type in zip(all_tools, tool_provider_types, strict=True)
+        }
+
+        serialized_items = serialize_prompt_items(built_messages)
+        before_request_result = await self._get_runtime_manager().invoke_hook(
+            "maisaka.planner.before_request",
+            items=deepcopy(serialized_items),
+            item_schema_version=CONTEXT_ITEM_SCHEMA_VERSION,
+            tool_definitions=serialize_tool_definitions(all_tools),
+            selected_history_count=len(selected_history),
+            built_message_count=len(built_messages),
+            selection_reason=selection_reason,
+            session_id=self._session_id,
+        )
+        before_request_kwargs = before_request_result.kwargs
+        raw_items = before_request_kwargs.get("items")
+        if isinstance(raw_items, list) and raw_items != serialized_items:
+            try:
+                hook_messages = deserialize_prompt_items(
+                    raw_items,
+                    item_schema_version=before_request_kwargs.get("item_schema_version"),
+                    mode=ContextProtocolMode.REQUEST_CONTEXT,
+                    original_items=built_messages,
+                )
+                # 协议校验只检查 call/output 配对，hook 替换后的请求仍需满足锚点约束
+                self._validate_function_call_context_anchors(hook_messages)
+                built_messages = hook_messages
+            except Exception as exc:
+                logger.warning(f"Hook maisaka.planner.before_request 返回的 items 无效，已忽略: {exc}")
+        if enable_visual_message:
+            built_messages = limit_latest_images_in_messages(
+                built_messages,
+                max_image_num=global_config.visual.max_image_num,
+                preserved_item_ids=preserved_image_item_ids,
+            )
+        raw_tool_definitions = before_request_kwargs.get("tool_definitions")
+        if isinstance(raw_tool_definitions, list):
+            all_tools = [item for item in raw_tool_definitions if isinstance(item, dict)]
+            # hook 只能拿到 OpenAI function 结构，按名称还原工具来源
+            tool_provider_types = [
+                tool_provider_by_name.get(resolve_tool_definition_name(definition), "")
+                for definition in all_tools
+            ]
+        if request_kind == "planner":
+            self._active_tool_names = tuple(
+                name for definition in all_tools if (name := resolve_tool_definition_name(definition))
+            )
+
+        context_sections = measure_request_sections(
+            built_messages,
+            history_item_count=history_item_count,
+            tool_definitions=all_tools,
+            tool_provider_types=tool_provider_types,
+        )
+
+        prompt_section: RenderableType | None = None
+        prompt_html_uri: str | None = None
+
+        llm_chat = self._get_llm_chat_client(request_kind)
+        llm_started_at = time.perf_counter()
+        generation_result = await llm_chat.generate_response_with_context(
+            context_factory=context_factory,
+            options=LLMGenerationOptions(
+                tool_options=all_tools if all_tools else None,
+                response_format=response_format,
+                interrupt_flag=self._interrupt_flag,
+                force_stream_mode=request_kind == "planner" and global_config.chat.reply_timing.planner_message_steering,
+            ),
+        )
+        if request_kind == "planner":
+            self.planner_request_snapshot = (
+                PlannerRequestSnapshot(generation_result.request_snapshot, tuple(selected_history))
+                if generation_result.request_snapshot is not None else None
+            )
+        if logical_turn_id:
+            generation_result.output_items = bind_output_items_to_turn(
+                generation_result.output_items,
+                logical_turn_id,
+            )
+        llm_duration_ms = round((time.perf_counter() - llm_started_at) * 1000, 2)
+        prompt_cache_hit_tokens = getattr(generation_result, "prompt_cache_hit_tokens", 0) or 0
+        prompt_cache_miss_tokens = getattr(generation_result, "prompt_cache_miss_tokens", 0) or 0
+        if prompt_cache_miss_tokens == 0 and prompt_cache_hit_tokens > 0:
+            prompt_cache_miss_tokens = max(generation_result.prompt_tokens - prompt_cache_hit_tokens, 0)
+        self._log_prompt_cache_usage(
+            request_kind=request_kind,
+            prompt_tokens=generation_result.prompt_tokens,
+            prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        )
+
+        # Provider 原生推理与 Planner 显式正文语义不同，必须分别保留。
+        serialized_output_items = serialize_prompt_items(generation_result.output_items)
+        after_response_result = await self._get_runtime_manager().invoke_hook(
+            "maisaka.planner.after_response",
+            output_items=deepcopy(serialized_output_items),
+            item_schema_version=CONTEXT_ITEM_SCHEMA_VERSION,
+            selected_history_count=len(selected_history),
+            built_message_count=len(built_messages),
+            selection_reason=selection_reason,
+            session_id=self._session_id,
+            prompt_tokens=generation_result.prompt_tokens,
+            completion_tokens=generation_result.completion_tokens,
+            total_tokens=generation_result.total_tokens,
+        )
+        after_response_kwargs = after_response_result.kwargs
+        final_output_items = generation_result.output_items
+        raw_output_items = after_response_kwargs.get("output_items")
+        if isinstance(raw_output_items, list) and raw_output_items != serialized_output_items:
+            try:
+                final_output_items = tuple(
+                    deserialize_prompt_items(
+                        raw_output_items,
+                        item_schema_version=after_response_kwargs.get("item_schema_version"),
+                        mode=ContextProtocolMode.MODEL_OUTPUT,
+                        original_items=generation_result.output_items,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(f"Hook maisaka.planner.after_response 返回的 output_items 无法反序列化，已忽略: {exc}")
+        prompt_tokens = self._coerce_int(after_response_kwargs.get("prompt_tokens"), generation_result.prompt_tokens)
+        completion_tokens = self._coerce_int(
+            after_response_kwargs.get("completion_tokens"),
+            generation_result.completion_tokens,
+        )
+        total_tokens = self._coerce_int(after_response_kwargs.get("total_tokens"), generation_result.total_tokens)
+        display_model_name = (generation_result.model_name or "").strip()
+        prompt_selection_reason = selection_reason
+        if display_model_name:
+            prompt_selection_reason = f"{selection_reason}\n请求模型：{display_model_name}"
+        prompt_metadata = {
+            "model_name": display_model_name,
+            "duration_ms": llm_duration_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+        if global_config.debug.save_maisaka_reasoning:
+            prompt_section_result = await asyncio.to_thread(
+                PromptCLIVisualizer.build_prompt_section_result,
+                built_messages,
+                category=self._resolve_prompt_preview_category(request_kind),
+                chat_id=self._session_id,
+                request_kind=request_kind,
+                selection_reason=prompt_selection_reason,
+                tool_definitions=list(all_tools),
+                output_items=final_output_items,
+                metadata=prompt_metadata,
+                generation_attempts=generation_result.generation_attempts,
+            )
+            prompt_html_uri = prompt_section_result.preview_access.preview_web_uri
+            if global_config.debug.show_maisaka_thinking:
+                prompt_section = prompt_section_result.panel
+
+        return ChatResponse(
+            output_items=tuple(final_output_items),
+            request_messages=list(built_messages),
+            selected_history_count=len(selected_history),
+            tool_count=len(all_tools),
+            prompt_tokens=prompt_tokens,
+            built_message_count=len(built_messages),
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model_name=display_model_name,
+            duration_ms=llm_duration_ms,
+            prompt_section=prompt_section,
+            prompt_html_uri=prompt_html_uri,
+            generation_attempts=generation_result.generation_attempts,
+            prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+            context_sections=tuple(context_sections),
+        )
+
+    @staticmethod
+    def select_llm_context_messages(
+        chat_history: List[LLMContextMessage],
+        *,
+        enable_visual_message: Optional[bool] = None,
+        request_kind: str = "planner",
+        max_context_size: Optional[int] = None,
+        is_group_chat: Optional[bool] = None,
+    ) -> tuple[List[LLMContextMessage], str]:
+        """选择LLM上下文消息"""
+
+        filtered_history = MaisakaChatLoopService._filter_history_for_request_kind(
+            chat_history,
+            request_kind=request_kind,
+        )
+        base_context_size = max(1, int(max_context_size or global_config.chat.max_context_size))
+        effective_context_size = max(
+            MIN_RETAINED_CHAT_MESSAGES,
+            base_context_size,
+            int(base_context_size * CONTEXT_SELECTION_CACHE_STABILITY_RATIO),
+        )
+        selected_indices: List[int] = []
+        counted_message_count = 0
+
+        active_enable_visual_message = (
+            enable_visual_message
+            if enable_visual_message is not None
+            else MaisakaChatLoopService._resolve_enable_visual_message(request_kind)
+        )
+        always_selected_indices = MaisakaChatLoopService._collect_always_selected_reference_indices(
+            filtered_history,
+            enable_visual_message=active_enable_visual_message,
+        )
+
+        for index in range(len(filtered_history) - 1, -1, -1):
+            message = filtered_history[index]
+            if (
+                build_context_items_from_history_entry(
+                    message,
+                    enable_visual_message=active_enable_visual_message,
+                )
+                == ()
+            ):
+                continue
+
+            selected_indices.append(index)
+            if message.count_in_context:
+                counted_message_count += 1
+                if counted_message_count >= effective_context_size:
+                    break
+
+        selected_indices = sorted({*always_selected_indices, *selected_indices})
+
+        if not selected_indices:
+            return [], "实际发送 0 条上下文（tool 0 条，聊天消息 0 条）"
+
+        selected_history = [filtered_history[index] for index in selected_indices]
+        selected_context_count_before_tool_expansion = sum(
+            1 for message in selected_history if message.count_in_context
+        )
+        selected_history = MaisakaChatLoopService._expand_selected_tool_turns(
+            filtered_history,
+            selected_history,
+        )
+        selected_history, _ = normalize_tool_call_result_pairs(selected_history)
+        selected_context_count = sum(1 for message in selected_history if message.count_in_context)
+        tool_turn_overflow = max(0, selected_context_count - effective_context_size)
+        if tool_turn_overflow > 0:
+            logger.info(
+                "上下文选择为保持完整工具轮次允许超出窗口: "
+                f"request_kind={request_kind} window={effective_context_size} "
+                f"before_expansion={selected_context_count_before_tool_expansion} "
+                f"after_expansion={selected_context_count} overflow={tool_turn_overflow}"
+            )
+        tool_message_count = sum(1 for message in selected_history if isinstance(message, ToolResultMessage))
+        normal_message_count = selected_context_count
+        stability_text = f"|cache_window {base_context_size}->{effective_context_size}"
+        overflow_text = f"|tool_turn_overflow +{tool_turn_overflow}" if tool_turn_overflow else ""
+        selection_reason = (
+            f"实际发送 {len(selected_history)} 条上下文"
+            f"|聊天消息 {normal_message_count} 条|tool {tool_message_count} 条"
+            f"{stability_text}{overflow_text}"
+        )
+        return (
+            selected_history,
+            selection_reason,
+        )
+
+    @staticmethod
+    def _expand_selected_tool_turns(
+        full_history: Sequence[LLMContextMessage],
+        selected_history: Sequence[LLMContextMessage],
+    ) -> List[LLMContextMessage]:
+        """预算命中工具循环任意条目时，按 logical_turn_id 补齐整个循环。"""
+
+        tool_turn_ids = {
+            logical_turn_id
+            for message in full_history
+            if isinstance(message, (ModelOutputContextMessage, ToolResultMessage))
+            if (logical_turn_id := MaisakaChatLoopService._get_history_logical_turn_id(message))
+            if isinstance(message, ToolResultMessage) or bool(message.tool_calls)
+        }
+        selected_turn_ids = {
+            logical_turn_id
+            for message in selected_history
+            if (logical_turn_id := MaisakaChatLoopService._get_history_logical_turn_id(message)) in tool_turn_ids
+        }
+        selected_ids = {id(message) for message in selected_history}
+        anchor_index_by_turn_id = collect_tool_turn_anchor_indices(list(full_history), selected_turn_ids)
+
+        # logical_turn_id 只绑定模型输出和工具结果；窗口命中工具轮次时，还必须补回
+        # 该轮次之前最近的真实 user 上下文，避免请求从 function call 开始。
+        for anchor_index in anchor_index_by_turn_id.values():
+            selected_ids.add(id(full_history[anchor_index]))
+
+        return [
+            message
+            for message in full_history
+            if id(message) in selected_ids
+            or MaisakaChatLoopService._get_history_logical_turn_id(message) in selected_turn_ids
+        ]
+
+    @staticmethod
+    def _get_history_logical_turn_id(message: LLMContextMessage) -> str | None:
+        """读取模型输出或工具结果所属 logical turn。"""
+
+        if isinstance(message, ModelOutputContextMessage):
+            return message.output_item.meta.logical_turn_id
+        if isinstance(message, ToolResultMessage):
+            return message.logical_turn_id
+        return None
+
+    @staticmethod
+    def _collect_always_selected_reference_indices(
+        chat_history: List[LLMContextMessage],
+        *,
+        enable_visual_message: bool,
+    ) -> List[int]:
+        """收集需要长期随请求发送的参考消息索引。"""
+
+        selected_indices: List[int] = []
+        for index, message in enumerate(chat_history):
+            if not (
+                isinstance(message, ContextSummaryMessage)
+                or isinstance(message, ReferenceMessage) and message.reference_type == ReferenceMessageType.CONTEXT_RESTORE
+            ):
+                continue
+            if not build_context_items_from_history_entry(message, enable_visual_message=enable_visual_message):
+                continue
+            selected_indices.append(index)
+        return selected_indices
+
+    @staticmethod
+    def _filter_history_for_request_kind(
+        selected_history: List[LLMContextMessage],
+        *,
+        request_kind: str,
+    ) -> List[LLMContextMessage]:
+        """按请求类型过滤不应暴露的历史工具链。"""
+
+        if request_kind == "expression_selector":
+            return [message for message in selected_history if isinstance(message, SessionBackedMessage)]
+
+        if request_kind != "planner":
+            return [message for message in selected_history if not isinstance(message, ContextSummaryMessage)]
+
+        return selected_history
+
+    @staticmethod
+    def _resolve_enable_visual_message(request_kind: str) -> bool:
+        if request_kind == "planner":
+            return resolve_enable_visual_planner()
+        if request_kind == "expression_selector":
+            return False
+        return True

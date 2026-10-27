@@ -1,0 +1,979 @@
+import asyncio
+import copy
+import hashlib
+import inspect
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence, TypeVar, cast
+
+import tomlkit
+
+from src.common.paths import get_instance_root
+from src.common.i18n import t
+from src.common.logger import get_logger
+from src.common.version import read_project_version
+from src.agent.config import AgentConfig
+from src.web_search.config import WebConfig, resolve_web_search_config
+
+from .config_base import AttributeData, ConfigBase, Field
+from .config_upgrade_hooks import apply_config_upgrade_hooks
+from .config_utils import compare_versions, output_config_changes, recursive_parse_item_to_table
+from .default_model_config import create_default_model_config
+from .file_watcher import FileChange, FileWatcher
+from .legacy_migration import (
+    mark_legacy_config_migration_completed,
+    migrate_legacy_bind_env_to_bot_config_dict,
+    should_apply_legacy_migration,
+    try_migrate_legacy_bot_config_dict,
+)
+from .model_configs import APIProvider, ModelInfo, ModelTaskConfig
+from .official_configs import (
+    AMemorixConfig,
+    BotConfig,
+    CapabilitiesConfig,
+    ChatConfig,
+    ChineseTypoConfig,
+    DatabaseConfig,
+    DebugConfig,
+    EmojiConfig,
+    ExperimentalConfig,
+    ExpressionConfig,
+    JargonConfig,
+    KeywordReactionConfig,
+    LogConfig,
+    MaimMessageConfig,
+    MCPConfig,
+    MessageReceiveConfig,
+    PersonalityConfig,
+    PluginConfig,
+    PluginRuntimeConfig,
+    ResponsePostProcessConfig,
+    ResponseSplitterConfig,
+    TelemetryConfig,
+    VisualConfig,
+    VoiceConfig,
+    WebUIConfig,
+)
+
+"""
+如果你想要修改配置文件，请递增version的值
+
+版本格式：主版本号.次版本号.修订号，版本号递增规则如下：
+    主版本号：MMC版本更新
+    次版本号：配置文件内容大更新
+    修订号：配置文件内容小更新
+"""
+
+PROJECT_ROOT: Path = get_instance_root()
+CONFIG_DIR: Path = PROJECT_ROOT / "config"
+BOT_CONFIG_PATH: Path = (CONFIG_DIR / "bot_config.toml").resolve().absolute()
+MODEL_CONFIG_PATH: Path = (CONFIG_DIR / "model_config.toml").resolve().absolute()
+LEGACY_ENV_PATH: Path = (PROJECT_ROOT / ".env").resolve().absolute()
+A_MEMORIX_LEGACY_CONFIG_PATH: Path = (CONFIG_DIR / "a_memorix.toml").resolve().absolute()
+MMC_VERSION: str = read_project_version(PROJECT_ROOT)
+CONFIG_VERSION: str = "8.15.47"
+MODEL_CONFIG_VERSION: str = "1.17.24"
+
+logger = get_logger("config")
+
+T = TypeVar("T", bound="ConfigBase")
+ConfigReloadCallback = Callable[[Sequence[str]], object] | Callable[[], object]
+
+
+class _ReloadCallbackRegistration:
+    """热重载回调注册项。
+
+    sections 为 None 表示不关心具体配置节，任何热重载都会通知；
+    指定节名（如 ``("webui",)``）时，仅当变更命中所声明的配置节才通知。
+    """
+
+    __slots__ = ("callback", "sections")
+
+    def __init__(self, callback: ConfigReloadCallback, sections: tuple[str, ...] | None) -> None:
+        self.callback = callback
+        self.sections = sections
+
+
+class Config(ConfigBase):
+    """总配置类"""
+
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    """统一独立 Agent 配置"""
+
+    bot: BotConfig = Field(default_factory=BotConfig)
+    """机器人配置类"""
+
+    personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
+    """人格配置类"""
+
+    chat: ChatConfig = Field(default_factory=ChatConfig)
+    """聊天配置类"""
+
+    capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
+    """能力配置类"""
+
+    experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)
+    """实验性功能配置类"""
+
+    visual: VisualConfig = Field(default_factory=VisualConfig)
+    """视觉配置类"""
+
+    expression: ExpressionConfig = Field(default_factory=ExpressionConfig)
+    """表达配置类"""
+
+    jargon: JargonConfig = Field(default_factory=JargonConfig)
+    """黑话配置类"""
+
+    a_memorix: AMemorixConfig = Field(default_factory=AMemorixConfig)
+    """A_Memorix 长期记忆子系统配置"""
+
+    message_receive: MessageReceiveConfig = Field(default_factory=MessageReceiveConfig)
+    """消息接收配置类"""
+
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    """语音配置类"""
+
+    emoji: EmojiConfig = Field(default_factory=EmojiConfig)
+    """表情包配置类"""
+
+    keyword_reaction: KeywordReactionConfig = Field(default_factory=KeywordReactionConfig)
+    """关键词反应配置类"""
+
+    response_post_process: ResponsePostProcessConfig = Field(default_factory=ResponsePostProcessConfig)
+    """回复后处理配置类"""
+
+    chinese_typo: ChineseTypoConfig = Field(default_factory=ChineseTypoConfig)
+    """中文错别字生成器配置类"""
+
+    response_splitter: ResponseSplitterConfig = Field(default_factory=ResponseSplitterConfig)
+    """回复分割器配置类"""
+
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    """遥测配置类"""
+
+    log: LogConfig = Field(default_factory=LogConfig)
+    """日志配置类"""
+
+    debug: DebugConfig = Field(default_factory=DebugConfig)
+    """调试配置类"""
+
+    maim_message: MaimMessageConfig = Field(default_factory=MaimMessageConfig)
+    """maim_message配置类"""
+
+    webui: WebUIConfig = Field(default_factory=WebUIConfig)
+    """WebUI配置类"""
+
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    """数据库配置类"""
+
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
+    """MCP 配置类"""
+
+    plugin: PluginConfig = Field(default_factory=PluginConfig)
+    """插件管理配置类"""
+
+    plugin_runtime: PluginRuntimeConfig = Field(default_factory=PluginRuntimeConfig)
+    """插件运行时配置类"""
+
+
+class ModelConfig(ConfigBase):
+    """模型配置类"""
+
+    web: WebConfig = Field(default_factory=WebConfig)
+    """统一联网服务配置，与模型列表独立；默认关闭。"""
+
+    models: list[ModelInfo] = Field(default_factory=list)
+    """模型配置列表"""
+
+    model_task_config: ModelTaskConfig = Field(default_factory=ModelTaskConfig)
+    """模型任务配置"""
+
+    api_providers: list[APIProvider] = Field(default_factory=list)
+    """API提供商列表"""
+
+    def model_post_init(self, context: Any = None):
+        resolve_web_search_config(self.web, self.model_task_config.web_search)
+        if not self.models:
+            raise ValueError(t("config.models_empty"))
+        if not self.api_providers:
+            raise ValueError(t("config.api_providers_empty"))
+
+        # 检查API提供商名称是否重复
+        provider_names = [provider.name for provider in self.api_providers]
+        if len(provider_names) != len(set(provider_names)):
+            raise ValueError(t("config.api_provider_name_duplicate"))
+
+        # 检查模型名称是否重复
+        model_names = [model.name for model in self.models]
+        if len(model_names) != len(set(model_names)):
+            raise ValueError(t("config.model_name_duplicate"))
+
+        for model_name in self.model_task_config.embedding.model_list:
+            if model_name not in model_names:
+                raise ValueError(f"embedding.model_list references an undefined model: {model_name}")
+
+        api_providers_dict = {provider.name: provider for provider in self.api_providers}
+
+        for model in self.models:
+            if not model.model_identifier:
+                raise ValueError(t("config.model_identifier_empty", model_name=model.name))
+            if not model.api_provider or model.api_provider not in api_providers_dict:
+                raise ValueError(
+                    t(
+                        "config.model_api_provider_missing",
+                        api_provider=model.api_provider,
+                        model_name=model.name,
+                    )
+                )
+        return super().model_post_init(context)
+
+
+def _normalize_a_memorix_legacy_config(config_data: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(config_data)
+    web_config = normalized.get("web")
+    if isinstance(web_config, dict) and "import" in web_config and "import_config" not in web_config:
+        web_config["import_config"] = web_config.pop("import")
+    return normalized
+
+
+def _migrate_legacy_a_memorix_config(config_data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if isinstance(config_data.get("a_memorix"), dict):
+        return config_data, False
+    if not A_MEMORIX_LEGACY_CONFIG_PATH.exists():
+        return config_data, False
+
+    try:
+        with A_MEMORIX_LEGACY_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+            legacy_data = tomlkit.load(handle).unwrap()
+    except Exception as exc:
+        logger.warning(f"读取旧版 A_Memorix 配置失败，已使用主配置默认值: {A_MEMORIX_LEGACY_CONFIG_PATH}，原因: {exc}")
+        return config_data, False
+
+    if not isinstance(legacy_data, dict):
+        logger.warning(f"旧版 A_Memorix 配置内容无效，已使用主配置默认值: {A_MEMORIX_LEGACY_CONFIG_PATH}")
+        return config_data, False
+
+    migrated_data = copy.deepcopy(config_data)
+    migrated_data["a_memorix"] = _normalize_a_memorix_legacy_config(legacy_data)
+    logger.warning(
+        f"检测到旧版 A_Memorix 配置，已迁移到 bot_config.toml 的 [a_memorix]: {A_MEMORIX_LEGACY_CONFIG_PATH}"
+    )
+    return migrated_data, True
+
+
+def _normalize_loaded_bot_config_dict(config_data: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(config_data)
+    # 将已稳定的能力配置移入独立栏目，保留用户原有开关与阈值。
+    experimental_config = normalized.get("experimental")
+    if isinstance(experimental_config, dict):
+        if "replyer_retro_prompt" in experimental_config:
+            normalized.setdefault("debug", {}).setdefault(
+                "replyer_retro_prompt", experimental_config.pop("replyer_retro_prompt")
+            )
+        for field_name in (
+            "tool_result_condense",
+            "tool_result_condense_threshold",
+            "planner_subagent",
+            "advanced_sub_agent",
+        ):
+            if field_name in experimental_config:
+                normalized.setdefault("capabilities", {}).setdefault(field_name, experimental_config.pop(field_name))
+    a_memorix_config = normalized.get("a_memorix")
+    if isinstance(a_memorix_config, dict):
+        normalized["a_memorix"] = _normalize_a_memorix_legacy_config(a_memorix_config)
+    return normalized
+
+
+class ConfigManager:
+    """总配置管理类"""
+
+    VLM_NOT_CONFIGURED_WARNING: str = "未配置视觉识图模型，部分图片理解可能受限，请在webui或model_config中配置"
+
+    def __init__(self):
+        self.bot_config_path: Path = BOT_CONFIG_PATH
+        self.model_config_path: Path = MODEL_CONFIG_PATH
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        self.global_config: Config | None = None
+        self.model_config: ModelConfig | None = None
+        self._reload_lock: asyncio.Lock = asyncio.Lock()
+        self._reload_callbacks: list[_ReloadCallbackRegistration] = []
+        self._file_watcher: FileWatcher | None = None
+        self._file_watcher_subscription_id: str | None = None
+        self._hot_reload_min_interval_s: float = 1.0
+        self._hot_reload_timeout_s: float = 20.0
+        self._last_hot_reload_monotonic: float = 0.0
+        self._config_file_fingerprints: dict[str, str] = {}
+        self.reload_revision: int = 0
+        self.retro_prompt_forced: bool = False
+
+    def _sync_retro_reply_prompt(self, config: Config, models: ModelConfig) -> None:
+        """仅检查分配给 replyer 的模型，解除指定模型分配时清除自动开关。"""
+        retro_models = {"v2p1-contract", "v2p1-raw"}
+        replyer_model_names = set(models.model_task_config.replyer.model_list)
+        forced = any(
+            model_name in retro_models or "mai-replier" in model_name
+            for model in models.models
+            if model.name in replyer_model_names
+            for value in (model.name, model.model_identifier)
+            for model_name in (value.strip().lower().replace("_", "-"),)
+        )
+        if forced or self.retro_prompt_forced:
+            # 仅更新该字段，保留磁盘上其他配置、注释以及尚未热重载的修改。
+            doc = tomlkit.loads(self.bot_config_path.read_text(encoding="utf-8"))
+            debug = doc.setdefault("debug", tomlkit.table())
+            if debug.get("replyer_retro_prompt") != forced:
+                debug["replyer_retro_prompt"] = forced
+                self.bot_config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+            config.debug.replyer_retro_prompt = forced
+        self.retro_prompt_forced = forced
+
+    def initialize(self):
+        logger.info(t("config.current_version", version=MMC_VERSION))
+        logger.info(t("config.loading"))
+        self.global_config, global_updated = load_config_from_file(Config, self.bot_config_path, CONFIG_VERSION)
+        self.model_config, model_updated = load_config_from_file(
+            ModelConfig,
+            self.model_config_path,
+            MODEL_CONFIG_VERSION,
+            True,
+        )
+        self._sync_retro_reply_prompt(self.global_config, self.model_config)
+        if global_updated or model_updated:
+            logger.info("配置已自动升级，将继续使用更新后的配置启动")
+        self._update_config_file_fingerprints(("bot", "model"))
+        self._warn_if_vlm_not_configured(self.model_config)
+        logger.info(t("config.loaded"))
+
+    @classmethod
+    def _warn_if_vlm_not_configured(cls, model_config: ModelConfig) -> None:
+        if any(model_name.strip() for model_name in model_config.model_task_config.vlm.model_list):
+            return
+        logger.warning(cls.VLM_NOT_CONFIGURED_WARNING)
+
+    def load_global_config(self) -> Config:
+        config, updated = load_config_from_file(Config, self.bot_config_path, CONFIG_VERSION)
+        if updated:
+            logger.info("bot_config.toml 已自动升级，将继续使用更新后的配置")
+        return config
+
+    def load_model_config(self) -> ModelConfig:
+        config, updated = load_config_from_file(ModelConfig, self.model_config_path, MODEL_CONFIG_VERSION, True)
+        if updated:
+            logger.info("model_config.toml 已自动升级，将继续使用更新后的配置")
+        return config
+
+    def get_global_config(self) -> Config:
+        if self.global_config is None:
+            raise RuntimeError(t("config.global_not_initialized"))
+        return self.global_config
+
+    def get_model_config(self) -> ModelConfig:
+        if self.model_config is None:
+            raise RuntimeError(t("config.model_not_initialized"))
+        return self.model_config
+
+    def register_reload_callback(
+        self,
+        callback: ConfigReloadCallback,
+        sections: Sequence[str] | None = None,
+    ) -> None:
+        """注册配置热重载回调。
+
+        Args:
+            callback: 配置热重载回调。允许无参回调，也允许接收
+                ``Sequence[str]`` 类型的变更范围列表。
+            sections: 回调关心的 bot 配置节名，如 ``("webui",)``、
+                ``("a_memorix",)``，支持点号分隔的子节（如
+                ``("chat.reply_timing",)``），按前缀匹配。为 None 时
+                不区分配置节，任何热重载都会通知。
+        """
+
+        self._reload_callbacks.append(
+            _ReloadCallbackRegistration(callback, self._normalize_changed_sections(sections) or None)
+        )
+
+    def unregister_reload_callback(self, callback: ConfigReloadCallback) -> None:
+        """注销配置热重载回调。
+
+        Args:
+            callback: 先前注册过的回调对象。
+        """
+
+        self._reload_callbacks = [
+            registration for registration in self._reload_callbacks if registration.callback != callback
+        ]
+
+    @staticmethod
+    def _normalize_changed_scopes(changed_scopes: Sequence[str] | None) -> tuple[str, ...]:
+        """规范化配置变更范围列表。
+
+        Args:
+            changed_scopes: 原始配置变更范围。
+
+        Returns:
+            tuple[str, ...]: 去重后的配置变更范围元组。
+        """
+
+        if not changed_scopes:
+            return ("bot", "model")
+
+        normalized_scopes: list[str] = []
+        for scope in changed_scopes:
+            normalized_scope = str(scope or "").strip().lower()
+            if normalized_scope not in {"bot", "model"}:
+                continue
+            if normalized_scope not in normalized_scopes:
+                normalized_scopes.append(normalized_scope)
+        return tuple(normalized_scopes)
+
+    @staticmethod
+    def _resolve_changed_scopes(changes: Sequence[FileChange]) -> tuple[str, ...]:
+        """根据文件变更列表推断配置变更范围。
+
+        Args:
+            changes: 文件监听器返回的变更列表。
+
+        Returns:
+            tuple[str, ...]: 命中的配置变更范围元组。
+        """
+
+        changed_scopes: list[str] = []
+        for change in changes:
+            file_name = change.path.name
+            if file_name == "bot_config.toml" and "bot" not in changed_scopes:
+                changed_scopes.append("bot")
+            if file_name == "model_config.toml" and "model" not in changed_scopes:
+                changed_scopes.append("model")
+        return tuple(changed_scopes)
+
+    @staticmethod
+    def _normalize_changed_sections(sections: Sequence[str] | None) -> tuple[str, ...]:
+        """规范化配置节名列表。
+
+        Args:
+            sections: 原始配置节名列表。
+
+        Returns:
+            tuple[str, ...]: 规范化为小写点号路径的去重元组。
+        """
+
+        if sections is None:
+            return ()
+        normalized: list[str] = []
+        for section in sections:
+            parts = [part for part in str(section or "").strip().lower().split(".") if part]
+            if not parts:
+                continue
+            dotted = ".".join(parts)
+            if dotted not in normalized:
+                normalized.append(dotted)
+        return tuple(normalized)
+
+    @staticmethod
+    def _section_matches(declared: str, changed: str) -> bool:
+        """判断两个配置节是否命中：按点号分段后，任一方为另一方的前缀即命中。"""
+
+        declared_parts = declared.split(".")
+        changed_parts = changed.split(".")
+        common_length = min(len(declared_parts), len(changed_parts))
+        return declared_parts[:common_length] == changed_parts[:common_length]
+
+    @staticmethod
+    def _diff_bot_config_sections(old_config: "Config", new_config: "Config") -> tuple[str, ...] | None:
+        """对比新旧 bot 配置，返回发生变化的顶层配置节名。
+
+        Returns:
+            tuple[str, ...] | None: 变化的顶层配置节名元组；对比失败时
+                返回 None，调用方应按"变更节未知"保守处理。
+        """
+
+        try:
+            old_data = old_config.model_dump(mode="json")
+            new_data = new_config.model_dump(mode="json")
+        except Exception:
+            logger.warning("对比新旧 bot 配置差异失败，热重载将按变更节未知处理", exc_info=True)
+            return None
+        return tuple(
+            section for section in type(new_config).model_fields if old_data.get(section) != new_data.get(section)
+        )
+
+    def _is_registration_interested(
+        self,
+        registration: _ReloadCallbackRegistration,
+        changed_scopes: Sequence[str],
+        changed_sections: tuple[str, ...] | None,
+    ) -> bool:
+        """判断回调注册项是否命中本次热重载。
+
+        Args:
+            registration: 回调注册项。
+            changed_scopes: 本次热重载命中的配置范围。
+            changed_sections: 本次变更的 bot 配置节名，None 表示未知。
+
+        Returns:
+            bool: 是否应通知该回调。
+        """
+
+        if registration.sections is None:
+            return True
+        # 注册的节都属于 bot 配置，model 范围的重载无需通知
+        if "bot" not in changed_scopes:
+            return False
+        # 变更节未知时保守通知，避免漏掉固化了配置的组件
+        if changed_sections is None:
+            return True
+        return any(
+            self._section_matches(declared, changed)
+            for declared in registration.sections
+            for changed in changed_sections
+        )
+
+    def _get_config_file_path(self, scope: str) -> Path:
+        """返回指定配置范围对应的文件路径。"""
+
+        if scope == "bot":
+            return self.bot_config_path
+        if scope == "model":
+            return self.model_config_path
+        raise ValueError(f"未知配置范围: {scope}")
+
+    @staticmethod
+    def _get_config_file_fingerprint(path: Path) -> str:
+        """计算配置文件内容指纹，用于过滤已同步到运行时的重复文件事件。"""
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _update_config_file_fingerprints(self, scopes: Sequence[str]) -> None:
+        """记录已成功加载到运行时的配置文件内容指纹。"""
+
+        for scope in scopes:
+            self._config_file_fingerprints[scope] = self._get_config_file_fingerprint(
+                self._get_config_file_path(scope)
+            )
+
+    def _config_files_match_loaded_fingerprints(self, scopes: Sequence[str]) -> bool:
+        """判断指定配置文件是否与当前运行时已加载内容一致。"""
+
+        for scope in scopes:
+            loaded_fingerprint = self._config_file_fingerprints.get(scope)
+            if loaded_fingerprint is None:
+                return False
+            current_fingerprint = self._get_config_file_fingerprint(self._get_config_file_path(scope))
+            if current_fingerprint != loaded_fingerprint:
+                return False
+        return True
+
+    @staticmethod
+    def _callback_accepts_scopes(callback: ConfigReloadCallback) -> bool:
+        """判断回调是否接收配置变更范围参数。
+
+        Args:
+            callback: 待检测的回调对象。
+
+        Returns:
+            bool: 若回调可接收一个位置参数或可变位置参数，则返回 ``True``。
+        """
+
+        try:
+            parameters = inspect.signature(callback).parameters.values()
+        except (TypeError, ValueError):
+            return False
+
+        positional_params = {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+        for parameter in parameters:
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                return True
+            if parameter.kind in positional_params:
+                return True
+        return False
+
+    async def _invoke_reload_callback(
+        self,
+        callback: ConfigReloadCallback,
+        changed_scopes: Sequence[str],
+    ) -> None:
+        """执行单个配置热重载回调。
+
+        Args:
+            callback: 要执行的回调对象。
+            changed_scopes: 本次热重载命中的配置范围。
+        """
+
+        if self._callback_accepts_scopes(callback):
+            callback_with_scopes = cast(Callable[[Sequence[str]], object], callback)
+            result = callback_with_scopes(changed_scopes)
+        else:
+            callback_without_scopes = cast(Callable[[], object], callback)
+            result = callback_without_scopes()
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def reload_config(
+        self,
+        changed_scopes: Sequence[str] | None = None,
+        *,
+        skip_if_unchanged: bool = False,
+        changed_sections: Sequence[str] | None = None,
+    ) -> bool:
+        """重新加载主配置和模型配置。
+
+        Args:
+            changed_scopes: 本次触发热重载的配置范围。
+            skip_if_unchanged: 配置文件内容与已加载内容一致时，跳过重复重载。
+            changed_sections: 本次变更的 bot 配置节名（如
+                ``["chat.reply_timing"]``），用于按节过滤回调通知；为
+                None 时按新旧配置差异自动推断。
+
+        Returns:
+            bool: 是否重载成功。
+        """
+
+        normalized_scopes = self._normalize_changed_scopes(changed_scopes)
+        if not normalized_scopes:
+            logger.debug("配置热重载未命中有效范围，已跳过")
+            return True
+
+        async with self._reload_lock:
+            if skip_if_unchanged and self._config_files_match_loaded_fingerprints(normalized_scopes):
+                logger.debug("配置文件内容未变化，跳过重复热重载")
+                return True
+            previous_global_config = self.global_config
+            try:
+                global_config_new = self.global_config
+                model_config_new = self.model_config
+                global_updated = False
+                model_updated = False
+                if "bot" in normalized_scopes or global_config_new is None:
+                    global_config_new, global_updated = load_config_from_file(
+                        Config,
+                        self.bot_config_path,
+                        CONFIG_VERSION,
+                    )
+                if "model" in normalized_scopes or model_config_new is None:
+                    model_config_new, model_updated = load_config_from_file(
+                        ModelConfig,
+                        self.model_config_path,
+                        MODEL_CONFIG_VERSION,
+                        True,
+                    )
+                await asyncio.to_thread(self._sync_retro_reply_prompt, global_config_new, model_config_new)
+            except Exception as exc:
+                logger.error(t("config.reload_failed", error=exc))
+                return False
+
+            if global_updated or model_updated:
+                logger.warning(t("config.version_update_detected"))
+
+            self.global_config = global_config_new
+            self.model_config = model_config_new
+            self._update_config_file_fingerprints(normalized_scopes)
+            self.reload_revision += 1
+            logger.info(t("config.hot_reload_completed"))
+
+            # 未显式给出变更节时，按新旧配置差异自动推断，供回调按节过滤
+            sections_for_dispatch = self._normalize_changed_sections(changed_sections) or None
+            if sections_for_dispatch is None and "bot" in normalized_scopes and previous_global_config is not None:
+                sections_for_dispatch = self._diff_bot_config_sections(previous_global_config, global_config_new)
+            if sections_for_dispatch is not None:
+                logger.debug(f"配置热重载命中的配置节: {list(sections_for_dispatch)}")
+
+            for registration in list(self._reload_callbacks):
+                if not self._is_registration_interested(registration, normalized_scopes, sections_for_dispatch):
+                    continue
+                try:
+                    await self._invoke_reload_callback(registration.callback, normalized_scopes)
+                except Exception as exc:
+                    logger.warning(t("config.reload_callback_failed", error=exc))
+            return True
+
+    async def start_file_watcher(self) -> None:
+        if self._file_watcher is not None and self._file_watcher.running:
+            return
+        from src.platform_io.adapter_policy import get_adapter_policy_manager
+
+        policy_path = get_adapter_policy_manager().policy_path
+        self._file_watcher = FileWatcher(
+            # 监听父目录，覆盖策略文件首次创建以及编辑器的原子替换保存。
+            paths=list({self.bot_config_path.parent, self.model_config_path.parent, policy_path.parent}),
+            debounce_ms=600,
+            callback_timeout_s=15.0,
+            callback_failure_threshold=3,
+            callback_cooldown_s=30.0,
+        )
+        self._file_watcher_subscription_id = self._file_watcher.subscribe(
+            self._handle_file_changes,
+            paths=[self.bot_config_path, self.model_config_path, policy_path],
+        )
+        await self._file_watcher.start()
+        logger.debug(t("config.file_watcher_started"))
+
+    async def stop_file_watcher(self) -> None:
+        if self._file_watcher is None:
+            return
+        if self._file_watcher_subscription_id is not None:
+            self._file_watcher.unsubscribe(self._file_watcher_subscription_id)
+            self._file_watcher_subscription_id = None
+        watcher_stats = self._file_watcher.stats
+        logger.info(
+            t(
+                "config.file_watcher_stop_stats",
+                batches=watcher_stats.batches_seen,
+                changes=watcher_stats.changes_seen,
+                cooldown_skip=watcher_stats.callbacks_skipped_cooldown,
+                failed=watcher_stats.callbacks_failed,
+                ok=watcher_stats.callbacks_succeeded,
+                restart=watcher_stats.restart_count,
+                timeout=watcher_stats.callbacks_timed_out,
+            )
+        )
+        await self._file_watcher.stop()
+        self._file_watcher = None
+
+    async def _handle_file_changes(self, changes: Sequence[FileChange]) -> None:
+        """处理主配置、模型配置及适配器名单文件变更。
+
+        Args:
+            changes: 当前批次收集到的文件变更列表。
+        """
+
+        if not changes:
+            return
+        from src.platform_io.adapter_policy import get_adapter_policy_manager
+
+        if any(change.path == get_adapter_policy_manager().policy_path.resolve() for change in changes):
+            from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+            await heartflow_manager.close_policy_blocked_chats()
+        changed_scopes = self._resolve_changed_scopes(changes)
+        if not changed_scopes:
+            return
+        if self._config_files_match_loaded_fingerprints(changed_scopes):
+            logger.debug("配置文件内容未变化，跳过重复热重载")
+            return
+        now_monotonic = asyncio.get_running_loop().time()
+        if now_monotonic - self._last_hot_reload_monotonic < self._hot_reload_min_interval_s:
+            logger.debug(t("config.reload_skipped_too_frequent"))
+            return
+        self._last_hot_reload_monotonic = now_monotonic
+        logger.info(t("config.file_change_detected"))
+        try:
+            await asyncio.wait_for(
+                self.reload_config(changed_scopes=changed_scopes, skip_if_unchanged=True),
+                timeout=self._hot_reload_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.error(t("config.reload_timeout", timeout_seconds=self._hot_reload_timeout_s))
+
+
+def generate_new_config_file(
+    config_class: type[T], config_path: Path, inner_config_version: str, override_repr: bool = False
+) -> None:
+    """生成新的配置文件
+
+    :param config_class: 配置类
+    :param config_path: 配置文件路径
+    :param inner_config_version: 配置文件版本号
+    """
+    if config_class is ModelConfig:
+        config = create_default_model_config(config_class)
+    else:
+        config = config_class()
+    write_config_to_file(config, config_path, inner_config_version, override_repr)
+
+
+def remove_legacy_env_file(env_path: Path) -> None:
+    """删除已完成迁移的旧版 `.env` 文件。"""
+
+    if not env_path.exists():
+        return
+
+    try:
+        env_path.unlink()
+    except OSError as exc:
+        logger.warning(f"旧版 .env 配置文件删除失败，请手动删除: {env_path}，原因: {exc}")
+    else:
+        logger.warning(f"检测到旧版环境变量绑定配置迁移成功，已删除旧版 .env 文件: {env_path}")
+
+
+def load_config_from_file(
+    config_class: type[T], config_path: Path, new_ver: str, override_repr: bool = False
+) -> tuple[T, bool]:
+    attribute_data = AttributeData()
+    if not config_path.exists():
+        logger.warning(f"配置文件缺失，正在生成默认配置: {config_path}")
+        generate_new_config_file(config_class, config_path, new_ver, override_repr)
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_data = tomlkit.load(f)
+    inner_table = config_data.get("inner")
+    if not isinstance(inner_table, Mapping):
+        raise TypeError(t("config.missing_inner_version"))
+    inner_version = inner_table.get("version")
+    if not isinstance(inner_version, str):
+        raise TypeError(t("config.invalid_inner_version"))
+    old_ver: str = inner_version
+    env_migration_applied: bool = False
+    legacy_config_migration_applied: bool = False
+    a_memorix_migration_applied: bool = False
+    upgrade_hook_applied: bool = False
+    legacy_config_migration_reasons: list[str] = []
+    config_data.remove("inner")  # 移除 inner 部分，避免干扰后续处理
+    config_data = config_data.unwrap()  # 转换为普通字典，方便后续处理
+    legacy_migration_enabled = config_class.__name__ == "Config" and should_apply_legacy_migration(config_path.name)
+    if legacy_migration_enabled:
+        env_migration = migrate_legacy_bind_env_to_bot_config_dict(config_data)
+        env_migration_applied = env_migration.migrated
+        if env_migration.migrated:
+            logger.warning(f"检测到旧版环境变量绑定配置，已迁移到主配置: {env_migration.reason}")
+            legacy_config_migration_reasons.append(env_migration.reason)
+        config_data = env_migration.data
+        legacy_migration = try_migrate_legacy_bot_config_dict(config_data)
+        if legacy_migration.migrated:
+            logger.warning(t("config.legacy_migrated", reason=legacy_migration.reason))
+            legacy_config_migration_applied = True
+            legacy_config_migration_reasons.append(legacy_migration.reason)
+        config_data = legacy_migration.data
+        config_data, a_memorix_migration_applied = _migrate_legacy_a_memorix_config(config_data)
+        if a_memorix_migration_applied:
+            legacy_config_migration_reasons.append("a_memorix_legacy_config")
+    if config_class is Config:
+        config_data = _normalize_loaded_bot_config_dict(config_data)
+    hook_result = apply_config_upgrade_hooks(config_data, config_path.name, old_ver, new_ver)
+    upgrade_hook_applied = hook_result.migrated
+    if hook_result.migrated:
+        logger.warning(f"检测到配置升级钩子变更，已应用: {hook_result.reason}")
+    config_data = hook_result.data
+    # 保留一份“干净”的原始数据副本，避免第一次 from_dict 过程中对 dict 的就地修改
+    original_data: dict[str, Any] = copy.deepcopy(config_data)
+    try:
+        updated: bool = False
+        try:
+            target_config = config_class.from_dict(attribute_data, config_data)
+        except TypeError as e:
+            # 可拔插的旧配置修复（仅针对 bot_config.toml 的已知结构变更）
+            if legacy_migration_enabled:
+                # 基于未被部分构造污染的 original_data 做迁移尝试
+                mig = try_migrate_legacy_bot_config_dict(original_data)
+                if mig.migrated:
+                    logger.warning(t("config.legacy_migrated", reason=mig.reason))
+                    legacy_config_migration_applied = True
+                    legacy_config_migration_reasons.append(mig.reason)
+                    migrated_data = mig.data
+                    target_config = config_class.from_dict(attribute_data, migrated_data)
+                else:
+                    raise e
+            else:
+                raise e
+        if (
+            compare_versions(old_ver, new_ver)
+            or env_migration_applied
+            or legacy_config_migration_applied
+            or a_memorix_migration_applied
+            or upgrade_hook_applied
+        ):
+            output_config_changes(attribute_data, logger, old_ver, new_ver, config_path.name)
+            write_config_to_file(target_config, config_path, new_ver, override_repr)
+            if env_migration_applied:
+                remove_legacy_env_file(LEGACY_ENV_PATH)
+            updated = True
+        if legacy_migration_enabled:
+            mark_legacy_config_migration_completed(
+                migrated=env_migration_applied or legacy_config_migration_applied or a_memorix_migration_applied,
+                reason=",".join(reason for reason in legacy_config_migration_reasons if reason),
+            )
+        return target_config, updated
+    except Exception as e:
+        logger.critical(t("config.parse_failed", file_name=config_path.name))
+        raise e
+
+
+def write_config_to_file(
+    config: ConfigBase, config_path: Path, inner_config_version: str, override_repr: bool = False
+) -> None:
+    """将配置写入文件
+
+    :param config: 配置对象
+    :param config_path: 配置文件路径
+    """
+    # 创建空TOMLDocument
+    full_config_data = tomlkit.document()
+
+    # 首先写入配置文件版本信息
+    version_table = tomlkit.table()
+    version_table.add("version", inner_config_version)
+    full_config_data.add("inner", version_table)
+
+    # 递归解析配置项为表格
+    for config_item_name, config_item in type(config).model_fields.items():
+        if not config_item.repr and not override_repr:
+            continue
+        if config_item_name in ["field_docs", "_validate_any", "suppress_any_warning"]:
+            continue
+        config_field = getattr(config, config_item_name)
+        if isinstance(config_field, ConfigBase):
+            full_config_data.add(
+                config_item_name, recursive_parse_item_to_table(config_field, override_repr=override_repr)
+            )
+        elif isinstance(config_field, list):
+            aot = tomlkit.aot()
+            for item in config_field:
+                if not isinstance(item, ConfigBase):
+                    raise TypeError(t("config.write_unsupported_type"))
+                aot.append(recursive_parse_item_to_table(item, override_repr=override_repr))
+            full_config_data.add(config_item_name, aot)
+        else:
+            raise TypeError(t("config.write_unsupported_type"))
+
+    if isinstance(config, Config):
+        try:
+            a_memorix_web = full_config_data["a_memorix"]["web"]
+            if "import_config" in a_memorix_web and "import" not in a_memorix_web:
+                a_memorix_web["import"] = a_memorix_web.pop("import_config")
+        except Exception:
+            logger.debug("A_Memorix 配置写出时转换 web.import_config 失败", exc_info=True)
+
+    # 备份旧文件
+    if config_path.exists():
+        backup_root = config_path.parent / "old"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_root / f"{config_path.stem}_{timestamp}.toml"
+        config_path.replace(backup_path)
+
+    # 写入文件
+    with open(config_path, "w", encoding="utf-8") as f:
+        tomlkit.dump(full_config_data, f)
+
+
+class _ConfigProxy:
+    """稳定配置代理，确保热重载后旧导入也能读取最新配置。"""
+
+    def __init__(self, getter: Callable[[], ConfigBase]) -> None:
+        self._getter = getter
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._getter(), name)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._getter()[key]
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_getter":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._getter(), name, value)
+
+    def __repr__(self) -> str:
+        return repr(self._getter())
+
+
+# generate_new_config_file(Config, BOT_CONFIG_PATH, CONFIG_VERSION)
+config_manager = ConfigManager()
+# CLI 初始化只生成缺失文件；正常启动仍沿用原有加载和升级流程。
+if os.environ.get("MAIBOT_INITIALIZE_ONLY") != "1":
+    config_manager.initialize()
+global_config: Config = cast(Config, _ConfigProxy(config_manager.get_global_config))
+model_config: ModelConfig = cast(ModelConfig, _ConfigProxy(config_manager.get_model_config))

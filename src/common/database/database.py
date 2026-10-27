@@ -1,0 +1,240 @@
+from contextlib import contextmanager
+from time import perf_counter
+from typing import ContextManager, Generator, TYPE_CHECKING
+
+from rich.traceback import install
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import SQLModel, Session, create_engine
+
+import threading
+
+from src.common.paths import get_instance_root
+from src.common.database.migrations import create_database_migration_bootstrapper
+from src.common.logger import get_logger
+
+if TYPE_CHECKING:
+    from sqlite3 import Connection as SQLite3Connection
+
+install(extra_lines=3)
+
+logger = get_logger("database")
+
+
+# 定义数据库文件路径
+ROOT_PATH = get_instance_root()
+_DB_DIR = ROOT_PATH / "data"
+_DB_FILE = _DB_DIR / "MaiBot.db"
+
+# 确保数据库目录存在
+_DB_DIR.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = f"sqlite:///{_DB_FILE}"
+
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection: "SQLite3Connection", connection_record):
+    """
+    为每个新的数据库连接设置 SQLite PRAGMA。
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA cache_size=-64000")  # 负值表示KB,64000KB = 64MB
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=1000")  # 1秒超时
+    cursor.close()
+
+
+# 连接数据库
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True,
+)
+
+# 创建会话工厂（使用 sqlmodel.Session）
+# 说明: 设置 expire_on_commit=False，避免在 with get_db_session() 块自动 commit 时，
+# 已加载到内存中的 ORM 实例属性被标记为过期。否则会话关闭后实例进入 detached 状态，
+# 任何属性访问都会触发刷新而抛出
+# "Instance ... is not bound to a Session; attribute refresh operation cannot proceed".
+# 当前数据库模型不包含 SQLAlchemy Relationship，因此不会引入 lazy-load 副作用。
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    class_=Session,
+    expire_on_commit=False,
+)
+_migration_bootstrapper = create_database_migration_bootstrapper(engine)
+
+_db_initialized = False
+_db_initialize_lock = threading.Lock()
+
+_RUNTIME_PERFORMANCE_INDEXES = (
+    (
+        "ix_jargons_status_count_id",
+        "CREATE INDEX IF NOT EXISTS ix_jargons_status_count_id "
+        "ON jargons (is_jargon, count DESC, id DESC)",
+    ),
+    (
+        "ix_jargons_global_count_id",
+        "CREATE INDEX IF NOT EXISTS ix_jargons_global_count_id "
+        "ON jargons (is_global, count DESC, id DESC)",
+    ),
+    (
+        "ix_jargons_complete_count_id",
+        "CREATE INDEX IF NOT EXISTS ix_jargons_complete_count_id "
+        "ON jargons (is_complete, count DESC, id DESC)",
+    ),
+    # WebUI 按聊天流取最新一条消息（聊天流列表、时间线等）依赖该组合索引；
+    # 只有 session_id 单列索引时，每组取 max(timestamp) 仍要扫全部行
+    (
+        "ix_mai_messages_session_id_timestamp",
+        "CREATE INDEX IF NOT EXISTS ix_mai_messages_session_id_timestamp "
+        "ON mai_messages (session_id, timestamp DESC)",
+    ),
+)
+
+
+def ensure_runtime_performance_indexes() -> None:
+    """补齐不影响 schema 版本的运行期性能索引。"""
+
+    index_start_time = perf_counter()
+    created_or_checked_indexes = 0
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA busy_timeout=30000")
+            for index_name, statement in _RUNTIME_PERFORMANCE_INDEXES:
+                statement_start_time = perf_counter()
+                connection.exec_driver_sql(statement)
+                created_or_checked_indexes += 1
+                logger.debug(
+                    "数据库运行期性能索引已检查："
+                    f"{index_name}，耗时={int((perf_counter() - statement_start_time) * 1000)}ms"
+                )
+    except OperationalError as exc:
+        logger.warning(
+            "数据库运行期性能索引检查未完成，当前数据库被占用；"
+            f"已完成 {created_or_checked_indexes}/{len(_RUNTIME_PERFORMANCE_INDEXES)} 个，"
+            "下次启动或空闲初始化时会再次检查。"
+            f" 错误={exc}"
+        )
+        return
+    logger.debug(f"数据库运行期性能索引检查完成，耗时={int((perf_counter() - index_start_time) * 1000)}ms")
+
+
+def initialize_database() -> None:
+    """初始化数据库连接、结构与启动期迁移。
+
+    当前初始化流程遵循以下顺序：
+        1. 确保数据库目录存在；
+        2. 加载 SQLModel 模型定义；
+        3. 执行已注册的启动期迁移；
+        4. 兜底执行 ``create_all`` 确保当前模型定义已建表。
+    """
+    global _db_initialized
+    if _db_initialized:
+        return
+
+    with _db_initialize_lock:
+        if _db_initialized:
+            return
+
+        _DB_DIR.mkdir(parents=True, exist_ok=True)
+        import src.common.database.database_model  # noqa: F401
+
+        migration_state = _migration_bootstrapper.prepare_database()
+        logger.debug(
+            "数据库迁移准备完成，"
+            f" 当前版本={migration_state.resolved_version.version}，目标版本={migration_state.target_version}"
+        )
+        create_all_start_time = perf_counter()
+        SQLModel.metadata.create_all(engine)
+        logger.debug(f"数据库模型建表检查完成，耗时={int((perf_counter() - create_all_start_time) * 1000)}ms")
+        ensure_runtime_performance_indexes()
+        finalize_start_time = perf_counter()
+        _migration_bootstrapper.finalize_database(migration_state)
+        logger.debug(f"数据库 schema 版本收尾完成，耗时={int((perf_counter() - finalize_start_time) * 1000)}ms")
+        _db_initialized = True
+
+
+@contextmanager
+def get_db_session(auto_commit: bool = True) -> Generator[Session, None, None]:
+    """
+    获取数据库会话的上下文管理器 (推荐使用,自动提交)。
+
+    Examples:
+    ----
+    .. code-block:: python
+        # 方式1: 自动提交 (推荐 - 默认行为)
+        with get_db_session() as session:
+            user = User(name="张三", age=25)
+            session.add(user)
+            # 退出时自动 commit,无需手动调用
+
+        # 方式2: 手动控制事务 (高级用法)
+        with get_db_session(auto_commit=False) as session:
+            user1 = User(name="张三", age=25)
+            user2 = User(name="李四", age=30)
+            session.add_all([user1, user2])
+            session.commit()  # 手动提交
+
+    Args:
+        auto_commit (bool): 是否在退出上下文时自动提交（默认: True）。
+
+    Yields:
+        Session: SQLAlchemy 数据库会话
+
+    注意:
+        - 会话会在退出上下文时自动关闭
+        - 如果发生异常，会自动回滚事务
+        - auto_commit=True 时,成功执行完会自动提交
+        - auto_commit=False 时,需要手动调用 session.commit()
+    """
+    initialize_database()
+    session = SessionLocal()
+    try:
+        yield session
+        if auto_commit:
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_db_session_manual() -> ContextManager[Session]:
+    """获取数据库会话的上下文管理器 (手动提交模式)。
+
+    Returns:
+        ContextManager[Session]: 手动提交模式的数据库会话上下文管理器。
+    """
+    return get_db_session(auto_commit=False)
+
+
+def get_db() -> Generator[Session, None, None]:
+    """
+    获取数据库会话的生成器函数。
+
+    适用于依赖注入场景(如 FastAPI)。
+
+    使用示例 (FastAPI):
+    ----
+    .. code-block:: python
+        @app.get("/users/{user_id}")
+        def read_user(user_id: int, db: Session = Depends(get_db)):
+            return db.get(User, user_id)
+
+    Yields:
+        Session: SQLAlchemy 数据库会话
+    """
+    initialize_database()
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()

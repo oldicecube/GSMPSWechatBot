@@ -1,0 +1,764 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Callable, Coroutine, Dict, List, Literal, Set, Tuple, Type
+
+import asyncio
+import copy
+import dataclasses
+import time
+import uuid
+
+from src.common.logger import get_logger
+from src.common.startup_diagnostics import diagnostic_stage
+from src.config.config import config_manager
+from src.config.model_configs import APIProvider, ModelInfo
+from src.llm_models.payload_content.context_item import (
+    ContextItem,
+    ModelOutputItem,
+    ProviderActivityItem,
+    bind_output_items_to_turn,
+    get_response_reasoning,
+    get_response_text,
+    get_response_tool_calls,
+)
+from src.llm_models.payload_content.native_tool import NativeToolCallSummary
+from src.llm_models.payload_content.resp_format import RespFormat
+from src.llm_models.payload_content.tool_option import ToolCall, ToolOption
+
+logger = get_logger("model_client_registry")
+
+
+@dataclass
+class UsageRecord:
+    """
+    使用记录类
+    """
+
+    model_name: str
+    """模型名称"""
+
+    provider_name: str
+    """提供商名称"""
+
+    prompt_tokens: int
+    """提示token数"""
+
+    completion_tokens: int
+    """完成token数"""
+
+    total_tokens: int
+    """总token数"""
+
+    prompt_cache_hit_tokens: int = 0
+    """输入中缓存命中的 token 数"""
+
+    prompt_cache_miss_tokens: int = 0
+    """输入中缓存未命中的 token 数"""
+
+    prompt_cache_reported: bool = False
+    """供应商本次响应是否上报了 Prompt 缓存用量字段。
+    部分供应商（如 StepFun）只在命中时返回缓存字段，未命中时为 False；
+    统计页据此自动探测模型是否支持 Prompt 缓存，不依赖任何价格配置。"""
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationTrace:
+    """一次 Provider API 响应的诊断记录，不参与上下文或裁切。"""
+
+    provider: str
+    endpoint: str
+    model: str
+    response_id: str | None
+    status: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    prompt_cache_hit_tokens: int
+    prompt_cache_miss_tokens: int
+    output_item_ids: Tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationAttempt:
+    """一次实际 Provider 调用的轻量诊断记录。"""
+
+    attempt_id: str
+    workflow_purpose: str
+    workflow_attempt: int
+    provider_attempt: int
+    model_attempt: int
+    status: str
+    started_at: str
+    duration_ms: float
+    provider: str
+    endpoint: str
+    model: str
+    client_type: str
+    operation: str
+    wire_protocol: str
+    error: Dict[str, Any] | None = None
+
+
+@dataclass
+class APIResponse:
+    """
+    API响应类
+    """
+
+    output_items: Tuple[ModelOutputItem, ...] = ()
+    """模型输出的不可变 Context Items，是响应内容的唯一事实来源。"""
+
+    generation_trace: GenerationTrace | None = None
+    """本次 Provider 响应的诊断记录，不参与模型上下文。"""
+
+    generation_attempts: Tuple[GenerationAttempt, ...] = ()
+    """一次逻辑请求内按实际调用顺序排列的 Provider 尝试。"""
+
+    embedding: List[float] | None = None
+    """嵌入向量"""
+
+    rate_limit_wait_seconds: float = 0.0
+    """本次逻辑请求累计的嵌入限速等待时间，不计入模型耗时。"""
+
+    usage: UsageRecord | None = None
+    """使用情况 (prompt_tokens, completion_tokens, total_tokens)"""
+
+    raw_data: Any = None
+    """响应原始数据"""
+
+    provider_response: Dict[str, Any] | None = field(default=None, repr=False)
+    """Provider 返回的完整结构化响应，仅用于诊断记录，不参与通用业务解析。"""
+
+    wire_protocol: str = ""
+    """本次成功请求实际使用的 Provider wire protocol。"""
+
+    request_wire_payload: Any = field(default=None, repr=False)
+    """本次成功请求的最终 wire 载荷，仅用于缓存诊断和可观测性。"""
+
+    request_snapshot: "ResponseRequest | None" = field(default=None, repr=False)
+    """实际成功请求的独立快照，不包含认证信息或运行中的回调。"""
+
+    request_protocol_hash: str | None = None
+    """图片嵌入客户端计算的协议指纹；自动适配图片嵌入协议时填充，
+    编排器据此透传给上层，其余场景保持 None 并沿用默认指纹算法。"""
+
+    @property
+    def content(self) -> str | None:
+        """只读派生模型可见正文。"""
+
+        return get_response_text(self.output_items) or None
+
+    @property
+    def reasoning_content(self) -> str | None:
+        """只读派生可展示 reasoning。"""
+
+        return get_response_reasoning(self.output_items) or None
+
+    @property
+    def tool_calls(self) -> List[ToolCall] | None:
+        """只读派生通用工具调用。"""
+
+        context_tool_calls = get_response_tool_calls(self.output_items)
+        if not context_tool_calls:
+            return None
+        return [
+            ToolCall(
+                call_id=tool_call.call_id,
+                func_name=tool_call.func_name,
+                args=tool_call.materialize_args(),
+                extra_content=tool_call.materialize_extra_content(),
+            )
+            for tool_call in context_tool_calls
+        ]
+
+    @property
+    def native_tool_calls(self) -> List[NativeToolCallSummary]:
+        """只读派生 Provider 原生活动摘要。"""
+
+        return [
+            NativeToolCallSummary(
+                tool_type=item.provider_type,
+                call_id=item.call_id,
+                status=item.status,
+                action_type=item.action_type,
+                details=list(item.details),
+                source_count=item.source_count,
+            )
+            for item in self.output_items
+            if isinstance(item, ProviderActivityItem)
+        ]
+
+    def bind_logical_turn(self, logical_turn_id: str) -> None:
+        """将本次输出 Items 绑定到调用方定义的完整逻辑工具轮次。"""
+
+        if self.output_items:
+            self.output_items = bind_output_items_to_turn(self.output_items, logical_turn_id)
+
+    def attach_generation_trace(
+        self,
+        *,
+        provider: str,
+        endpoint: str,
+        model: str,
+        response_id: str | None = None,
+        status: str = "completed",
+    ) -> None:
+        """补齐与刷新独立于上下文的 Provider 诊断信息。"""
+
+        existing = self.generation_trace
+        usage = self.usage
+        self.generation_trace = GenerationTrace(
+            provider=existing.provider if existing is not None else provider,
+            endpoint=existing.endpoint if existing is not None else endpoint,
+            model=existing.model if existing is not None else model,
+            response_id=existing.response_id if existing is not None else response_id,
+            status=existing.status if existing is not None else status,
+            prompt_tokens=usage.prompt_tokens if usage is not None else 0,
+            completion_tokens=usage.completion_tokens if usage is not None else 0,
+            total_tokens=usage.total_tokens if usage is not None else 0,
+            prompt_cache_hit_tokens=usage.prompt_cache_hit_tokens if usage is not None else 0,
+            prompt_cache_miss_tokens=usage.prompt_cache_miss_tokens if usage is not None else 0,
+            output_item_ids=tuple(item.meta.item_id for item in self.output_items),
+        )
+
+
+UsageTuple = Tuple[int, ...]
+"""统一的使用量元组，顺序为 `(prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens, prompt_cache_reported)`。
+ Gemini 等不区分缓存的客户端可缩短元组，末位是否存在由消费方按长度判断。"""
+
+StreamResponseHandler = Callable[
+    [Any, asyncio.Event | None],
+    Coroutine[Any, Any, Tuple["APIResponse", UsageTuple | None]],
+]
+"""统一的流式响应处理函数类型。"""
+
+ResponseParser = Callable[[Any], Tuple["APIResponse", UsageTuple | None]]
+"""统一的非流式响应解析函数类型。"""
+
+
+@dataclass(slots=True)
+class RequestTraceContext:
+    """一次逻辑 LLM 请求在重试和切换模型期间共享的日志上下文。"""
+
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    task_name: str = ""
+    request_type: str = ""
+    session_id: str = ""
+    started_at: float = field(default_factory=time.time)
+    attempt: int = 0
+    model_attempt: int = 0
+    snapshot_path: str = ""
+    current_attempt_started_at: float = 0.0
+    rate_limit_wait_seconds: float = 0.0
+    generation_attempts: List[GenerationAttempt] = field(default_factory=list)
+
+    def replace_attempt_status(self, attempt_number: int, status: str) -> None:
+        """更新指定 Provider 尝试的后续调度状态。"""
+
+        for index in range(len(self.generation_attempts) - 1, -1, -1):
+            attempt = self.generation_attempts[index]
+            if attempt.provider_attempt != attempt_number:
+                continue
+            self.generation_attempts[index] = dataclasses.replace(attempt, status=status)
+            return
+
+
+@dataclass(slots=True)
+class ResponseRequest:
+    """统一的文本/多模态响应请求。"""
+
+    model_info: ModelInfo
+    context_items: List[ContextItem]
+    tool_options: List[ToolOption] | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    response_format: RespFormat | None = None
+    stream_response_handler: StreamResponseHandler | None = None
+    async_response_parser: ResponseParser | None = None
+    interrupt_flag: asyncio.Event | None = None
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+    trace_context: RequestTraceContext | None = None
+    logical_turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    tool_choice: Literal["none"] | None = None
+
+    def copy_with(self, **changes: Any) -> "ResponseRequest":
+        """基于当前请求创建一个带局部变更的新请求。
+
+        Args:
+            **changes: 需要覆盖的字段值。
+
+        Returns:
+            ResponseRequest: 复制后的请求对象。
+        """
+        payload = {
+            "model_info": self.model_info,
+            "context_items": list(self.context_items),
+            "tool_options": None if self.tool_options is None else list(self.tool_options),
+            "tool_choice": self.tool_choice,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "response_format": self.response_format,
+            "stream_response_handler": self.stream_response_handler,
+            "async_response_parser": self.async_response_parser,
+            "interrupt_flag": self.interrupt_flag,
+            "extra_params": dict(self.extra_params),
+            "trace_context": self.trace_context,
+            "logical_turn_id": self.logical_turn_id,
+        }
+        payload.update(changes)
+        return ResponseRequest(**payload)
+
+    def detached_snapshot(self) -> "ResponseRequest":
+        """冻结输入和模型设置，解除中断、回调及诊断上下文的生命周期。"""
+        return copy.deepcopy(self.copy_with(
+            stream_response_handler=None, async_response_parser=None,
+            interrupt_flag=None, trace_context=None,
+        ))
+
+
+@dataclass(slots=True)
+class EmbeddingRequest:
+    """统一的嵌入请求。"""
+
+    model_info: ModelInfo
+    embedding_input: str
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+    trace_context: RequestTraceContext | None = None
+    retry_handled_externally: bool = False
+
+
+@dataclass(slots=True)
+class ImageEmbeddingRequest:
+    """统一的图片嵌入请求，原始图片只在进程内传递。"""
+
+    model_info: ModelInfo
+    image_bytes: bytes
+    mime_type: str
+    preprocess_version: str
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+    trace_context: RequestTraceContext | None = None
+
+
+@dataclass(slots=True)
+class AudioTranscriptionRequest:
+    """统一的音频转录请求。"""
+
+    model_info: ModelInfo
+    audio_base64: str
+    max_tokens: int | None = None
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+    trace_context: RequestTraceContext | None = None
+
+
+ClientRequest = ResponseRequest | EmbeddingRequest | ImageEmbeddingRequest | AudioTranscriptionRequest
+"""统一客户端请求类型。"""
+
+
+class BaseClient(ABC):
+    """
+    基础客户端
+    """
+
+    api_provider: APIProvider
+
+    def __init__(self, api_provider: APIProvider) -> None:
+        """初始化基础客户端。
+
+        Args:
+            api_provider: API 提供商配置。
+        """
+        self.api_provider = api_provider
+
+    def prepare_sync_resources(self) -> None:
+        """预加载 SDK 的同步资源；异步获取入口会在工作线程中调用此方法。
+
+        此阶段不得发起异步请求或绑定事件循环。网络连接仍由调用方循环首次使用。
+        """
+        return None
+
+    @abstractmethod
+    async def get_response(self, request: ResponseRequest) -> APIResponse:
+        """获取对话响应。
+
+        Args:
+            request: 统一响应请求对象。
+
+        Returns:
+            APIResponse: 统一响应对象。
+        """
+        raise NotImplementedError("'get_response' method should be overridden in subclasses")
+
+    @abstractmethod
+    async def get_embedding(self, request: EmbeddingRequest) -> APIResponse:
+        """获取文本嵌入。
+
+        Args:
+            request: 统一嵌入请求对象。
+
+        Returns:
+            APIResponse: 嵌入响应。
+        """
+        raise NotImplementedError("'get_embedding' method should be overridden in subclasses")
+
+    async def get_image_embedding(self, request: ImageEmbeddingRequest) -> APIResponse:
+        """获取图片嵌入；未实现该协议的 Provider 应明确报错。"""
+
+        from src.llm_models.exceptions import ImageEmbeddingUnsupportedError
+
+        raise ImageEmbeddingUnsupportedError(
+            f"Provider 客户端 {type(self).__name__} 未实现图片嵌入协议"
+        )
+
+    @abstractmethod
+    async def get_audio_transcriptions(self, request: AudioTranscriptionRequest) -> APIResponse:
+        """获取音频转录。
+
+        Args:
+            request: 统一音频转录请求对象。
+
+        Returns:
+            APIResponse: 音频转录响应。
+        """
+        raise NotImplementedError("'get_audio_transcriptions' method should be overridden in subclasses")
+
+    @abstractmethod
+    def get_support_image_formats(self) -> List[str]:
+        """获取支持的图片格式。
+
+        Returns:
+            List[str]: 支持的图片格式列表。
+        """
+        raise NotImplementedError("'get_support_image_formats' method should be overridden in subclasses")
+
+
+ClientFactory = Callable[[APIProvider], BaseClient]
+"""根据 APIProvider 创建客户端实例的工厂函数。"""
+
+
+@dataclass(slots=True)
+class ClientProviderRegistration:
+    """LLM Provider 客户端类型注册信息。"""
+
+    client_type: str
+    """客户端类型标识，对应模型配置中的 `api_providers[].client_type`。"""
+
+    factory: ClientFactory
+    """客户端实例工厂。"""
+
+    owner_plugin_id: str | None = None
+    """拥有该客户端类型的插件 ID；主程序内置类型为 ``None``。"""
+
+    version: str = "1.0.0"
+    """Provider 实现版本。"""
+
+    description: str = ""
+    """Provider 描述文本。"""
+
+    builtin: bool = False
+    """是否为主程序内置 Provider。"""
+
+
+class ClientRegistry:
+    """客户端注册表。"""
+
+    def __init__(self) -> None:
+        """初始化注册表并绑定配置重载回调。"""
+        self.client_registry: Dict[str, ClientProviderRegistration] = {}
+        """APIProvider.client_type -> Provider 注册信息映射表。"""
+        self.client_instance_cache: Dict[Tuple[asyncio.AbstractEventLoop | None, str], BaseClient] = {}
+        """(事件循环, APIProvider.name) -> BaseClient 的映射表。"""
+        self._owner_client_types: Dict[str, Set[str]] = {}
+        """插件 ID -> 该插件拥有的 client_type 集合。"""
+        self._cache_generation = 0
+        self._client_initializations: Dict[
+            Tuple[asyncio.AbstractEventLoop, str, int, int], asyncio.Task[BaseClient]
+        ] = {}
+        config_manager.register_reload_callback(self.clear_client_instance_cache)
+
+    def register_client_class(self, client_type: str) -> Callable[[Type[BaseClient]], Type[BaseClient]]:
+        """注册主程序内置 API 客户端类。
+
+        Args:
+            client_type: 客户端类型标识。
+
+        Returns:
+            Callable[[Type[BaseClient]], Type[BaseClient]]: 装饰器函数。
+        """
+
+        def decorator(cls: Type[BaseClient]) -> Type[BaseClient]:
+            """将内置客户端类注册到全局客户端注册表。
+
+            Args:
+                cls: 待注册的客户端类。
+
+            Returns:
+                Type[BaseClient]: 原始客户端类。
+            """
+            if not issubclass(cls, BaseClient):
+                raise TypeError(f"{cls.__name__} is not a subclass of BaseClient")
+            self.register_provider(
+                ClientProviderRegistration(
+                    client_type=client_type,
+                    factory=cls,
+                    builtin=True,
+                )
+            )
+            return cls
+
+        return decorator
+
+    @staticmethod
+    def _normalize_client_type(client_type: str) -> str:
+        """规范化客户端类型标识。
+
+        Args:
+            client_type: 原始客户端类型标识。
+
+        Returns:
+            str: 去除首尾空白后的客户端类型标识。
+
+        Raises:
+            ValueError: 当客户端类型为空时抛出。
+        """
+        normalized_client_type = str(client_type or "").strip()
+        if not normalized_client_type:
+            raise ValueError("client_type 不能为空")
+        return normalized_client_type
+
+    def register_provider(self, registration: ClientProviderRegistration) -> None:
+        """注册单个客户端类型。
+
+        Args:
+            registration: Provider 注册信息。
+
+        Raises:
+            ValueError: 当客户端类型冲突时抛出。
+        """
+        client_type = self._normalize_client_type(registration.client_type)
+        existing = self.client_registry.get(client_type)
+        if existing is not None and existing.owner_plugin_id != registration.owner_plugin_id:
+            raise ValueError(
+                f"LLM Provider client_type 冲突: {client_type} 已由 {existing.owner_plugin_id or 'host'} 注册"
+            )
+
+        self.client_registry[client_type] = ClientProviderRegistration(
+            client_type=client_type,
+            factory=registration.factory,
+            owner_plugin_id=registration.owner_plugin_id,
+            version=registration.version,
+            description=registration.description,
+            builtin=registration.builtin,
+        )
+        if registration.owner_plugin_id:
+            self._owner_client_types.setdefault(registration.owner_plugin_id, set()).add(client_type)
+        self.clear_client_instance_cache_by_client_type(client_type)
+
+    def validate_plugin_provider_replacement(self, plugin_id: str, client_types: List[str]) -> None:
+        """校验插件 Provider 替换是否会造成运行时冲突。
+
+        Args:
+            plugin_id: 目标插件 ID。
+            client_types: 插件即将注册的客户端类型列表。
+
+        Raises:
+            ValueError: 当客户端类型为空、重复或与其他 owner 冲突时抛出。
+        """
+        normalized_plugin_id = str(plugin_id or "").strip()
+        if not normalized_plugin_id:
+            raise ValueError("plugin_id 不能为空")
+
+        normalized_client_types = [self._normalize_client_type(client_type) for client_type in client_types]
+        duplicate_client_types = sorted(
+            {client_type for client_type in normalized_client_types if normalized_client_types.count(client_type) > 1}
+        )
+        if duplicate_client_types:
+            raise ValueError(f"插件 {normalized_plugin_id} 重复声明 LLM Provider: {', '.join(duplicate_client_types)}")
+
+        for client_type in normalized_client_types:
+            existing = self.client_registry.get(client_type)
+            if existing is None or existing.owner_plugin_id == normalized_plugin_id:
+                continue
+            raise ValueError(
+                f"LLM Provider client_type 冲突: {client_type} 已由 {existing.owner_plugin_id or 'host'} 注册"
+            )
+
+    def replace_plugin_providers(
+        self,
+        plugin_id: str,
+        registrations: List[ClientProviderRegistration],
+    ) -> None:
+        """原子替换一个插件拥有的全部 Provider 注册。
+
+        Args:
+            plugin_id: 目标插件 ID。
+            registrations: 插件当前上报的 Provider 注册列表。
+
+        Raises:
+            ValueError: 当注册信息不合法或存在冲突时抛出。
+        """
+        normalized_plugin_id = str(plugin_id or "").strip()
+        self.validate_plugin_provider_replacement(
+            normalized_plugin_id,
+            [registration.client_type for registration in registrations],
+        )
+        self.unregister_plugin_providers(normalized_plugin_id)
+        for registration in registrations:
+            self.register_provider(
+                ClientProviderRegistration(
+                    client_type=registration.client_type,
+                    factory=registration.factory,
+                    owner_plugin_id=normalized_plugin_id,
+                    version=registration.version,
+                    description=registration.description,
+                    builtin=False,
+                )
+            )
+
+    def unregister_plugin_providers(self, plugin_id: str) -> int:
+        """注销一个插件拥有的全部 Provider 注册。
+
+        Args:
+            plugin_id: 目标插件 ID。
+
+        Returns:
+            int: 被注销的客户端类型数量。
+        """
+        normalized_plugin_id = str(plugin_id or "").strip()
+        if not normalized_plugin_id:
+            return 0
+
+        client_types = self._owner_client_types.pop(normalized_plugin_id, set())
+        removed_count = 0
+        for client_type in client_types:
+            registration = self.client_registry.get(client_type)
+            if registration is None or registration.owner_plugin_id != normalized_plugin_id:
+                continue
+            self.client_registry.pop(client_type, None)
+            self.clear_client_instance_cache_by_client_type(client_type)
+            removed_count += 1
+        return removed_count
+
+    def clear_client_instance_cache_by_client_type(self, client_type: str) -> None:
+        """清理指定客户端类型对应的客户端实例缓存。
+
+        Args:
+            client_type: 需要清理缓存的客户端类型。
+        """
+        normalized_client_type = str(client_type or "").strip()
+        if not normalized_client_type:
+            return
+
+        stale_cache_keys = [
+            cache_key
+            for cache_key, client in self.client_instance_cache.items()
+            if client.api_provider.client_type == normalized_client_type
+        ]
+        for cache_key in stale_cache_keys:
+            self.client_instance_cache.pop(cache_key, None)
+
+    @staticmethod
+    def _get_client_cache_key(api_provider: APIProvider) -> Tuple[asyncio.AbstractEventLoop | None, str]:
+        """生成按事件循环隔离的客户端缓存键。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        return loop, api_provider.name
+
+    def get_client_class_instance(self, api_provider: APIProvider, force_new: bool = False) -> BaseClient:
+        """获取注册的 API 客户端实例。
+
+        此方法是兼容同步入口；协程应使用 get_client_class_instance_async。
+
+        Args:
+            api_provider: APIProvider 实例。
+            force_new: 是否强制创建新实例。
+
+        Returns:
+            BaseClient: 注册的 API 客户端实例。
+        """
+        from . import ensure_client_type_loaded
+
+        ensure_client_type_loaded(api_provider.client_type)
+
+        # 如果强制创建新实例，直接创建不使用缓存
+        if force_new:
+            if registration := self.client_registry.get(api_provider.client_type):
+                return self._build_prepared_client(api_provider, registration)
+            raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
+
+        # 异步 HTTP 连接在实际请求时绑定循环，同一调用方循环内按 Provider 复用。
+        cache_key = self._get_client_cache_key(api_provider)
+        if cache_key not in self.client_instance_cache:
+            if registration := self.client_registry.get(api_provider.client_type):
+                self.client_instance_cache[cache_key] = self._build_prepared_client(api_provider, registration)
+            else:
+                raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
+        return self.client_instance_cache[cache_key]
+
+    def clear_client_instance_cache(self) -> None:
+        """清空客户端实例缓存。"""
+        # 正在初始化的旧配置实例仍可服务原请求，但不能重新填入新配置缓存。
+        self._cache_generation += 1
+        self.client_instance_cache.clear()
+        logger.info("检测到配置重载，已清空LLM客户端实例缓存")
+
+    @staticmethod
+    def _build_prepared_client(api_provider: APIProvider, registration: ClientProviderRegistration) -> BaseClient:
+        """一次完成客户端构造及 SDK 懒加载，不在工作线程中发起网络请求。"""
+        with diagnostic_stage(f"llm.client_create:{api_provider.client_type}"):
+            client = registration.factory(api_provider)
+            client.prepare_sync_resources()
+            return client
+
+    async def get_client_class_instance_async(self, api_provider: APIProvider) -> BaseClient:
+        """异步获取客户端：重初始化在线程中执行，缓存仍按调用方事件循环隔离。"""
+        from . import ensure_client_type_loaded
+
+        loop = asyncio.get_running_loop()
+        cache_key = (loop, api_provider.name)
+        if cached := self.client_instance_cache.get(cache_key):
+            return cached
+
+        # 新增供应商或配置热重载可能首次导入 SDK，不能在事件循环中导入。
+        generation = self._cache_generation
+        await asyncio.to_thread(ensure_client_type_loaded, api_provider.client_type)
+        registration = self.client_registry.get(api_provider.client_type)
+        if registration is None:
+            raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
+        if generation == self._cache_generation and (cached := self.client_instance_cache.get(cache_key)):
+            return cached
+
+        initialization_key = (loop, api_provider.name, id(registration), generation)
+        task = self._client_initializations.get(initialization_key)
+        if task is None:
+
+            async def initialize() -> BaseClient:
+                if registration.builtin:
+                    client = await asyncio.to_thread(self._build_prepared_client, api_provider, registration)
+                else:
+                    # 插件代理的工厂可能需要当前循环；宿主内不执行第三方 SDK 的构造。
+                    client = registration.factory(api_provider)
+                if (
+                    generation == self._cache_generation
+                    and self.client_registry.get(api_provider.client_type) is registration
+                ):
+                    self.client_instance_cache[cache_key] = client
+                return client
+
+            task = asyncio.create_task(initialize(), name=f"llm.client_initialize:{api_provider.client_type}")
+            self._client_initializations[initialization_key] = task
+
+            def finish(completed: asyncio.Task[BaseClient]) -> None:
+                self._client_initializations.pop(initialization_key, None)
+                # 所有调用方均被取消时，也完整记录后台初始化异常。
+                if not completed.cancelled() and (error := completed.exception()) is not None:
+                    logger.error("LLM 客户端初始化失败", exc_info=(type(error), error, error.__traceback__))
+
+            task.add_done_callback(finish)
+
+        # 同一循环的并发请求共享初始化；取消单个请求不能取消其他请求使用的客户端。
+        return await asyncio.shield(task)
+
+
+client_registry = ClientRegistry()
