@@ -157,6 +157,9 @@ def send(target, content=None, file_path=None, mode="wechat_text", rcon=None, de
 
     with _SEND_LOCK:
         try:
+            if str(os.environ.get("MAIBOT_INTERCEPT_SEND", "")).strip().lower() in {"1", "true", "yes", "on"} and mode.startswith("wechat_"):
+                print(f"[SEND INTERCEPT] target={target} mode={mode}", flush=True)
+                return True, "intercepted by MAIBOT_INTERCEPT_SEND"
 
             # =========================
             # 🚨 全局拦截（修复版）

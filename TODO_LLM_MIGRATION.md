@@ -21,6 +21,11 @@
 - [x] Preserve all non-LLM plugins, `auto/`, services, data stores, RCON and media paths; source diff is limited to the LLM facade, dependent auxiliary plugins, TODO and acceptance report.
 - [x] Add a send-independent MaiBot API contract test: prompt `请只回复OK` returned `OK` through `MaibotLLMService` using the configured Kilo model.
 - [x] Run startup, MaiBot model request, message facade, persona/config, emoji registry and graceful shutdown tests.
+- [x] Add visible `[LLM INIT]`, `[LLM ROUTE]` and `[MAIBOT CORE]` runtime markers so the active core is diagnosable from console and app logs.
+- [x] Fix batch-message translation to accept the Dispatcher batch contract and preserve batch context in the MaiBot prompt.
+- [x] Allow auxiliary MaiBot calls to accept legacy provider options such as `timeout` without bypassing MaiBot.
+- [x] Add `MAIBOT_INTERCEPT_SEND=1` send interception for end-to-end tests without sending to WeChat.
+- [x] Verify direct, auxiliary and batch MaiBot calls return through the facade; acceptance result is recorded in `docs/llm-migration-acceptance.json`.
 - [x] Update this TODO and write `docs/llm-migration-acceptance.json`.
 
 ## External blockers

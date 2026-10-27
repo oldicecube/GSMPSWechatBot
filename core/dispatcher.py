@@ -474,6 +474,11 @@ class Dispatcher:
 
             if llm_config.get("enabled"):
                 self.llm_service = LLMService()
+                print(
+                    f"[LLM INIT] enabled=True service={type(self.llm_service).__module__}.{type(self.llm_service).__name__} "
+                    f"maibot={type(self.llm_service).__name__ == 'MaibotLLMService'}",
+                    flush=True,
+                )
                 max_concurrent = max(
                     1,
                     min(int(self.llm_service.config.get("max_concurrent_requests", 1) or 1), 4),
@@ -1048,6 +1053,12 @@ class Dispatcher:
         conversation_priority=None,
     ):
         try:
+            print(
+                f"[LLM ROUTE] mode={'batch' if batch_messages is not None else 'direct'} "
+                f"group={context.get('group') or context.get('sessionId') or 'unknown'} "
+                f"content_chars={len(str(context.get('content') or ''))} batch_count={len(batch_messages or []) if batch_messages is not None else 0}",
+                flush=True,
+            )
             if batch_messages is not None:
                 result = self.llm_service.handle_batch_message(
                     group_id=context.get("group") or context.get("sessionId") or "unknown",

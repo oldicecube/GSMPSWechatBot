@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
+
+from utils.runtime_trace import trace_runtime
+
+
+logger = logging.getLogger("maibot_core_bridge")
 
 
 class _ProactiveShim:
@@ -43,6 +49,7 @@ class MaibotLLMService:
         self._proactive_callback = None
         self._scheduled_callback = None
         self._client = None
+        self._log("initialized enabled=%s maibot_root=%s", self.config.get("enabled", True), os.environ.get("MAIBOT_ROOT", r"D:\maibot"))
 
     @staticmethod
     def _load_legacy_llm_config() -> Dict[str, Any]:
@@ -62,6 +69,7 @@ class MaibotLLMService:
             from src.services.llm_service import LLMServiceClient
 
             self._client = LLMServiceClient(task_name="planner", request_type="wechat.dispatcher")
+            self._log("client_created task=planner request_type=wechat.dispatcher client=%s", type(self._client).__name__)
         return self._client
 
     def _build_prompt(self, nickname: str, content: str, group_id: str, message_context: Optional[Dict[str, Any]]) -> str:
@@ -107,20 +115,48 @@ class MaibotLLMService:
     def handle_message(self, group_id, nickname, content, wxid="", session_id=None, message_context=None, force_reply=False):
         del wxid, force_reply
         if not self.config.get("enabled", True):
+            self._log("request_skipped reason=disabled")
             return {"messages": [], "should_reply": False, "error": "LLM disabled"}
+        self._log("request task=planner mode=direct group=%s chars=%s", group_id or session_id or "unknown", len(str(content or "")))
+        trace_runtime("maibot_core_request", task="planner", mode="direct", group=str(group_id or session_id or "unknown"))
         try:
             result = self._generate_with_retry(self._build_prompt(nickname, content, str(group_id or ""), message_context), str(session_id or group_id or ""))
             text = str(getattr(result, "content", None) or getattr(result, "text", None) or self._extract_result_text(result) or "").strip()
-            return {"messages": [{"type": "text", "content": text}] if text else [], "should_reply": bool(text), "animation": None, "maibot_model": getattr(result, "model_name", "")}
+            model = getattr(result, "model_name", "")
+            self._log("response task=planner mode=direct model=%s chars=%s", model or "unknown", len(text))
+            trace_runtime("maibot_core_response", task="planner", mode="direct", model=str(model or ""), chars=len(text))
+            return {"messages": [{"type": "text", "content": text}] if text else [], "should_reply": bool(text), "animation": None, "maibot_model": model}
         except Exception as exc:
+            self._log("error task=planner mode=direct type=%s error=%s", type(exc).__name__, exc)
+            trace_runtime("maibot_core_error", task="planner", mode="direct", error=f"{type(exc).__name__}: {exc}")
             return {"messages": [], "should_reply": False, "error": f"MaiBot LLM failed: {type(exc).__name__}: {exc}"}
 
-    def handle_batch_message(self, group_id, nickname, content, **kwargs):
-        return self.handle_message(group_id, nickname, content, **kwargs)
+    def handle_batch_message(self, group_id, messages=None, **kwargs):
+        """Convert Dispatcher batch records into one MaiBot-native request."""
+        items = [item for item in (messages or []) if isinstance(item, dict)]
+        nickname = str((items[-1] if items else {}).get("nickname") or (items[-1] if items else {}).get("user") or "未知用户")
+        content = "\n".join(
+            f"{item.get('nickname') or item.get('user') or '用户'}: {item.get('content') or ''}" for item in items
+        ).strip()
+        context = dict(items[-1] if items else {})
+        context["batch_messages"] = items
+        self._log("request task=planner mode=batch group=%s count=%s chars=%s", group_id or "unknown", len(items), len(content))
+        trace_runtime("maibot_core_request", task="planner", mode="batch", group=str(group_id or "unknown"), count=len(items))
+        result = self.handle_message(
+            group_id,
+            nickname,
+            content,
+            session_id=kwargs.get("session_id") or group_id,
+            message_context=context,
+            force_reply=bool(kwargs.get("force_reply")),
+        )
+        result["_llm_ok"] = True
+        result["_delivery_batch_messages"] = items
+        return result
 
-    def _provider_call(self, messages, *, thinking=None, task_name="utils"):
+    def _provider_call(self, messages, *, thinking=None, task_name="utils", **kwargs: Any):
         """Compatibility-shaped auxiliary call; execution remains MaiBot-native."""
-        del thinking
+        del thinking, kwargs
         prompt = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages or [])
         maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
         if maibot_root not in sys.path:
@@ -128,8 +164,13 @@ class MaibotLLMService:
         from src.services.llm_service import LLMServiceClient
 
         client = LLMServiceClient(task_name=task_name, request_type="wechat.auxiliary")
+        self._log("request task=%s mode=auxiliary chars=%s", task_name, len(prompt))
+        trace_runtime("maibot_core_request", task=task_name, mode="auxiliary")
         result = self._generate_with_retry(prompt, "wechat-auxiliary", client=client)
-        return SimpleNamespace(content=self._extract_result_text(result))
+        text = self._extract_result_text(result)
+        self._log("response task=%s mode=auxiliary model=%s chars=%s", task_name, getattr(result, "model_name", "") or "unknown", len(text))
+        trace_runtime("maibot_core_response", task=task_name, mode="auxiliary", model=str(getattr(result, "model_name", "") or ""), chars=len(text))
+        return SimpleNamespace(content=text)
 
     def _generate_with_retry(self, prompt: str, session_id: str, *, client=None):
         client = client or self._get_client()
@@ -167,7 +208,9 @@ class MaibotLLMService:
         }
 
     def handle_proactive_message(self, *_args, **_kwargs):
-        return {"messages": [], "should_reply": False, "animation": None}
+        context = _args[0] if _args and isinstance(_args[0], dict) else (_kwargs.get("context") or {})
+        self._log("proactive_gate accepted group=%s chars=%s", context.get("group") or context.get("sessionId") or "unknown", len(str(context.get("content") or "")))
+        return {"forward_to_llm": True, "trigger_source": "proactive", "messages": [], "should_reply": False, "animation": None}
 
     def handle_scheduled_event(self, *_args, **_kwargs):
         return {"messages": [], "should_reply": False, "animation": None}
@@ -201,3 +244,12 @@ class MaibotLLMService:
                 if isinstance(value, str) and value.strip():
                     return value
         return ""
+
+    @staticmethod
+    def _log(message: str, *args: Any) -> None:
+        logger.info(message, *args)
+        try:
+            rendered = message % args if args else message
+            print(f"[MAIBOT CORE] {rendered}", flush=True)
+        except Exception:
+            pass

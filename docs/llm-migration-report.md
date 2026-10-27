@@ -11,3 +11,7 @@ The acceptance script sent a real text request through MaiBot's Kilo model and r
 Emoji migration is verified separately: 16 files exist in MaiBot `data/emoji` and 16 registered records exist in `MaiBot.db`.
 
 The only compatibility boundary is the WeChat message ingress/egress translation. LLM reasoning, model selection, prompt assembly, output parsing, and auxiliary model calls run through MaiBot.
+
+Runtime verification now prints `[LLM INIT] ... maibot=True` during Dispatcher startup, `[LLM ROUTE]` at the direct or batch dispatch boundary, and `[MAIBOT CORE]` request/response markers from the facade. The acceptance suite covers direct, auxiliary and batch calls and passed with `MaibotLLMService`; `MAIBOT_INTERCEPT_SEND=1` prevents outbound WeChat sends during tests.
+
+The previous lack of obvious MaiBot startup text was diagnostic only: MaiBot is embedded as a library in the WeChat Bot process, so there is no separate `D:\maibot\bot.py` process. MaiBot's own logs still show model selection and `wechat.dispatcher`/`wechat.auxiliary` request types.

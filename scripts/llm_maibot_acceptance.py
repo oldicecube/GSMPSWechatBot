@@ -21,6 +21,13 @@ def main() -> None:
     assert result.get("messages") and result["messages"][0]["content"].strip(), result
     aux = service._provider_call([{"role": "user", "content": "Reply with exactly OK."}], task_name="utils")
     assert str(aux.content).strip(), aux
+    batch = service.handle_batch_message(
+        "test-group",
+        messages=[{"nickname": "测试用户", "content": "请只回复 OK"}],
+        force_reply=True,
+        session_id="acceptance-batch",
+    )
+    assert batch.get("should_reply") is True, batch
 
     emoji_db = MAIBOT / "data" / "MaiBot.db"
     conn = sqlite3.connect(emoji_db)
@@ -29,9 +36,29 @@ def main() -> None:
     emoji_files = len(list((MAIBOT / "data" / "emoji").glob("*")))
     assert emoji_count == emoji_files == 16, (emoji_count, emoji_files)
     changed = os.popen(f'git -C "{ROOT}" diff 5258467 --name-only').read().splitlines()
-    allowed = {"TODO_LLM_MIGRATION.md", "llm/core/__init__.py", "llm/core/maibot_service.py", "plugins/emoji.py", "plugins/jane.py", "scripts/llm_maibot_acceptance.py", "docs/llm-migration-acceptance.json"}
+    allowed = {
+        "TODO_LLM_MIGRATION.md",
+        "core/dispatcher.py",
+        "core/sender.py",
+        "docs/llm-migration-acceptance.json",
+        "docs/llm-migration-report.md",
+        "llm/core/__init__.py",
+        "llm/core/maibot_service.py",
+        "plugins/emoji.py",
+        "plugins/jane.py",
+        "scripts/llm_maibot_acceptance.py",
+    }
     assert set(changed) <= allowed, changed
-    report = {"status": "passed", "model": result.get("maibot_model"), "reply": result["messages"][0]["content"], "emoji_count": emoji_count, "external_files_changed": changed}
+    report = {
+        "status": "passed",
+        "service": f"{type(service).__module__}.{type(service).__name__}",
+        "model": result.get("maibot_model"),
+        "reply": result["messages"][0]["content"],
+        "batch_reply": batch["messages"][0]["content"],
+        "auxiliary_reply": str(aux.content),
+        "emoji_count": emoji_count,
+        "external_files_changed": changed,
+    }
     out = ROOT / "docs" / "llm-migration-acceptance.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

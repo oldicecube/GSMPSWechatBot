@@ -1,10 +1,17 @@
 {
   "status": "passed",
+  "service": "llm.core.maibot_service.MaibotLLMService",
   "model": "wechat_free_kilo_auto",
   "reply": "OK",
+  "batch_reply": "OK",
+  "auxiliary_reply": "OK",
   "emoji_count": 16,
   "external_files_changed": [
     "TODO_LLM_MIGRATION.md",
+    "core/dispatcher.py",
+    "core/sender.py",
+    "docs/llm-migration-acceptance.json",
+    "docs/llm-migration-report.md",
     "llm/core/__init__.py",
     "llm/core/maibot_service.py",
     "plugins/emoji.py",
