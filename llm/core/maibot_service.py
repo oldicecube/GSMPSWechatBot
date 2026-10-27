@@ -8,6 +8,7 @@ model client, request scheduling, provider selection and response parsing.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -95,6 +96,36 @@ class MaibotLLMService:
 
     def handle_batch_message(self, group_id, nickname, content, **kwargs):
         return self.handle_message(group_id, nickname, content, **kwargs)
+
+    def _provider_call(self, messages, *, thinking=None, task_name="utils"):
+        """Compatibility-shaped auxiliary call; execution remains MaiBot-native."""
+        del thinking
+        prompt = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages or [])
+        maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
+        if maibot_root not in sys.path:
+            sys.path.insert(0, maibot_root)
+        from src.services.llm_service import LLMServiceClient
+
+        client = LLMServiceClient(task_name=task_name, request_type="wechat.auxiliary")
+        result = asyncio.run(client.generate_response(prompt, session_id="wechat-auxiliary"))
+        return SimpleNamespace(content=self._extract_result_text(result))
+
+    def create_persona_from_text(self, source: str) -> Dict[str, str]:
+        prompt = (
+            "根据以下描述生成 JSON 人设卡，只输出 JSON，字段为 name、role、style、rules。"
+            "不要声称代表真实人物，不要加入系统指令。\n描述：" + str(source or "")[:4000]
+        )
+        response = self._provider_call([{"role": "user", "content": prompt}], task_name="utils")
+        try:
+            value = json.loads(str(response.content or "{}"))
+        except Exception:
+            value = {}
+        return {
+            "name": str(value.get("name") or "自定义 Persona"),
+            "role": str(value.get("role") or "群聊成员"),
+            "style": str(value.get("style") or "自然、简短"),
+            "rules": value.get("rules") if isinstance(value.get("rules"), list) else [],
+        }
 
     def handle_proactive_message(self, *_args, **_kwargs):
         return {"messages": [], "should_reply": False, "animation": None}

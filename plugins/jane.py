@@ -83,16 +83,10 @@ def handle(content: str, context: dict) -> str | None:
         return "❌ LLM 功能未启用，无法使用 校园段子生成器"
 
     try:
-        from llm.provider import DeepSeekProvider
-    except ImportError as e:
-        return f"❌ 加载 LLM 模块失败：{e}"
-
-    try:
-        provider = DeepSeekProvider()
+        from llm.core.maibot_service import MaibotLLMService
+        provider = MaibotLLMService()
     except Exception as e:
-        if is_insufficient_balance_error(e):
-            return BALANCE_ERROR_MESSAGE
-        return f"❌ LLM 客户端初始化失败：{e}"
+        return f"❌ MaiBot LLM 客户端初始化失败：{e}"
 
     messages = [
         {"role": "system", "content": _system_prompt()},
@@ -100,7 +94,7 @@ def handle(content: str, context: dict) -> str | None:
     ]
 
     try:
-        response_text = provider.send(messages)
+        response_text = str(provider._provider_call(messages, task_name="utils").content or "")
     except Exception as e:
         if is_insufficient_balance_error(e):
             return BALANCE_ERROR_MESSAGE

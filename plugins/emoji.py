@@ -160,16 +160,8 @@ def _request_messages(source: str) -> list[dict[str, str]]:
 
 
 def _call_model(source: str) -> str:
-    from llm.provider import DeepSeekProvider
-
-    provider = DeepSeekProvider(json_mode=False)
-    # Classify this non-conversation call for /prompt diagnostics without
-    # allowing it to contaminate the primary chat prompt capture.
-    capture_scope = getattr(provider, "prompt_capture_kind", None)
-    if callable(capture_scope):
-        with capture_scope("auxiliary"):
-            return provider.send(_request_messages(source))
-    return provider.send(_request_messages(source))
+    from llm.core.maibot_service import MaibotLLMService
+    return str(MaibotLLMService()._provider_call(_request_messages(source), task_name="utils").content or "")
 
 
 def handle(content, context):
