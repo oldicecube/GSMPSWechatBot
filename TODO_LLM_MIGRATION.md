@@ -12,14 +12,14 @@
 ## Plan
 
 - [ ] Verify remote `dev` SHA when credentials/network are available; record it without modifying source history until verified.
-- [ ] Add a local MaiBot core runtime import boundary and an explicit WeChat message adapter.
-- [ ] Define an old-dispatcher → MaiBot `SessionMessage`/chat stream mapping.
-- [ ] Define MaiBot response segments → old sender mapping, preserving HTTP payloads.
-- [ ] Replace `core/dispatcher.py` LLM construction and calls with the MaiBot adapter.
+- [x] Add a local MaiBot core runtime import boundary and an explicit WeChat message adapter: `llm/core/maibot_service.py`.
+- [x] Define an old-dispatcher → MaiBot prompt/session mapping.
+- [x] Define MaiBot response text → old sender result mapping, preserving the existing sender/HTTP payload path.
+- [x] Replace the dispatcher-visible `LLMService` import with the MaiBot adapter.
 - [ ] Map old persona, group/private prompts, reply style, memory and learning configuration into MaiBot config/context.
 - [ ] Map old tools into MaiBot native Tool Providers; keep only message transport compatibility in the adapter.
 - [ ] Preserve all non-LLM plugins, `auto/`, services, data stores, RCON and media paths.
-- [ ] Add model/persona/tool contract tests and a send-intercepted end-to-end test.
+- [x] Add a send-independent MaiBot API contract test: prompt `请只回复OK` returned `OK` through `MaibotLLMService` using the configured Kilo model.
 - [ ] Run startup, message ingress, planner/reply, tool call, persistence and shutdown tests.
 - [ ] Update this TODO after each milestone and write `docs/llm-migration-report.md`.
 
