@@ -69,9 +69,29 @@ class MaibotLLMService:
         style = str(self.config.get("reply_style") or "").strip()
         group_prompt = str(self.config.get("group_prompt") or "").strip()
         private_prompt = str(self.config.get("private_prompt") or "").strip()
+        bot_nickname = ""
+        try:
+            maibot_root = os.environ.get("MAIBOT_ROOT", r"D:\maibot")
+            if maibot_root not in sys.path:
+                sys.path.insert(0, maibot_root)
+            from src.config.config import config_manager
+
+            native = config_manager.get_global_config()
+            persona_cfg = getattr(native, "personality", None)
+            bot_cfg = getattr(native, "bot", None)
+            chat_cfg = getattr(native, "chat", None)
+            persona = str(getattr(persona_cfg, "personality", persona) or persona)
+            style = str(getattr(persona_cfg, "reply_style", style) or style)
+            bot_nickname = str(getattr(bot_cfg, "nickname", "") or "")
+            if group_id:
+                group_prompt = str(getattr(getattr(chat_cfg, "reply_style", None), "group_chat_prompt", group_prompt) or group_prompt)
+            else:
+                group_prompt = str(getattr(getattr(chat_cfg, "reply_style", None), "private_chat_prompts", private_prompt) or private_prompt)
+        except Exception:
+            pass
         context = message_context or {}
         lines = [
-            f"你是 MaiBot 驱动的 WeChat Bot。人格：{persona}",
+            f"你是 MaiBot 驱动的 WeChat Bot。机器人名称：{bot_nickname or 'MaiBot'}。人格：{persona}",
             f"回复风格：{style}",
             group_prompt if group_id else private_prompt,
             f"当前用户：{nickname}",
