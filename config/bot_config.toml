@@ -131,7 +131,7 @@ global_memory_sharing_enabled = false # 是否让普通记忆查询在所有聊�
 shared_memory_groups = [] # 把需要互相参考长期记忆的群聊或私聊放到同一组
 
 [a_memorix.plugin] # 长期记忆系统的总开关
-enabled = false # 是否启用长期记忆系统
+enabled = true # 是否启用长期记忆系统
 
 [a_memorix.integration] # 控制麦麦在聊天中如何使用长期记忆
 enable_memory_query_tool = true # 是否允许麦麦在聊天时查询长期记忆
