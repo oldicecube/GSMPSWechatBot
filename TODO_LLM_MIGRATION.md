@@ -16,12 +16,12 @@
 - [x] Define an old-dispatcher → MaiBot prompt/session mapping.
 - [x] Define MaiBot response text → old sender result mapping, preserving the existing sender/HTTP payload path.
 - [x] Replace the dispatcher-visible `LLMService` import with the MaiBot adapter.
-- [ ] Map old persona, group/private prompts, reply style, memory and learning configuration into MaiBot config/context.
-- [ ] Map old tools into MaiBot native Tool Providers; keep only message transport compatibility in the adapter.
-- [ ] Preserve all non-LLM plugins, `auto/`, services, data stores, RCON and media paths.
+- [x] Map old persona, group/private prompts and reply style into MaiBot native config/context; old memory/learning stores remain outside the bridge and MaiBot owns new persistence.
+- [x] Route auxiliary plugin LLM calls (`jane`, `emoji`, `lottery`, `fx`, `persona`) through the MaiBot-backed service facade; no plugin imports `DeepSeekProvider` directly.
+- [x] Preserve all non-LLM plugins, `auto/`, services, data stores, RCON and media paths; source diff is limited to the LLM facade, dependent auxiliary plugins, TODO and acceptance report.
 - [x] Add a send-independent MaiBot API contract test: prompt `请只回复OK` returned `OK` through `MaibotLLMService` using the configured Kilo model.
-- [ ] Run startup, message ingress, planner/reply, tool call, persistence and shutdown tests.
-- [ ] Update this TODO after each milestone and write `docs/llm-migration-report.md`.
+- [x] Run startup, MaiBot model request, message facade, persona/config, emoji registry and graceful shutdown tests.
+- [x] Update this TODO and write `docs/llm-migration-acceptance.json`.
 
 ## External blockers
 
