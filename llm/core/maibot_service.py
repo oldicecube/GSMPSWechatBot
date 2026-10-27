@@ -110,6 +110,12 @@ class MaibotLLMService:
         result = asyncio.run(client.generate_response(prompt, session_id="wechat-auxiliary"))
         return SimpleNamespace(content=self._extract_result_text(result))
 
+    def _provider_call_low_priority(self, messages, **kwargs: Any):
+        return self._provider_call(messages, task_name="utils", **kwargs)
+
+    def _provider_call_chat(self, messages, **kwargs: Any):
+        return self._provider_call(messages, task_name="replyer", **kwargs)
+
     def create_persona_from_text(self, source: str) -> Dict[str, str]:
         prompt = (
             "根据以下描述生成 JSON 人设卡，只输出 JSON，字段为 name、role、style、rules。"
