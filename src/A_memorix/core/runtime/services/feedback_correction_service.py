@@ -746,6 +746,9 @@ class MemoryFeedbackCorrectionService(KernelServiceBase):
         collected: List[str] = []
         seen = set()
         for item in raw_messages:
+            from src.common.learning_policy import is_learning_allowed
+            if not is_learning_allowed(item):
+                continue
             text = str(getattr(item, "processed_plain_text", "") or "").strip()
             if feedback_noise(text):
                 continue

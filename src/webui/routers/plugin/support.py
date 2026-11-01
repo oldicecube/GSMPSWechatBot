@@ -13,7 +13,7 @@ import stat
 from src.common.logger import get_logger
 from src.core.config_types import ConfigField
 from src.plugin_runtime.runner.manifest_validator import is_reserved_plugin_directory
-from src.webui.core import get_token_manager
+from src.webui.core.auth import get_current_token
 
 logger = get_logger("webui.plugin_routes")
 
@@ -24,10 +24,7 @@ MAX_PLUGIN_README_CHARS = 500000
 
 
 def require_plugin_token(maibot_session: Optional[str]) -> str:
-    token_manager = get_token_manager()
-    if not maibot_session or not token_manager.verify_token(maibot_session):
-        raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
-    return maibot_session
+    return get_current_token(maibot_session)
 
 
 def validate_safe_path(user_path: str, base_path: Path) -> Path:

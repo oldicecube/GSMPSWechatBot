@@ -6,6 +6,10 @@ Original-text preservation is a prompt instruction, not an acceptance check.
 
 from __future__ import annotations
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import json
 import logging
 import re
@@ -160,8 +164,8 @@ def _request_messages(source: str) -> list[dict[str, str]]:
 
 
 def _call_model(source: str) -> str:
-    from llm.core.maibot_service import MaibotLLMService
-    return str(MaibotLLMService()._provider_call(_request_messages(source), task_name="utils").content or "")
+    from llm.core.native_model_bridge import shell_generate
+    return str(shell_generate(_request_messages(source), task_name="utils").content or "")
 
 
 def handle(content, context):

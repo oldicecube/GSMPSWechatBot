@@ -7,6 +7,10 @@ sends exactly one image and no accompanying text. Errors are sent as text.
 """
 from __future__ import annotations
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import os
 import secrets
 import threading

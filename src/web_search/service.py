@@ -14,6 +14,7 @@ from .adapters.exa import ExaAdapter
 from .adapters.firecrawl import FirecrawlAdapter
 from .adapters.stepsearch import MCPCaller, StepSearchAdapter
 from .adapters.tavily import TavilyAdapter
+from .adapters.parallel import ParallelMCPAdapter
 from .config import WebRuntimeConfig
 from .models import PageResult, SearchResult, WebSearchError
 
@@ -59,6 +60,8 @@ class WebSearchService:
             adapter = ExaAdapter(settings, self.transport)
         elif settings.adapter == "firecrawl":
             adapter = FirecrawlAdapter(settings, self.transport)
+        elif settings.adapter == "parallel_mcp":
+            adapter = ParallelMCPAdapter(settings, self.mcp, invocation, context)
         else:
             adapter = StepSearchAdapter(settings, self.mcp, invocation, context)
         arguments = invocation.arguments

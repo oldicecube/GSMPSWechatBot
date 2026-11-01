@@ -104,10 +104,12 @@ def _resolve_person_id(
     """按约定顺序解析长期记忆检索使用的 person_id。"""
 
     clean_person_name = str(person_name or "").strip()
-    if clean_person_name:
+    clean_platform = str(platform or "").strip().lower()
+    # QQ identity is authoritative by QQ number.  Never let a nickname-only
+    # lookup merge similarly named members.
+    if clean_platform == "qq" and user_id:
         person_id = resolve_person_id_for_memory(
-            person_name=clean_person_name,
-            platform=platform,
+            platform=clean_platform,
             user_id=user_id,
         )
         if person_id:
@@ -117,6 +119,14 @@ def _resolve_person_id(
         person_id = resolve_person_id_for_memory(
             platform=platform,
             user_id=user_id,
+        )
+        if person_id:
+            return person_id, clean_person_name
+
+    if clean_platform != "qq" and clean_person_name:
+        person_id = resolve_person_id_for_memory(
+            person_name=clean_person_name,
+            platform=clean_platform,
         )
         if person_id:
             return person_id, clean_person_name
@@ -173,7 +183,8 @@ def _build_replyer_memory_reference(structured_content: Dict[str, Any]) -> str:
         label_parts = [part for part in (title, hit_type) if part]
         label = f"（{' / '.join(label_parts)}）" if label_parts else ""
         normalized_content = " ".join(content.split())
-        hit_lines.append(f"{index}. {label}{normalized_content}")
+        origin = (raw_hit.get('metadata') or {}).get('origin_label') or '来源未标注，不能视为当前群经历'
+        hit_lines.append(f"{index}. [{origin}] {label}{normalized_content}")
 
     if not hit_lines:
         return ""

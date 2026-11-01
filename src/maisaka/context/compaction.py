@@ -94,6 +94,8 @@ def message_text_for_compaction(message: LLMContextMessage) -> str:
                 "call_id": message.tool_call_id,
                 "tool": message.tool_name,
                 "success": message.success,
+                "plugin_id": message.metadata.get('plugin_id', ''),
+                "message_origin": message.metadata.get('message_origin', {}),
                 "content": message.content,
             },
             ensure_ascii=False,
@@ -105,6 +107,10 @@ def message_text_for_compaction(message: LLMContextMessage) -> str:
                 "kind": message.source,
                 "message_id": message.message_id,
                 "session_id": message.original_message.session_id,
+                "platform": message.original_message.platform,
+                "account_id": message.original_message.account_id,
+                "scope": message.original_message.scope,
+                "plugin_activity": message.original_message.message_info.additional_config.get('plugin_activity', {}),
                 "speaker": user_info.user_cardname or user_info.user_nickname or user_info.user_id,
                 "quotes": [
                     component.target_message_id

@@ -1,71 +1,38 @@
-import os
-
-from utils.sqlite_store import player_stats_all, player_stats_ensure, player_stats_update
-
-COMMAND = "/bind"
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+"""通过同一个游戏用户名关联微信和 QQ，积分与人物记忆共享。"""
+WEBUI_CONFIG = {'version': 1, 'fields': {'agent_enabled': {'type': 'bool', 'default': False, 'label': '允许 agent 调用', 'reload': 'hot'}}}
+COMMAND = '/bind'
 
 
 def handle(content, context):
-
-    if not content:
-        return False, "用法: /bind <玩家名>"
-
-    if isinstance(content, list):
-        content = content[0]
-
-    player = str(content).strip()
-
-    # 显示名称（用于提示）
-    username = (
-        context.get("user")
-        or context.get("raw", {}).get("user")
-        or context.get("raw", {}).get("sourceName")
-        or "未知用户"
-    )
-
-    # 实际绑定ID（wxid）
-    wxid = (
-        context.get("raw", {}).get("wxid")
-        or context.get("wxid")
-    )
-
-    if not wxid:
-        return False, "无法获取用户wxid"
-
-    data = player_stats_all()
-    if data is None:
-        return False, "数据文件损坏"
-
-    if not data:
-        return False, "数据文件不存在"
-
-    if player not in data:
-        return False, f"玩家不存在: {player}"
-
-    # 若该玩家已被其他 wxid 绑定，则禁止抢绑
-    player_info = data.get(player)
-    if isinstance(player_info, dict):
-        bound_wxid = player_info.get("bind_user")
-        if isinstance(bound_wxid, str):
-            bound_wxid = bound_wxid.strip()
-            if bound_wxid and bound_wxid != wxid:
-                return False, f"玩家 {player} 已被其他用户绑定"
-
-    # 清除该 wxid 旧绑定
-    for p, info in data.items():
-        if isinstance(info, dict):
-            if info.get("bind_user") == wxid:
-                player_stats_update(p, bind_user=None)
-
-    # 确保玩家记录存在
-    player_stats_ensure(player)
-
-    # 写入新绑定（存 wxid）
+    # Optional display enrichment must never prevent the identity transaction.
+    # Importing it by name also broke requests in a process that still held an
+    # older account_identity module during a rolling source update.
+    from utils import account_identity as identity
+    import logging
+    import sqlite3
+    context = context if isinstance(context, dict) else {}
+    if context.get('_agent_invocation'):
+        return '账号绑定必须由账号本人直接操作'
+    text = ' '.join(map(str, content)) if isinstance(content, list) else str(content or '').strip()
+    uid = identity.actor(context)
+    if not uid:
+        return '无法识别当前平台账号'
     try:
-        player_stats_update(player, bind_user=wxid)
+        if not text or text == 'status':
+            info = identity.details(uid)
+            return ('游戏账号：' + info['player'] + '\n已绑定平台：' + '、'.join(sorted({x.split(':',1)[0] if x.startswith('qq:') else 'wechat' for x in info['members']}))) if info else '用法：/bind <游戏玩家名>；在 QQ、微信两端绑定相同游戏名即可关联'
+        info = identity.bind_game(uid, text)
+    except ValueError as exc:
+        return str(exc)
+    except sqlite3.Error:
+        logging.getLogger(__name__).exception('Binding storage failed on %s', context.get('platform','wechat'))
+        return '绑定存储暂不可用，请稍后重试；不会覆盖已有的绑定。'
+    note = ''
+    try:
+        enrich = getattr(identity, 'binding_peer_note', None)
+        if callable(enrich):
+            note = enrich(uid, context.get('user') or '')
     except Exception:
-        return False, "写入失败"
-
-    # 提示仍显示用户名
-    return f"绑定成功：{username} → {player}"
+        logging.getLogger(__name__).exception('Binding committed; optional peer impression unavailable')
+        note = '\n关联身份已保存，另一侧昵称/印象暂不可用。'
+    return '绑定成功：' + str(context.get('user') or uid) + ' → ' + info['player'] + note

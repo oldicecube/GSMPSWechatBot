@@ -1,0 +1,243 @@
+import type { PluginDisplay, PluginType } from '@/types/plugin'
+
+/**
+ * Git 安装状态
+ */
+export interface GitStatus {
+  installed: boolean
+  version?: string
+  path?: string
+  error?: string
+}
+
+/**
+ * 麦麦版本信息
+ */
+export interface MaimaiVersion {
+  version: string
+  version_major: number
+  version_minor: number
+  version_patch: number
+}
+
+/**
+ * 已安装插件信息
+ */
+export interface InstalledPlugin {
+  source?: 'GSMPS Wechatbot' | 'maibot'
+  external?: boolean
+  managed_operations?: string[]
+  release?: { version: string; commit: string } | null
+  id: string
+  manifest: {
+    manifest_version: number
+    id?: string
+    name: string
+    version: string
+    description: string
+    author: {
+      name: string
+      url?: string
+    }
+    license: string
+    host_application: {
+      min_version: string
+      max_version?: string
+    }
+    homepage_url?: string
+    repository_url?: string
+    keywords?: string[]
+    plugin_type?: PluginType | string
+    display?: PluginDisplay
+    changelog?: string
+    [key: string]: unknown // 允许其他字段
+  }
+  path: string
+  changelog?: string | null
+  enabled?: boolean | null
+  disabled?: boolean
+  loaded?: boolean
+  /** 后端累计的实际运行秒数，不含禁用或停机时间。 */
+  usage_seconds?: number
+  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading' | 'stopping' | 'not_loaded' | 'stopped'
+  load_error?: string
+  circuit_status?: {
+    state: 'open' | 'half_open'
+    remaining_sec: number
+    cooldown_level: number
+    half_open_inflight: boolean
+  } | null
+}
+
+export interface RuntimeCommand {
+  source?: 'GSMPS Wechatbot' | 'maibot'
+  external?: boolean
+  trigger_type?: 'command' | 'event'
+  aliases: string[]
+  description: string
+  enabled: boolean
+  id: string
+  name: string
+  pattern: string
+  permission: 'public' | 'operator'
+  plugin_name: string
+}
+
+/**
+ * 插件加载进度
+ */
+export interface PluginLoadProgress {
+  operation: 'idle' | 'fetch' | 'install' | 'uninstall' | 'update'
+  stage: 'idle' | 'loading' | 'success' | 'error'
+  progress: number // 0-100
+  message: string
+  error?: string
+  plugin_id?: string
+  total_plugins: number
+  loaded_plugins: number
+  mirror_id?: string
+  mirror_name?: string
+  mirror_index?: number
+  total_mirrors?: number
+  attempt?: number
+  max_attempts?: number
+}
+
+/**
+ * 列表项字段定义（用于 object 类型的数组项）
+ */
+export interface ItemFieldDefinition {
+  type: string
+  label?: string
+  placeholder?: string
+  default?: unknown
+  multiple?: boolean
+  choices?: unknown[]
+  min?: number
+  max?: number
+  step?: number
+  item_type?: string
+  item_fields?: Record<string, ItemFieldDefinition>
+  min_items?: number
+  max_items?: number
+  i18n?: Record<string, Record<string, string>>
+}
+
+/**
+ * 配置字段定义
+ */
+export interface ConfigFieldSchema {
+  name: string
+  type: string
+  default: unknown
+  description: string
+  example?: string
+  required: boolean
+  multiple?: boolean
+  choices?: unknown[]
+  min?: number
+  max?: number
+  step?: number
+  pattern?: string
+  max_length?: number
+  label: string
+  placeholder?: string
+  hint?: string
+  i18n?: Record<string, Record<string, string>>
+  icon?: string
+  hidden: boolean
+  disabled: boolean
+  order: number
+  input_type?: string
+  ui_type: string
+  rows?: number
+  group?: string
+  depends_on?: string
+  depends_value?: unknown
+  // 列表类型专用
+  item_type?: string // "string" | "number" | "object"
+  item_fields?: Record<string, ItemFieldDefinition>
+  min_items?: number
+  max_items?: number
+}
+
+/**
+ * 配置节定义
+ */
+export interface ConfigSectionSchema {
+  name: string
+  title: string
+  description?: string
+  i18n?: Record<string, Record<string, string>>
+  icon?: string
+  collapsed: boolean
+  order: number
+  fields: Record<string, ConfigFieldSchema>
+}
+
+/**
+ * 配置标签页定义
+ */
+export interface ConfigTabSchema {
+  id: string
+  title: string
+  i18n?: Record<string, Record<string, string>>
+  sections: string[]
+  icon?: string
+  order: number
+  badge?: string
+}
+
+/**
+ * 配置布局定义
+ */
+export interface ConfigLayoutSchema {
+  type: 'auto' | 'tabs' | 'pages'
+  tabs: ConfigTabSchema[]
+}
+
+/**
+ * 插件配置 Schema
+ */
+export interface PluginConfigSchema {
+  plugin_id: string
+  plugin_info: {
+    name: string
+    version: string
+    description: string
+    author: string
+    i18n?: Record<string, Record<string, string>>
+  }
+  sections: Record<string, ConfigSectionSchema>
+  layout: ConfigLayoutSchema
+  _note?: string
+}
+
+/**
+ * 插件配置页初始化数据
+ */
+export interface PluginConfigBundle {
+  schema: PluginConfigSchema | null
+  config: Record<string, unknown>
+  rawConfig: string
+  configError?: string
+  message?: string
+}
+
+export type PluginRuntimeComponentType = 'action' | 'command' | 'tool'
+
+export interface PluginRuntimeComponent {
+  name: string
+  description: string
+  enabled: boolean
+  plugin_name: string
+  component_type: PluginRuntimeComponentType
+  action_parameters?: Record<string, string>
+  action_require?: string[]
+  associated_types?: string[]
+  activation_type?: string
+  random_activation_probability?: number
+  activation_keywords?: string[]
+  parallel_action?: boolean
+  parameters_schema?: Record<string, unknown>
+}

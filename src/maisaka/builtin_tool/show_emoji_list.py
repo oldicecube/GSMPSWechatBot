@@ -31,7 +31,8 @@ def get_tool_spec() -> ToolSpec:
         name="show_emoji_list",
         description=(
             "查看随机抽取的表情包选择拼图。图片会进入你的上下文，不会发送给聊天对象。"
-            "调用 reply 时将选中图片的序号填入 attach_emoji；历史拼图的序号也可使用。"
+            "遇到玩梗、吐槽、惊讶、无语或需要活跃气氛时应积极考虑使用；"
+            "调用 reply 时将选中图片的序号填入 attach_emoji，表情包会在文字后单独发送。"
         ),
         parameters_schema={"type": "object", "properties": {}},
         provider_name="maisaka_builtin",

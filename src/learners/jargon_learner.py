@@ -8,8 +8,8 @@ import re
 
 from src.chat.utils.utils import is_bot_self
 from src.common.data_models.llm_service_data_models import LLMResponseResult
-from src.common.data_models.message_component_data_model import EmojiComponent, MessageSequence, ReplyComponent
 from src.common.logger import get_logger
+from src.common.learning_policy import is_learning_allowed
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import ContextItem, ContextItemBuilder, RoleType
 from src.maisaka.display.prompt_cli_renderer import PromptCLIVisualizer
@@ -18,6 +18,7 @@ from src.prompt.prompt_manager import prompt_manager
 from src.services.llm_service import LLMServiceClient
 
 from .expression_utils import parse_jargon_response
+from .learning_text import extract_learning_text
 from .pending_learning_buffer import PendingLearningBuffer
 from .jargon_miner import JargonEntry, JargonEvidenceMessageGroup, JargonMiner
 
@@ -30,13 +31,12 @@ logger = get_logger("jargon_learner")
 
 jargon_learn_model = LLMServiceClient(task_name="learner", request_type="jargon.learner")
 MESSAGE_OPEN_TAG_PATTERN = re.compile(r"^<message\b(?P<attrs>[^>]*)>", re.IGNORECASE | re.DOTALL)
-GROUP_CARD_ATTR_PATTERN = re.compile(r'\s+group_card\s*=\s*"[^"]*"', re.IGNORECASE)
-EMOJI_TEXT_PATTERN = re.compile(r"\[(?:消息类型\]表情包|表情包[^\]]*\])")
 
 
 def _is_learnable_session_message(message: "SessionMessage") -> bool:
     return (
-        not is_bot_self(message.platform, message.message_info.user_info.user_id)
+        is_learning_allowed(message)
+        and not is_bot_self(message.platform, message.message_info.user_info.user_id)
         and not message.is_notify
     )
 
@@ -182,39 +182,16 @@ class JargonLearner:
         return source_items
 
     @staticmethod
-    def _clean_learning_content(content: str) -> str:
-        """清理已渲染的用户消息；去掉表情包后正文为空则丢弃。"""
-
-        content = content.strip()
-        header = MESSAGE_OPEN_TAG_PATTERN.match(content)
-        if header and re.search(r'\bis_self_message="true"', header.group("attrs"), re.IGNORECASE):
-            return ""
-        body = content[header.end():] if header else content
-        body = EMOJI_TEXT_PATTERN.sub("", body).strip()
-        if not body:
-            return ""
-        if header:
-            attrs = GROUP_CARD_ATTR_PATTERN.sub("", header.group("attrs"))
-            return f"<message{attrs}>\n{body}"
-        return body
-
-    @staticmethod
     def _build_session_message_learning_content(message: "SessionMessage") -> str:
-        """只渲染用户消息，过滤表情包组件并省略群名片。"""
+        """Read only top-level user text; do not render or await media."""
 
-        from src.maisaka.context.message_adapter import build_visible_text_from_sequence
-
-        sequence = MessageSequence([
-            component for component in message.raw_message.components
-            if not isinstance(component, (EmojiComponent, ReplyComponent))
-        ])
-        body = build_visible_text_from_sequence(sequence).strip()
+        body = extract_learning_text(message.raw_message)
         if not body:
             return ""
         user_info = message.message_info.user_info
         user_name = escape(user_info.user_nickname or user_info.user_id, quote=True)
         prefix = f'<message user="{user_name}">\n'
-        return JargonLearner._clean_learning_content(prefix + body)
+        return prefix + body
 
     async def _learn_from_sources(
         self,
@@ -225,6 +202,10 @@ class JargonLearner:
     ) -> bool:
         """对一批上下文素材执行黑话学习。"""
 
+        self.pending_messages.discard([item for item in pending_messages if not is_learning_allowed(item.original_message)])
+        pending_messages = [item for item in pending_messages if is_learning_allowed(item.original_message)]
+        if not pending_messages:
+            return True
         learning_session_id = self._resolve_learning_session_id(pending_messages)
         if learning_session_id is None:
             logger.warning(f"黑话学习已跳过：无法解析到有效聊天流，learner_session_id={self.session_id}")

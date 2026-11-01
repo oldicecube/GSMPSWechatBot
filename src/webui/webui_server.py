@@ -202,6 +202,7 @@ class WebUIServer:
             port=self.port,
             log_config=None,
             access_log=False,
+            proxy_headers=False,
         )
         self._server = UvicornServer(config=config)
 

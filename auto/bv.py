@@ -1,9 +1,13 @@
-"""Low-cost automatic Bilibili BV detector.
+"""Low-cost automatic Bilibili BV and b23.tv share-link detector.
 
-The detector only performs a local boundary-checked BV scan. Network work,
+The detector only performs local boundary-checked identifier/link scans. Network work,
 queueing, download, send, and cleanup stay in plugins.bv.
 """
 from __future__ import annotations
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 
 import re
 
@@ -44,7 +48,7 @@ def _content(context):
 
 def handle_auto(context):
     text = _content(context)
-    if not text or not _FAST_BV_RE.search(text):
+    if not text or not (_FAST_BV_RE.search(text) or implementation.bilibili.extract_short_link(text)):
         return None
     # Reuse the existing FIFO implementation. It performs the same fast scan,
     # queue limit check, background download, send, and finally cleanup.

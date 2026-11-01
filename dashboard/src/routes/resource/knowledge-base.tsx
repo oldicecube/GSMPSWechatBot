@@ -1,0 +1,1496 @@
+import { useQueryClient } from '@tanstack/react-query'
+import {
+  Activity,
+  CheckCircle2,
+  CircleAlert,
+  Database,
+  FolderOpen,
+  HardDrive,
+  Loader2,
+  MoreHorizontal,
+  RefreshCw,
+  RotateCcw,
+} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import { MOBILE_GLASS_CLASS } from '@/components/layout/mobile-glass'
+import { MobileHeaderActions } from '@/components/layout/MobileHeaderActions'
+import { MemoryDeleteDialog } from '@/components/memory/MemoryDeleteDialog'
+import { MemoryEpisodeManager } from '@/components/memory/MemoryEpisodeManager'
+import {
+  MemoryMaintenanceManager,
+  type MemoryMaintenanceAction,
+} from '@/components/memory/MemoryMaintenanceManager'
+import { MemoryTimelineManager } from '@/components/memory/MemoryTimelineManager'
+import { RoutePendingFallback } from '@/components/route-pending-fallback'
+import { AccentPanel } from '@/components/ui/accent-panel'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { DashboardTabBar, DashboardTabTrigger } from '@/components/ui/dashboard-tabs'
+import { Label } from '@/components/ui/label'
+import { Progress } from '@/components/ui/progress'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
+import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
+import { useToast } from '@/hooks/use-toast'
+import { cn } from '@/lib/utils'
+import {
+  getMemoryImportChatTargets,
+  type MemoryImportChatTargetPayload,
+  type MemoryRecordContextPayload,
+  type MemoryRecordPayload,
+  type MemoryRuntimeConfigPayload,
+  type MemoryTimelineJumpTargetPayload,
+} from '@/lib/memory-api'
+
+import { useImportForm } from './knowledge-base/hooks/useImportForm'
+import { useImportQueue } from './knowledge-base/hooks/useImportQueue'
+import { useMemoryCorrection } from './knowledge-base/hooks/useMemoryCorrection'
+import { useMemoryDelete } from './knowledge-base/hooks/useMemoryDelete'
+import { useMemoryFeedback } from './knowledge-base/hooks/useMemoryFeedback'
+import { useMemoryProfileConsole } from './knowledge-base/hooks/useMemoryProfileConsole'
+import { useMemoryRuntimeConfig } from './knowledge-base/hooks/useMemoryRuntimeConfig'
+import { useMemoryTuning } from './knowledge-base/hooks/useMemoryTuning'
+import { CorrectionTab } from './knowledge-base/tabs/CorrectionTab'
+import { DeleteTab } from './knowledge-base/tabs/DeleteTab'
+import { FeedbackTab } from './knowledge-base/tabs/FeedbackTab'
+import { ImportTab } from './knowledge-base/tabs/ImportTab'
+import { ImagesTab } from './knowledge-base/tabs/ImagesTab'
+import { MemoryRecordsTab } from './knowledge-base/tabs/MemoryRecordsTab'
+import { ProfileMaintenancePanel } from './knowledge-base/tabs/ProfileMaintenancePanel'
+import { ProfileSearchPanel } from './knowledge-base/tabs/ProfileSearchPanel'
+import { MemorySearchModeTabs } from './knowledge-base/tabs/MemorySearchModeTabs'
+import { TuningTab } from './knowledge-base/tabs/TuningTab'
+import { KnowledgeGraphPage } from './knowledge-graph'
+
+type MemoryConsoleTab =
+  | 'records'
+  | 'profiles'
+  | 'images'
+  | 'graph'
+  | 'timeline'
+  | 'import'
+  | 'inspection'
+  | 'delete'
+  | 'feedback'
+type LoadableMemoryTab = Extract<
+  MemoryConsoleTab,
+  'timeline' | 'import' | 'delete' | 'feedback'
+>
+
+const MEMORY_CONSOLE_TABS: MemoryConsoleTab[] = [
+  'records',
+  'profiles',
+  'images',
+  'graph',
+  'timeline',
+  'import',
+  'inspection',
+  'delete',
+]
+
+// 情景记忆管理并入记忆检修后的子模式，人物画像维护与纠错历史同样并入检修
+type InspectionMode = 'maintenance' | 'correction' | 'tuning' | 'episodes' | 'profiles' | 'feedback'
+
+interface KnowledgeBaseDeepLinkState {
+  tab: MemoryConsoleTab
+  inspectionMode?: InspectionMode
+  chatId?: string
+  timeStart?: number
+  timeEnd?: number
+  episodeId?: string
+  paragraphHash?: string
+  source?: string
+  personId?: string
+  taskId?: number
+  operationId?: string
+  correctionPlanId?: string
+  maintenanceTarget?: string
+}
+
+function parseOptionalTimestampQuery(value: string | null): number | undefined {
+  if (!value) {
+    return undefined
+  }
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function readKnowledgeBaseDeepLink(): KnowledgeBaseDeepLinkState {
+  if (typeof window === 'undefined') {
+    return { tab: 'records' }
+  }
+  const params = new URLSearchParams(window.location.search)
+  const rawTab = params.get('tab')
+  const legacyInspectionMode =
+    rawTab === 'maintenance' || rawTab === 'correction' || rawTab === 'tuning' ? rawTab : undefined
+  // 情景记忆曾是独立标签，旧链接 tab=episodes 迁移为 inspection 的子模式；
+  // 纠错历史同样并入检修，旧链接 tab=feedback 迁移为 inspection 的 feedback 子模式
+  const legacyEpisodesTab = rawTab === 'episodes'
+  const legacyFeedbackTab = rawTab === 'feedback'
+  // 兼容此前「记忆查询 → 人物画像」的 view 参数，保留 person_id 定位。
+  const legacyProfileView = (!rawTab || rawTab === 'records') && params.get('view') === 'profiles'
+  const tabParam =
+    legacyInspectionMode || legacyEpisodesTab || legacyFeedbackTab
+      ? 'inspection'
+      : legacyProfileView
+        ? 'profiles'
+        : (rawTab as MemoryConsoleTab | null)
+  // 图谱保留 tab=graph 深链入口，无效 tab 回落到文字记录。
+  const tab = tabParam && MEMORY_CONSOLE_TABS.includes(tabParam) ? tabParam : 'records'
+  const taskId = parseOptionalTimestampQuery(params.get('task_id'))
+  const rawMode = params.get('mode')
+  const modeParam =
+    rawMode === 'maintenance' ||
+    rawMode === 'tuning' ||
+    rawMode === 'episodes' ||
+    rawMode === 'profiles' ||
+    rawMode === 'feedback'
+      ? (rawMode as InspectionMode)
+      : undefined
+  return {
+    tab,
+    inspectionMode:
+      legacyInspectionMode ??
+      modeParam ??
+      (legacyEpisodesTab ? 'episodes' : legacyFeedbackTab ? 'feedback' : 'correction'),
+    chatId: params.get('chat_id') || undefined,
+    timeStart: parseOptionalTimestampQuery(params.get('from') ?? params.get('time_start')),
+    timeEnd: parseOptionalTimestampQuery(params.get('to') ?? params.get('time_end')),
+    episodeId: params.get('episode_id') || undefined,
+    paragraphHash: params.get('paragraph_hash') || undefined,
+    source: params.get('source') || undefined,
+    personId: params.get('person_id') || undefined,
+    taskId: taskId ? Math.floor(taskId) : undefined,
+    operationId: params.get('operation_id') || undefined,
+    correctionPlanId: params.get('plan_id') || undefined,
+    maintenanceTarget: params.get('target') || undefined,
+  }
+}
+
+function updateKnowledgeBaseDeepLink(
+  tab: MemoryConsoleTab,
+  updates: Record<string, string | number | undefined>
+) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  const params = new URLSearchParams()
+  params.set('tab', tab)
+  Object.entries(updates).forEach(([key, value]) => {
+    if (value !== undefined && String(value).trim()) {
+      params.set(key, String(value))
+    }
+  })
+  const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`
+  window.history.replaceState(null, '', nextUrl)
+}
+
+function readJumpParam(target: MemoryTimelineJumpTargetPayload, key: string): string {
+  const value = target.params?.[key]
+  if (value === undefined || value === null) {
+    return ''
+  }
+  return String(value)
+}
+
+function readJumpNumber(target: MemoryTimelineJumpTargetPayload, key: string): number | undefined {
+  const value = Number(readJumpParam(target, key))
+  return Number.isFinite(value) ? value : undefined
+}
+
+function normalizeVectorPoolMode(value: unknown, fallback: 'single' | 'dual' = 'single'): 'single' | 'dual' {
+  const mode = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return mode === 'dual' || mode === 'single' ? mode : fallback
+}
+
+function formatVectorCount(value?: number): string {
+  const count = Number(value ?? 0)
+  return Number.isFinite(count) ? String(Math.max(0, count)) : '0'
+}
+
+function readProgressNumber(progress: Record<string, unknown> | undefined, key: string): number | undefined {
+  const raw = progress?.[key]
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined
+  }
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function readProgressRecord(progress: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const value = progress?.[key]
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function formatMigrationStage(stage?: string): string {
+  const normalized = typeof stage === 'string' ? stage.trim() : ''
+  const labels: Record<string, string> = {
+    initial_delay: '等待启动',
+    retry_delay: '等待重试',
+    waiting_rebuild_lock: '等待重建锁',
+    rebuild_start: '开始重建',
+    prepare_rebuild: '准备迁移',
+    legacy_source_load: '加载旧池',
+    legacy_source_warmup: '预热旧池',
+    legacy_source_ready: '旧池就绪',
+    legacy_source_incompatible: '旧池不兼容',
+    paragraphs_start: '迁移段落',
+    paragraphs_done: '段落完成',
+    entities_start: '迁移实体',
+    entities_done: '实体完成',
+    relations_start: '迁移关系',
+    relations_done: '关系完成',
+    activation_check: '校验双池',
+    paragraph_pool_warmup: '预热段落池',
+    paragraph_pool_save: '保存段落池',
+    graph_pool_warmup: '预热图谱池',
+    graph_pool_save: '保存图谱池',
+    activate_dirs: '切换目录',
+    write_manifest: '写入清单',
+    reload_dual_stores: '加载双池',
+    dual_backfill: '补齐双池',
+    dual_backfill_done: '补齐完成',
+    clear_legacy_single_pool: '清理旧池',
+    runtime_rebuild: '刷新运行时',
+    self_check: '运行自检',
+    persist: '持久化',
+    completed: '迁移完成',
+    failed: '迁移失败',
+    cancelled: '已取消',
+    exception: '迁移异常',
+  }
+  return labels[normalized] ?? (normalized || '迁移中')
+}
+
+function formatMigrationProgress(progress: Record<string, unknown> | undefined): string {
+  const parts: string[] = []
+  const paragraphDone = readProgressNumber(progress, 'paragraph_done')
+  const paragraphFailed = readProgressNumber(progress, 'paragraph_failed')
+  const entityDone = readProgressNumber(progress, 'entity_done')
+  const entityFailed = readProgressNumber(progress, 'entity_failed')
+  const relationDone = readProgressNumber(progress, 'relation_done')
+  const relationFailed = readProgressNumber(progress, 'relation_failed')
+  const paragraphCopied = readProgressNumber(readProgressRecord(progress, 'paragraph_migration'), 'copied')
+  const entityEncoded = readProgressNumber(readProgressRecord(progress, 'entity_migration'), 'encoded')
+
+  if (paragraphDone !== undefined) {
+    parts.push(`段落 ${paragraphDone}${paragraphFailed ? `/${paragraphFailed} 失败` : ''}`)
+  }
+  if (entityDone !== undefined) {
+    parts.push(`实体 ${entityDone}${entityFailed ? `/${entityFailed} 失败` : ''}`)
+  }
+  if (relationDone !== undefined) {
+    parts.push(`关系 ${relationDone}${relationFailed ? `/${relationFailed} 失败` : ''}`)
+  }
+  if (!parts.length && paragraphCopied !== undefined) {
+    parts.push(`已复制 ${paragraphCopied}`)
+  }
+  if (!parts.length && entityEncoded !== undefined) {
+    parts.push(`已编码 ${entityEncoded}`)
+  }
+  return parts.slice(0, 2).join(' · ')
+}
+
+function clampMigrationPercent(value?: number): number | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  return Math.min(100, Math.max(0, value))
+}
+
+function formatMigrationEta(seconds?: number): string {
+  if (seconds === undefined) {
+    return '预计计算中'
+  }
+  const totalSeconds = Math.max(0, Math.ceil(seconds))
+  const minutes = Math.floor(totalSeconds / 60)
+  const restSeconds = totalSeconds % 60
+  if (minutes < 60) {
+    return `预计剩余 ${minutes}分${restSeconds}秒`
+  }
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  return `预计剩余 ${hours}小时${restMinutes}分`
+}
+
+function formatMigrationSummary(progress: Record<string, unknown> | undefined): string {
+  const processed = readProgressNumber(progress, 'processed')
+  const total = readProgressNumber(progress, 'total')
+  if (processed !== undefined && total !== undefined) {
+    const eta = formatMigrationEta(readProgressNumber(progress, 'estimated_remaining_seconds'))
+    return `${Math.max(0, Math.floor(processed))}/${Math.max(0, Math.floor(total))} · ${eta}`
+  }
+  return formatMigrationProgress(progress) || '预计计算中'
+}
+
+interface VectorPoolsBadge {
+  value: string
+  description: string
+  progressValue?: number
+  progressLabel?: string
+  className: string
+  iconClassName: string
+}
+
+const CHANNEL_LABELS: Record<string, string> = {
+  metadata: '元数据',
+  sparse: '稀疏',
+  graph: '图谱',
+  vector_read: '向量读取',
+  vector_write: '向量写入',
+  embedding: 'Embedding',
+}
+
+function formatChannelList(channels?: string[]): string {
+  return (channels ?? []).map((channel) => CHANNEL_LABELS[channel] ?? channel).join('、')
+}
+
+function resolveRuntimeBadge(runtimeConfig: MemoryRuntimeConfigPayload) {
+  const memoryEnabled = runtimeConfig.memory_enabled !== false
+  const coreReady = Boolean(runtimeConfig.runtime_ready)
+  const retrievalUnavailable = runtimeConfig.retrieval_ready === false
+  const degraded = Boolean(runtimeConfig.degraded || runtimeConfig.embedding_degraded || retrievalUnavailable)
+  const availableChannels = formatChannelList(runtimeConfig.available_channels)
+
+  if (!memoryEnabled) {
+    return {
+      value: '已停用',
+      description: '记忆功能已由用户配置关闭',
+      icon: CircleAlert,
+      className: 'border-slate-500/25',
+      iconClassName: 'text-slate-500',
+    }
+  }
+  if (!coreReady) {
+    return {
+      value: '核心不可用',
+      description: '元数据库未能完成初始化',
+      icon: CircleAlert,
+      className: 'border-red-500/25',
+      iconClassName: 'text-red-500',
+    }
+  }
+  if (degraded) {
+    return {
+      value: '降级就绪',
+      description: availableChannels ? `可用通道：${availableChannels}` : '核心可用，检索通道暂不可用',
+      icon: CircleAlert,
+      className: 'border-amber-500/25',
+      iconClassName: 'text-amber-500',
+    }
+  }
+  return {
+    value: '就绪',
+    description: availableChannels ? `可用通道：${availableChannels}` : '运行时检查通过',
+    icon: CheckCircle2,
+    className: 'border-emerald-500/25',
+    iconClassName: 'text-emerald-500',
+  }
+}
+
+function resolveVectorPoolsBadge(runtimeConfig: MemoryRuntimeConfigPayload): VectorPoolsBadge {
+  const vectorHealth = runtimeConfig.vector_health
+  const vectorState = String(vectorHealth?.state ?? '').trim().toLowerCase()
+  const copyProgress = vectorHealth?.copy_progress
+  const copyProcessed = readProgressNumber(copyProgress, 'processed')
+  const copyTotal = readProgressNumber(copyProgress, 'total')
+  const copyPercent = copyProcessed !== undefined && copyTotal !== undefined && copyTotal > 0
+    ? clampMigrationPercent((copyProcessed / copyTotal) * 100)
+    : undefined
+  if (vectorState === 'unavailable' || vectorState === 'degraded') {
+    return {
+      value: vectorState === 'unavailable' ? '向量不可用' : '向量降级',
+      description: vectorHealth?.reason || '已切换到稀疏、图谱检索',
+      className: 'border-amber-500/25',
+      iconClassName: 'text-amber-500',
+    }
+  }
+  if (vectorState === 'recovering') {
+    return {
+      value: '向量恢复中',
+      description: copyProcessed !== undefined && copyTotal !== undefined
+        ? `可信旧向量复制 ${Math.floor(copyProcessed)}/${Math.floor(copyTotal)}`
+        : '新向量世代已就绪，正在复制可信旧向量',
+      progressValue: copyPercent,
+      progressLabel: copyPercent === undefined ? undefined : `${copyPercent.toFixed(1)}%`,
+      className: 'border-amber-500/25',
+      iconClassName: 'text-amber-500',
+    }
+  }
+  const vectorPools = runtimeConfig.vector_pools
+  const configuredMode = normalizeVectorPoolMode(vectorPools?.configured_mode)
+  const effectiveMode = normalizeVectorPoolMode(
+    runtimeConfig.vector_pools_effective_mode ?? vectorPools?.effective_mode,
+    configuredMode
+  )
+  const ready = Boolean(runtimeConfig.vector_pools_ready ?? vectorPools?.ready)
+  const paragraphCount = formatVectorCount(vectorPools?.paragraph_pool?.num_vectors)
+  const graphCount = formatVectorCount(vectorPools?.graph_pool?.num_vectors)
+  const singleCount = formatVectorCount(vectorPools?.single_pool?.num_vectors)
+  const autoMigration = vectorPools?.auto_migration
+  const migrationRunning = Boolean(autoMigration?.running)
+  const migrationStage = formatMigrationStage(autoMigration?.stage)
+  const migrationSummary = formatMigrationSummary(autoMigration?.progress)
+  const migrationPercent = clampMigrationPercent(readProgressNumber(autoMigration?.progress, 'percent'))
+
+  if (effectiveMode === 'dual' && ready) {
+    return {
+      value: '双池',
+      description: `段落 ${paragraphCount} · 图谱 ${graphCount}`,
+      className: 'border-cyan-500/25',
+      iconClassName: 'text-cyan-500',
+    }
+  }
+
+  if (configuredMode === 'dual') {
+    if (migrationRunning) {
+      return {
+        value: '双池迁移中',
+        description: `${migrationStage} · ${migrationSummary}`,
+        progressValue: migrationPercent,
+        progressLabel: migrationPercent === undefined ? undefined : `${migrationPercent.toFixed(1)}%`,
+        className: 'border-amber-500/25',
+        iconClassName: 'text-amber-500',
+      }
+    }
+
+    return {
+      value: '双池未就绪',
+      description: `段落 ${paragraphCount} · 图谱 ${graphCount}`,
+      className: 'border-amber-500/25',
+      iconClassName: 'text-amber-500',
+    }
+  }
+
+  return {
+    value: '单池',
+    description: `单池向量 ${singleCount}`,
+    className: 'border-cyan-500/25',
+    iconClassName: 'text-cyan-500',
+  }
+}
+
+export function KnowledgeBasePage() {
+  const { toast } = useToast()
+  const queryClient = useQueryClient()
+  const deepLinkRef = useRef<KnowledgeBaseDeepLinkState>(readKnowledgeBaseDeepLink())
+  const [activeTab, setActiveTab] = useState<MemoryConsoleTab>(deepLinkRef.current.tab)
+  const [imagesToolbarTarget, setImagesToolbarTarget] = useState<HTMLDivElement | null>(null)
+  const [runtimeStatusDialogOpen, setRuntimeStatusDialogOpen] = useState(false)
+  const [visitedMemoryTabs, setVisitedMemoryTabs] = useState<Set<MemoryConsoleTab>>(
+    () => new Set<MemoryConsoleTab>([deepLinkRef.current.tab])
+  )
+  const [tabLoading, setTabLoading] = useState<Partial<Record<LoadableMemoryTab, boolean>>>({})
+  const loadedPanelDataRef = useRef<Set<LoadableMemoryTab>>(new Set())
+  const [timelineInitialChatId] = useState(deepLinkRef.current.chatId ?? '')
+  const [timelineInitialTimeStart] = useState<number | undefined>(deepLinkRef.current.timeStart)
+  const [timelineInitialTimeEnd] = useState<number | undefined>(deepLinkRef.current.timeEnd)
+  const [episodeInitialTarget, setEpisodeInitialTarget] = useState({
+    episodeId: deepLinkRef.current.episodeId ?? '',
+    source: deepLinkRef.current.source ?? '',
+    timeStart: deepLinkRef.current.timeStart,
+    timeEnd: deepLinkRef.current.timeEnd,
+  })
+  const [graphInitialParagraphHash, setGraphInitialParagraphHash] = useState(
+    deepLinkRef.current.paragraphHash ?? ''
+  )
+  const [profileInitialPersonId, setProfileInitialPersonId] = useState(
+    deepLinkRef.current.personId ?? ''
+  )
+  // 每次外部跳转自增：hook 常驻页面，需要靠序号区分「重复定位同一个人」
+  const [profileLocateToken, setProfileLocateToken] = useState(
+    deepLinkRef.current.personId ? 1 : 0
+  )
+  const [maintenanceInitialTarget, setMaintenanceInitialTarget] = useState(
+    deepLinkRef.current.maintenanceTarget ?? ''
+  )
+  const [maintenanceInitialAction, setMaintenanceInitialAction] =
+    useState<MemoryMaintenanceAction>('reinforce')
+  const [inspectionMode, setInspectionMode] = useState<InspectionMode>(
+    deepLinkRef.current.inspectionMode ?? 'correction'
+  )
+
+  // 聊天流列表供审计时间线面板使用（导入面板的聊天流由 useImportForm 自管）
+  const [importChatTargets, setImportChatTargets] = useState<MemoryImportChatTargetPayload[]>([])
+  const importQueue = useImportQueue({
+    active: activeTab === 'import',
+    // 重试沿用表单当前公共参数作 overrides（拆分前 retry 直接读这些 state）
+    buildRetryOverrides: () => importForm.buildCommonImportPayload(),
+  })
+  const importForm = useImportForm({
+    active: activeTab === 'import',
+    onCreated: (taskId) => importQueue.afterCreated(taskId),
+  })
+
+  // 运行时配置：服务于概览区/图谱，默认即拉取（非懒加载）；自检与向量重建一并下沉
+  const memoryRuntime = useMemoryRuntimeConfig(runtimeStatusDialogOpen)
+  const { runtimeConfig } = memoryRuntime
+
+  // 删除领域：来源/操作列表懒加载、操作详情、源选择、删除预览-执行（usePendingOperation）、恢复
+  const memoryDelete = useMemoryDelete({
+    active: activeTab === 'delete',
+    initialSourceSearch: deepLinkRef.current.paragraphHash ?? deepLinkRef.current.source ?? '',
+    initialOperationSearch: deepLinkRef.current.operationId ?? deepLinkRef.current.paragraphHash ?? '',
+    initialOperationId: deepLinkRef.current.operationId ?? '',
+    initialItemSearch: deepLinkRef.current.paragraphHash ?? '',
+  })
+
+  // 纠错领域：纠错历史懒加载、任务详情、行为日志分页、回退；回退后刷新来源与运行时配置
+  // 纠错历史已并入记忆检修，激活条件跟随检修的 feedback 子模式
+  const memoryFeedback = useMemoryFeedback({
+    active: activeTab === 'inspection' && inspectionMode === 'feedback',
+    initialSearch: deepLinkRef.current.taskId ? String(deepLinkRef.current.taskId) : '',
+    initialTaskId: deepLinkRef.current.taskId ?? 0,
+    onRuntimeChanged: () => memoryRuntime.refreshRuntimeConfig(),
+    onSourcesChanged: () => memoryDelete.refreshSources(),
+  })
+
+  const memoryCorrection = useMemoryCorrection({
+    active: activeTab === 'inspection' && inspectionMode === 'correction',
+    runtimeConfig,
+    initialPlanId: deepLinkRef.current.correctionPlanId ?? '',
+    initialPersonId: deepLinkRef.current.personId ?? '',
+    initialChatId: deepLinkRef.current.chatId ?? '',
+    onRuntimeChanged: () => memoryRuntime.refreshRuntimeConfig(),
+    onSourcesChanged: () => memoryDelete.refreshSources(),
+  })
+
+  // 调优领域：调优配置/任务列表懒加载、调优参数、创建任务、应用最佳；应用后刷新运行时配置
+  const memoryTuning = useMemoryTuning({
+    active: activeTab === 'inspection' && inspectionMode === 'tuning',
+    onRuntimeChanged: () => memoryRuntime.refreshRuntimeConfig(),
+  })
+
+  // 人物画像领域：查询侧在顶层「人物画像」，维护侧在「记忆检修 → 画像维护」，
+  // 两侧共享同一份状态，因此在这里实例化一次后分别传入两个面板
+  const memoryProfile = useMemoryProfileConsole({
+    active:
+      activeTab === 'profiles' ||
+      (activeTab === 'inspection' && inspectionMode === 'profiles'),
+    initialPersonId: profileInitialPersonId,
+    locateToken: profileLocateToken,
+  })
+
+  const setPanelLoading = useCallback((tab: LoadableMemoryTab, value: boolean) => {
+    setTabLoading((current) => ({ ...current, [tab]: value }))
+  }, [])
+
+  const loadChatTargets = useCallback(async () => {
+    const chatTargetsResult = await getMemoryImportChatTargets()
+    setImportChatTargets(chatTargetsResult.data ?? [])
+    return chatTargetsResult.data ?? []
+  }, [])
+
+  const loadTimelinePanel = useCallback(
+    async (force = false) => {
+      if (!force && loadedPanelDataRef.current.has('timeline')) {
+        return
+      }
+      try {
+        setPanelLoading('timeline', true)
+        await loadChatTargets()
+        loadedPanelDataRef.current.add('timeline')
+      } catch (error) {
+        toast({
+          title: '加载审计聊天流失败',
+          description: error instanceof Error ? error.message : '未知错误',
+          variant: 'destructive',
+        })
+      } finally {
+        setPanelLoading('timeline', false)
+      }
+    },
+    [loadChatTargets, setPanelLoading, toast]
+  )
+
+  // tuning/delete/feedback 数据已下沉到各领域 hook（useQuery enabled:active 懒加载），
+  // 此处仅保留 timeline 面板的命令式加载（聊天流列表）
+  const loadActiveTabData = useCallback(
+    async (tab: MemoryConsoleTab, force = false) => {
+      switch (tab) {
+        case 'timeline':
+          await loadTimelinePanel(force)
+          break
+        default:
+          break
+      }
+    },
+    [loadTimelinePanel]
+  )
+
+  const switchMemoryTab = useCallback(
+    (tab: MemoryConsoleTab, query: Record<string, string | number | undefined> = {}) => {
+      setActiveTab(tab)
+      updateKnowledgeBaseDeepLink(tab, query)
+    },
+    []
+  )
+
+  // 记录详情与审计时间线都通过它定位人物；自增序号保证「重复定位同一人」也能生效
+  const locateProfile = useCallback((personId: string) => {
+    setProfileInitialPersonId(personId)
+    setProfileLocateToken((current) => current + 1)
+  }, [])
+
+  const refreshMemoryRecords = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['memory-records'] }),
+      queryClient.invalidateQueries({ queryKey: ['memory-record-context'] }),
+    ])
+  }, [queryClient])
+
+  const handleMemoryRecordAction = useCallback(
+    (
+      action: string,
+      record: MemoryRecordPayload,
+      context: MemoryRecordContextPayload,
+      targetId?: string
+    ) => {
+      if (action === 'graph') {
+        const paragraphHash =
+          record.type === 'paragraph' ? record.id : context.related.paragraphs[0]?.id || ''
+        setGraphInitialParagraphHash(paragraphHash)
+        switchMemoryTab('graph', { paragraph_hash: paragraphHash || undefined })
+        return
+      }
+
+      if (action === 'correct') {
+        const personId =
+          context.related.profiles[0]?.person_id || String(record.metadata.scope_id || '')
+        memoryCorrection.setRequestText(`修正以下记忆：${record.title}`)
+        if (record.type === 'fact' && personId) {
+          memoryCorrection.setScope('person_profile')
+          memoryCorrection.setPersonId(personId)
+          memoryCorrection.setPersonLookupMode('id')
+        } else {
+          memoryCorrection.setScope('memory')
+        }
+        setInspectionMode('correction')
+        switchMemoryTab('inspection', { mode: 'correction', person_id: personId || undefined })
+        return
+      }
+
+      if (action === 'profile') {
+        const personId =
+          targetId ||
+          context.related.profiles[0]?.person_id ||
+          String(record.metadata.scope_id || '')
+        if (!personId) {
+          toast({
+            title: '缺少人物标识',
+            description: '这条事实没有可定位的人物画像',
+            variant: 'destructive',
+          })
+          return
+        }
+        locateProfile(personId)
+        switchMemoryTab('profiles', { person_id: personId })
+        return
+      }
+
+      if (action === 'episode' && targetId) {
+        const episode = context.related.episodes.find((item) => item.id === targetId)
+        setEpisodeInitialTarget({
+          episodeId: targetId,
+          source: episode?.source || '',
+          timeStart: episode?.event_time_start ?? undefined,
+          timeEnd: episode?.event_time_end ?? undefined,
+        })
+        setInspectionMode('episodes')
+        switchMemoryTab('inspection', { mode: 'episodes', episode_id: targetId })
+        return
+      }
+
+      if (action === 'status' || action === 'reinforce' || action === 'freeze' || action === 'protect') {
+        setMaintenanceInitialTarget(record.id)
+        setMaintenanceInitialAction(action === 'status' ? 'reinforce' : action)
+        setInspectionMode('maintenance')
+        switchMemoryTab('inspection', { mode: 'maintenance', target: record.id })
+        return
+      }
+
+      if (action === 'delete' && record.type !== 'fact') {
+        void memoryDelete.openDeletePreview(
+          {
+            mode: record.type,
+            selector: { hashes: [record.id] },
+            reason: 'knowledge_base_record_delete',
+            requested_by: 'knowledge_base',
+          },
+          {
+            title: `删除${record.type === 'paragraph' ? '段落' : record.type === 'entity' ? '实体' : '关系'}`,
+            description: record.title,
+          }
+        )
+      }
+    },
+    [locateProfile, memoryCorrection, memoryDelete, switchMemoryTab, toast]
+  )
+
+  const handleTimelineJump = useCallback(
+    (target: MemoryTimelineJumpTargetPayload) => {
+      const rawTab = String(target.tab ?? '')
+      if (rawTab === 'correction') {
+        const planId = readJumpParam(target, 'plan_id')
+        if (planId) {
+          memoryCorrection.setSelectedPlanId(planId)
+          memoryCorrection.setPlanSearch(planId)
+        }
+        setInspectionMode('correction')
+        switchMemoryTab('inspection', { mode: 'correction', plan_id: planId || undefined })
+        return
+      }
+
+      if (rawTab === 'maintenance') {
+        const targetText = readJumpParam(target, 'target')
+        setMaintenanceInitialTarget(targetText)
+        setInspectionMode('maintenance')
+        switchMemoryTab('inspection', { mode: 'maintenance', target: targetText })
+        return
+      }
+
+      if (rawTab === 'tuning') {
+        setInspectionMode('tuning')
+        switchMemoryTab('inspection', { mode: 'tuning' })
+        return
+      }
+
+      // 情景记忆已并入记忆检修；后端跳转目标仍是 episodes，这里转译为 inspection 子模式
+      if (rawTab === 'episodes') {
+        const episodeId = readJumpParam(target, 'episode_id')
+        const source = readJumpParam(target, 'source')
+        const timeStart = readJumpNumber(target, 'time_start')
+        const timeEnd = readJumpNumber(target, 'time_end')
+        setEpisodeInitialTarget({
+          episodeId,
+          source,
+          timeStart,
+          timeEnd,
+        })
+        setInspectionMode('episodes')
+        switchMemoryTab('inspection', {
+          mode: 'episodes',
+          episode_id: episodeId,
+          source,
+          time_start: timeStart,
+          time_end: timeEnd,
+        })
+        return
+      }
+
+      // 定位人物后直接打开顶层画像页，重复定位同一人物也刷新详情。
+      if (rawTab === 'profiles') {
+        const personId = readJumpParam(target, 'person_id')
+        locateProfile(personId)
+        switchMemoryTab('profiles', { person_id: personId })
+        return
+      }
+
+      const tab = rawTab as MemoryConsoleTab
+      if (!MEMORY_CONSOLE_TABS.includes(tab)) {
+        return
+      }
+
+      if (tab === 'graph') {
+        const paragraphHash = readJumpParam(target, 'paragraph_hash')
+        if (paragraphHash) {
+          setGraphInitialParagraphHash(paragraphHash)
+          switchMemoryTab('graph', { paragraph_hash: paragraphHash })
+          return
+        }
+        switchMemoryTab('graph')
+        return
+      }
+
+      // 纠错历史已并入记忆检修；后端跳转目标仍是 tab=feedback，这里转译为检修子模式
+      if (rawTab === 'feedback') {
+        const taskId = Math.floor(readJumpNumber(target, 'task_id') ?? 0)
+        if (taskId > 0) {
+          memoryFeedback.setSelectedFeedbackTaskId(taskId)
+          memoryFeedback.setFeedbackSearch(String(taskId))
+          memoryFeedback.setFeedbackActionLogPage(1)
+        }
+        switchMemoryTab('inspection', { mode: 'feedback', task_id: taskId > 0 ? taskId : undefined })
+        // 纠错数据由 useMemoryFeedback 自管加载（enabled:active），切到该子模式即触发拉取
+        return
+      }
+
+      if (tab === 'delete') {
+        const operationId = readJumpParam(target, 'operation_id')
+        const source = readJumpParam(target, 'source')
+        const paragraphHash = readJumpParam(target, 'paragraph_hash')
+        if (operationId) {
+          memoryDelete.setSelectedOperationId(operationId)
+          memoryDelete.setOperationSearch(operationId)
+          switchMemoryTab('delete', { operation_id: operationId })
+        } else {
+          const searchToken = paragraphHash || source
+          memoryDelete.setSourceSearch(searchToken)
+          memoryDelete.setOperationSearch(searchToken)
+          memoryDelete.setSelectedOperationItemSearch(searchToken)
+          switchMemoryTab('delete', {
+            paragraph_hash: paragraphHash || undefined,
+            source: source || undefined,
+          })
+        }
+        // 删除数据由 useMemoryDelete 自管加载（enabled:active），切到该 tab 即触发拉取
+        return
+      }
+
+      switchMemoryTab(tab)
+    },
+    [
+      locateProfile,
+      memoryCorrection,
+      memoryDelete,
+      memoryFeedback,
+      switchMemoryTab,
+    ]
+  )
+
+  const loadPage = useCallback(async () => {
+    try {
+      await memoryRuntime.refreshRuntimeConfig()
+      await loadActiveTabData(activeTab, true)
+    } catch (error) {
+      toast({
+        title: '加载长期记忆控制台失败',
+        description: error instanceof Error ? error.message : '未知错误',
+        variant: 'destructive',
+      })
+    }
+  }, [activeTab, loadActiveTabData, memoryRuntime, toast])
+
+  useEffect(() => {
+    setVisitedMemoryTabs((current) => {
+      if (current.has(activeTab)) {
+        return current
+      }
+      const next = new Set(current)
+      next.add(activeTab)
+      return next
+    })
+    void loadActiveTabData(activeTab)
+  }, [activeTab, loadActiveTabData])
+
+  const runtimeBadges = useMemo(() => {
+    if (!runtimeConfig) {
+      return []
+    }
+    const runtimeBadge = resolveRuntimeBadge(runtimeConfig)
+    const vectorPoolsBadge = resolveVectorPoolsBadge(runtimeConfig)
+    return [
+      {
+        label: '运行状态',
+        value: runtimeBadge.value,
+        description: runtimeBadge.description,
+        progressValue: undefined,
+        progressLabel: undefined,
+        icon: runtimeBadge.icon,
+        className: runtimeBadge.className,
+        iconClassName: runtimeBadge.iconClassName,
+      },
+      {
+        label: 'Embedding 维度',
+        value: String(runtimeConfig.embedding_dimension),
+        description: runtimeConfig.relation_vectors_enabled ? '关系向量已启用' : '关系向量未启用',
+        progressValue: undefined,
+        progressLabel: undefined,
+        icon: HardDrive,
+        className: 'border-sky-500/25',
+        iconClassName: 'text-sky-500',
+      },
+      {
+        label: '向量池',
+        value: vectorPoolsBadge.value,
+        description: vectorPoolsBadge.description,
+        progressValue: vectorPoolsBadge.progressValue,
+        progressLabel: vectorPoolsBadge.progressLabel,
+        icon: Database,
+        className: vectorPoolsBadge.className,
+        iconClassName: vectorPoolsBadge.iconClassName,
+      },
+      {
+        label: '数据目录',
+        value: runtimeConfig.data_dir,
+        description: '长期记忆存储位置',
+        progressValue: undefined,
+        progressLabel: undefined,
+        icon: FolderOpen,
+        className: 'border-violet-500/25',
+        iconClassName: 'text-violet-500',
+      },
+    ]
+  }, [runtimeConfig])
+
+  const shouldRenderMemoryTab = (tab: MemoryConsoleTab) =>
+    activeTab === tab || visitedMemoryTabs.has(tab)
+  const isFixedMemoryPage =
+    activeTab === 'timeline' || activeTab === 'images' || activeTab === 'records' || activeTab === 'profiles'
+  const shouldShowPanelFallback = (tab: LoadableMemoryTab) => !loadedPanelDataRef.current.has(tab)
+  const renderPanelFallback = (tab: LoadableMemoryTab) => (
+    <TabsContent value={tab} className="space-y-4">
+      <AccentPanel showRetroStripes={false} className="bg-background/70 rounded-xl border">
+        <div className="text-muted-foreground flex min-h-[240px] items-center justify-center text-sm">
+          <ThinkingIllustration size={tabLoading[tab] ? 'md' : 'sm'} />
+        </div>
+      </AccentPanel>
+    </TabsContent>
+  )
+
+  if (memoryRuntime.runtimeLoading) {
+    return <RoutePendingFallback />
+  }
+
+  return (
+    <div data-memory-console-page="true" data-memory-fixed-page={isFixedMemoryPage ? 'true' : undefined} className="bg-background flex h-full min-h-0 min-w-0 flex-col">
+      {/* 手机页头右上角：记忆状态（含运行自检） */}
+      <MobileHeaderActions>
+        <button
+          type="button"
+          onClick={() => setRuntimeStatusDialogOpen(true)}
+          data-mobile-header-text-button="true"
+          className={cn('h-11 rounded-full px-4 text-[15px]', MOBILE_GLASS_CLASS)}
+        >
+          记忆状态
+        </button>
+      </MobileHeaderActions>
+      <div className={cn('min-h-0 min-w-0 flex-1 overflow-y-auto', isFixedMemoryPage && 'lg:flex lg:flex-col lg:overflow-hidden')}>
+        <div className={cn(
+          'memory-console-density mx-auto flex w-full max-w-[1800px] flex-col gap-4 px-4 py-2 xl:px-5',
+          isFixedMemoryPage && 'lg:min-h-0 lg:flex-1 lg:overflow-hidden pb-2'
+        )}>
+          <div className="hidden">
+            <Button variant="outline" size="sm" onClick={() => void loadPage()}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              刷新数据
+            </Button>
+          </div>
+          <Dialog open={runtimeStatusDialogOpen} onOpenChange={setRuntimeStatusDialogOpen}>
+            <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">
+              <DialogHeader>
+                <DialogTitle>记忆状态</DialogTitle>
+                <DialogDescription>查看长期记忆运行状态、向量配置和数据目录。</DialogDescription>
+              </DialogHeader>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => void loadPage()}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  刷新数据
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void memoryRuntime.refreshSelfCheck()}
+                  disabled={memoryRuntime.refreshingCheck}
+                >
+                  <RefreshCw
+                    className={cn(
+                      'mr-2 h-4 w-4',
+                      memoryRuntime.refreshingCheck && 'animate-spin'
+                    )}
+                  />
+                  自检
+                </Button>
+              </div>
+              {runtimeBadges.length > 0 ? (
+                <div
+                  data-memory-runtime-status="true"
+                  className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+                >
+                  {runtimeBadges.map((item) => (
+                    <div
+                      key={item.label}
+                      className={cn(
+                        'bg-background min-w-0 overflow-hidden border p-3 transition-colors',
+                        item.className
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="w-fit flex-none border bg-transparent p-1.5">
+                          <item.icon className={cn('h-4 w-4', item.iconClassName)} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-muted-foreground text-xs leading-tight font-medium">
+                            {item.label}
+                          </div>
+                          <div
+                            className="mt-1 truncate text-sm leading-tight font-semibold"
+                            title={item.value}
+                          >
+                            {item.value}
+                          </div>
+                          <div className="text-muted-foreground mt-1 text-xs">
+                            {item.description}
+                          </div>
+                          {item.progressValue !== undefined ? (
+                            <div className="mt-2 flex items-center gap-2">
+                              <Progress value={item.progressValue} className="h-1.5 flex-1" />
+                              <span className="text-muted-foreground text-xs leading-none tabular-nums">
+                                {item.progressLabel}
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-muted-foreground border border-dashed px-4 py-8 text-center text-sm">
+                  暂无记忆状态数据，请刷新后重试。
+                </div>
+              )}
+              <div className="space-y-2 border-t pt-3">
+                <div className="text-sm font-medium">已保存向量库</div>
+                <p className="text-muted-foreground text-xs">
+                  切换模型时会保留旧库供再次使用。删除未使用的库只清理向量，记忆内容仍会保留。
+                </p>
+                {memoryRuntime.vectorSpacesError ? (
+                  <p className="text-destructive text-sm">{memoryRuntime.vectorSpacesError}</p>
+                ) : memoryRuntime.vectorSpacesLoading ? (
+                  <p className="text-muted-foreground text-sm">正在读取向量库…</p>
+                ) : memoryRuntime.vectorSpaces.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">暂无已保存的模型向量库。</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="text-muted-foreground border-b">
+                        <tr>
+                          <th className="py-2 font-medium">模型、服务商</th>
+                          <th className="px-2 font-medium">维度</th>
+                          <th className="px-2 font-medium">向量数</th>
+                          <th className="px-2 font-medium">占用</th>
+                          <th className="px-2 font-medium">状态</th>
+                          <th className="text-right font-medium">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {memoryRuntime.vectorSpaces.map((space) => (
+                          <tr key={space.space_id} className="border-b last:border-0">
+                            <td className="max-w-64 py-2">
+                              <div className="truncate" title={space.embedding_fingerprint.model_identifier}>
+                                {space.embedding_fingerprint.model_identifier || space.embedding_fingerprint.model || '未知模型'}
+                              </div>
+                              <div className="text-muted-foreground truncate">
+                                {space.embedding_fingerprint.provider || '未知服务商'}
+                                {space.last_used_at ? ` · ${new Date(space.last_used_at * 1000).toLocaleString()}` : ''}
+                              </div>
+                            </td>
+                            <td className="px-2 tabular-nums">{space.embedding_fingerprint.dimension ?? '-'}</td>
+                            <td className="px-2 tabular-nums">{space.vector_count.toLocaleString()}</td>
+                            <td className="px-2 whitespace-nowrap tabular-nums">{(space.size_bytes / 1024 / 1024).toFixed(1)} MB</td>
+                            <td className="px-2 whitespace-nowrap">
+                              {space.state === 'active' ? '使用中' : space.state === 'syncing' ? '同步中' : '未使用'}
+                            </td>
+                            <td className="text-right">
+                              {space.can_delete ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-destructive"
+                                  disabled={memoryRuntime.deletingSpaceId !== null}
+                                  onClick={() => void memoryRuntime.deleteVectorSpace(space.space_id)}
+                                >
+                                  {memoryRuntime.deletingSpaceId === space.space_id ? '删除中…' : '删除'}
+                                </Button>
+                              ) : <span className="text-muted-foreground">—</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog
+            open={memoryRuntime.vectorRebuildDialogOpen}
+            onOpenChange={memoryRuntime.setVectorRebuildDialogOpen}
+          >
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>重建全部向量</DialogTitle>
+                <DialogDescription>
+                  将使用当前 embedding
+                  配置重新生成段落、实体和已启用的关系向量，期间检索会临时降级（会对嵌入模型造成大量请求！）
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 text-sm">
+                <Alert variant={runtimeConfig?.vector_rebuild_required ? 'destructive' : 'default'}>
+                  <AlertDescription>
+                    {runtimeConfig?.vector_rebuild_message ||
+                      '这个操作会重新生成当前模型的向量库，其他模型的库会继续保留。模型切换后会自动同步，无需手动重建。'}
+                  </AlertDescription>
+                </Alert>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {(['paragraphs', 'entities', 'relations'] as const).map((key) => (
+                    <div key={key} className="bg-muted/30 rounded-lg border p-3">
+                      <div className="text-muted-foreground text-xs">
+                        {key === 'paragraphs' ? '段落' : key === 'entities' ? '实体' : '关系'}
+                      </div>
+                      <div className="mt-1 text-xl font-semibold">
+                        {memoryRuntime.vectorRebuildPreview?.[key] ?? '-'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => memoryRuntime.setVectorRebuildDialogOpen(false)}
+                  disabled={memoryRuntime.vectorRebuilding}
+                >
+                  取消
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => void memoryRuntime.confirmVectorRebuild()}
+                  disabled={memoryRuntime.vectorRebuilding}
+                >
+                  <RotateCcw
+                    className={cn('mr-2 h-4 w-4', memoryRuntime.vectorRebuilding && 'animate-spin')}
+                  />
+                  确认重建
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Tabs
+            value={activeTab === 'profiles' ? 'records' : activeTab}
+            onValueChange={(value) => switchMemoryTab(value as MemoryConsoleTab)}
+            className={isFixedMemoryPage ? 'flex min-w-0 flex-col gap-2 lg:min-h-0 lg:flex-1 lg:overflow-hidden' : 'min-w-0 space-y-3'}
+          >
+            <div
+              data-memory-console-tab-row="true"
+              className="border-border/40 -mx-4 flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-0 xl:-mx-5 xl:px-5"
+            >
+              <DashboardTabBar
+                variant="grid"
+                className="w-full max-w-full self-stretch grid-cols-2 py-0 sm:w-fit sm:auto-cols-max sm:grid-flow-col sm:grid-cols-none"
+              >
+                {[
+                  {
+                    value: 'records',
+                    label: '记忆查询',
+                    description: '查询文字记录、关联内容与人物画像',
+                  },
+                  { value: 'images', label: '图片记忆', description: '图片向量、认知与关联记忆' },
+                  { value: 'timeline', label: '记忆流', description: '核对聊天流记忆变动' },
+                ].map((item) => (
+                  <DashboardTabTrigger
+                    key={item.value}
+                    value={item.value}
+                    title={item.description}
+                    className="h-8 px-3 py-1 text-xs sm:py-1"
+                  >
+                    {item.label}
+                  </DashboardTabTrigger>
+                ))}
+              </DashboardTabBar>
+              <DashboardTabBar
+                variant="grid"
+                className="w-full max-w-full self-stretch grid-cols-3 py-0 sm:w-fit sm:auto-cols-max sm:grid-flow-col sm:grid-cols-none"
+              >
+                {[
+                  {
+                    value: 'import',
+                    label: '导入导出',
+                    description: '导入资料并管理可分享记忆包',
+                  },
+                  { value: 'inspection', label: '记忆检修', description: '维护记忆状态并修正记忆内容' },
+                  { value: 'delete', label: '记忆抹除', description: '批量抹除记忆与历史回溯' },
+                ].map((item) => (
+                  <DashboardTabTrigger
+                    key={item.value}
+                    value={item.value}
+                    title={item.description}
+                    className="h-8 px-3 py-1 text-xs sm:py-1"
+                  >
+                    {item.label}
+                  </DashboardTabTrigger>
+                ))}
+              </DashboardTabBar>
+
+              {/* 图片刷新与「更多操作」放在标签行右侧；self-stretch 让标签撑满该行，
+                  h-8 定住行高，标签高度随之与按钮对齐。 */}
+              {activeTab === 'images' && (
+                <div ref={setImagesToolbarTarget} className="ml-auto flex items-center" />
+              )}
+              {runtimeConfig?.vector_rebuild_required ? (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className={cn(activeTab !== 'images' && 'ml-auto')}
+                  title={runtimeConfig.vector_rebuild_message}
+                  onClick={() => void memoryRuntime.openVectorRebuildDialog()}
+                  disabled={memoryRuntime.vectorRebuilding}
+                >
+                  <RotateCcw
+                    className={cn(
+                      'mr-2 h-4 w-4',
+                      memoryRuntime.vectorRebuilding && 'animate-spin'
+                    )}
+                  />
+                  重建向量
+                </Button>
+              ) : null}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className={cn(
+                      'h-8 w-8',
+                      activeTab !== 'images' && !runtimeConfig?.vector_rebuild_required && 'ml-auto'
+                    )}
+                    aria-label="更多操作"
+                    title="更多操作"
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-44">
+                  <DropdownMenuItem
+                    className="cursor-pointer gap-2"
+                    onSelect={() => setRuntimeStatusDialogOpen(true)}
+                  >
+                    <Activity className="h-4 w-4" />
+                    查看记忆状态
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="cursor-pointer gap-2"
+                    onSelect={() => switchMemoryTab('graph')}
+                  >
+                    <Database className="h-4 w-4" />
+                    打开图谱
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* 查询类型在搜索栏内切换；保留 records / profiles 地址和各自的查询状态。 */}
+            <TabsContent
+              value="records"
+              forceMount
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden data-[state=inactive]:hidden"
+            >
+              <Tabs
+                value={activeTab}
+                onValueChange={(value) => {
+                  memoryProfile.setDetailOpen(false)
+                  switchMemoryTab(value as MemoryConsoleTab)
+                }}
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                {shouldRenderMemoryTab('records') && (
+                  <MemoryRecordsTab
+                    searchModeTabs={<MemorySearchModeTabs />}
+                    onAction={handleMemoryRecordAction}
+                    onCorrectionPlan={(planId, requestText) => {
+                      memoryCorrection.setRequestText(requestText)
+                      memoryCorrection.setScope('memory')
+                      memoryCorrection.setPersonId('')
+                      memoryCorrection.setPersonKeyword('')
+                      memoryCorrection.setChatId('')
+                      memoryCorrection.setSelectedPlanId(planId)
+                      memoryCorrection.setPlanSearch(planId)
+                      setInspectionMode('correction')
+                      switchMemoryTab('inspection', { mode: 'correction', plan_id: planId })
+                    }}
+                  />
+                )}
+                {shouldRenderMemoryTab('profiles') && (
+                  <TabsContent value="profiles" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+                    <ProfileSearchPanel profile={memoryProfile} searchModeTabs={<MemorySearchModeTabs />} />
+                  </TabsContent>
+                )}
+              </Tabs>
+            </TabsContent>
+
+            {shouldRenderMemoryTab('images') && <ImagesTab toolbarTarget={imagesToolbarTarget} />}
+
+            {/* 图谱已从标签栏移到右上角「打开图谱」入口；这里保留面板，
+                以便旧链接 tab=graph 与审计时间线等携带 paragraph_hash 的跳转仍能直接定位图谱 */}
+            {shouldRenderMemoryTab('graph') && (
+              <TabsContent
+                value="graph"
+                className="border-border/60 bg-background h-[calc(100vh-132px)] min-h-[820px] overflow-hidden rounded-2xl border shadow-sm"
+              >
+                <KnowledgeGraphPage
+                  embedded
+                  initialParagraphHash={graphInitialParagraphHash}
+                  onOpenConsole={() => switchMemoryTab('import')}
+                />
+              </TabsContent>
+            )}
+
+            {shouldRenderMemoryTab('timeline') &&
+              (shouldShowPanelFallback('timeline') ? (
+                renderPanelFallback('timeline')
+              ) : (
+                <TabsContent value="timeline" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <MemoryTimelineManager
+                    chatTargets={importChatTargets}
+                    initialChatId={timelineInitialChatId}
+                    initialTimeStart={timelineInitialTimeStart}
+                    initialTimeEnd={timelineInitialTimeEnd}
+                    onJump={handleTimelineJump}
+                  />
+                </TabsContent>
+              ))}
+
+            {/* 导入导出面板的数据由 useImportQueue/useImportForm 自管加载（useQuery enabled:active），
+                不再走 loadedPanelDataRef 懒加载门控；表单即时可交互，任务列表异步填充 */}
+            {shouldRenderMemoryTab('import') && <ImportTab queue={importQueue} form={importForm} />}
+
+            <TabsContent value="inspection" className="space-y-4">
+              {shouldRenderMemoryTab('inspection') ? (
+                <Tabs
+                  value={inspectionMode}
+                  onValueChange={(value) => {
+                    const nextMode = value as InspectionMode
+                    setInspectionMode(nextMode)
+                    updateKnowledgeBaseDeepLink('inspection', { mode: nextMode })
+                  }}
+                  className="space-y-4"
+                >
+                  <TabsList className="grid h-auto w-full grid-cols-3 gap-2 lg:grid-cols-6">
+                    <TabsTrigger value="correction">内容修正</TabsTrigger>
+                    <TabsTrigger value="maintenance">状态维护</TabsTrigger>
+                    <TabsTrigger value="tuning">检索调优</TabsTrigger>
+                    <TabsTrigger value="episodes">情景记忆</TabsTrigger>
+                    <TabsTrigger value="profiles">画像维护</TabsTrigger>
+                    <TabsTrigger value="feedback">纠错历史</TabsTrigger>
+                  </TabsList>
+                  <CorrectionTab correction={memoryCorrection} />
+                  <TabsContent value="maintenance" className="space-y-4">
+                    <MemoryMaintenanceManager
+                      initialTarget={maintenanceInitialTarget}
+                      initialAction={maintenanceInitialAction}
+                      onChanged={refreshMemoryRecords}
+                    />
+                  </TabsContent>
+                  <TabsContent value="episodes" className="space-y-4">
+                    <MemoryEpisodeManager
+                      initialEpisodeId={episodeInitialTarget.episodeId}
+                      initialSource={episodeInitialTarget.source}
+                      initialTimeStart={episodeInitialTarget.timeStart}
+                      initialTimeEnd={episodeInitialTarget.timeEnd}
+                    />
+                  </TabsContent>
+                  <TabsContent value="profiles" className="space-y-4">
+                    <ProfileMaintenancePanel profile={memoryProfile} />
+                  </TabsContent>
+                  <FeedbackTab feedback={memoryFeedback} />
+                  <TuningTab tuning={memoryTuning} />
+                </Tabs>
+              ) : null}
+            </TabsContent>
+
+            {/* 删除面板数据由 useMemoryDelete 自管加载（enabled:active），不再走懒加载占位门控 */}
+            {shouldRenderMemoryTab('delete') && <DeleteTab delete={memoryDelete} />}
+          </Tabs>
+        </div>
+      </div>
+
+      <MemoryDeleteDialog
+        open={memoryDelete.deleteDialogOpen}
+        onOpenChange={memoryDelete.closeDeleteDialog}
+        title={memoryDelete.deleteDialogTitle}
+        description={memoryDelete.deleteDialogDescription}
+        preview={memoryDelete.deletePreview}
+        result={memoryDelete.deleteResult}
+        loadingPreview={memoryDelete.deletePreviewLoading}
+        executing={memoryDelete.deleteExecuting}
+        restoring={memoryDelete.deleteRestoring}
+        error={memoryDelete.deletePreviewError}
+        onExecute={(reason) => void memoryDelete.executePendingDelete(reason)}
+        onRestore={() =>
+          void (memoryDelete.deleteResult?.operation_id
+            ? memoryDelete.restoreDeleteOperation(memoryDelete.deleteResult.operation_id)
+            : Promise.resolve())
+        }
+      />
+
+      <Dialog
+        open={memoryFeedback.feedbackRollbackDialogOpen}
+        onOpenChange={memoryFeedback.setFeedbackRollbackDialogOpen}
+      >
+        <DialogContent className="max-w-lg" confirmOnEnter>
+          <DialogHeader>
+            <DialogTitle>回退本次纠错</DialogTitle>
+            <DialogDescription>
+              这会恢复旧关系状态、隐藏本次纠错写入的段落，并重新触发 Episode / Profile 的异步修复。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="bg-muted/20 rounded-lg border p-3 text-sm">
+              <div className="font-medium break-words">
+                {memoryFeedback.selectedFeedbackResolved?.query_text || '无查询文本'}
+              </div>
+              <div className="text-muted-foreground mt-1 font-mono text-[11px] break-all">
+                {memoryFeedback.selectedFeedbackResolved?.query_tool_id}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="feedback-rollback-reason">回退原因</Label>
+              <Textarea
+                id="feedback-rollback-reason"
+                value={memoryFeedback.feedbackRollbackReason}
+                onChange={(event) => memoryFeedback.setFeedbackRollbackReason(event.target.value)}
+                placeholder="可选，建议填写本次人工回退原因"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => memoryFeedback.setFeedbackRollbackDialogOpen(false)}
+              disabled={memoryFeedback.feedbackRollingBack}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={() => void memoryFeedback.executeFeedbackRollback()}
+              disabled={memoryFeedback.feedbackRollingBack}
+            >
+              {memoryFeedback.feedbackRollingBack ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  回退中
+                </>
+              ) : (
+                <>
+                  <RotateCcw className="mr-2 h-4 w-4" />
+                  确认回退
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

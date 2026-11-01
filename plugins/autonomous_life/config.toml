@@ -1,0 +1,38 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[life]
+groups = ["47447788043@chatroom", "qq:3294652115:napcat-local:group:1020993873"]
+timezone = "Asia/Shanghai"
+wake = "08:30"
+sleep = "00:00"
+min_interval_seconds = 600
+max_interval_seconds = 1800
+daily_actions = 12
+target_actions = 8
+daily_llm_calls = 72
+llm_timeout_seconds = 120
+daily_shares = 4
+share_gap_seconds = 7200
+person_gap_seconds = 259200
+history_hours = 168
+ignored_users = ["wxid_j4m6tul1dm7822"]
+interests = ["Minecraft", "服务器", "开源", "科技", "编程实验", "游戏", "鬼畜整活"]
+web_enabled = true
+python_enabled = true
+social_enabled = true
+progress_sharing = true
+
+[project]
+enabled = true
+request_id = "self-chosen-project-20261029"
+objective = "自己选择一个感兴趣且有实际用途的项目，优先参考近期热门开源方向。先上网调研、确定小目标，再在现有安全沙盒内写出可运行的最小原型、测试并保存成果。不要只复述计划；每次做一个可验证的步骤。必要权限不足时暂挂并向指定操作者申请，不能绕过隔离或索取密码密钥。"
+owner_user_id = "wxid_0x1whr7w1tmv22"
+
+[research]
+enabled = true
+per_turn_calls = 6
+timeout_seconds = 20
+max_chars = 10000
+cache_seconds = 120

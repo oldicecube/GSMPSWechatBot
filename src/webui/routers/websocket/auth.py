@@ -8,6 +8,8 @@ from fastapi import APIRouter, Cookie
 
 from src.common.logger import get_logger
 from src.webui.core import get_token_manager
+from src.webui.core.auth import is_token_valid
+from src.webui.middleware.network_access import auth_enabled
 
 logger = get_logger("webui.ws_auth")
 router = APIRouter()
@@ -61,8 +63,7 @@ def verify_ws_token(temp_token: str) -> bool:
         logger.warning(f"WS token 已过期: {temp_token[:8]}...")
         return False
     # 验证原始 session token 仍然有效
-    token_manager = get_token_manager()
-    if not token_manager.verify_token(session_token):
+    if not is_token_valid(session_token):
         del _ws_temp_tokens[temp_token]
         logger.warning(f"WS token 关联的 session 已失效: {temp_token[:8]}...")
         return False
@@ -85,6 +86,9 @@ def get_ws_token(
 
     注意：在未认证时返回 200 状态码但 success=False，避免前端因 401 刷新页面。
     """
+    if not auth_enabled():
+        return {"success": True, "token": generate_ws_token("intranet-no-auth"),
+                "expires_in": _WS_TOKEN_EXPIRE_SECONDS}
     if not maibot_session:
         # 返回 200 但 success=False，避免前端因 401 刷新页面
         # 这在登录页面是正常情况，不应该触发错误处理

@@ -6,6 +6,30 @@ from urllib.parse import urlsplit
 from src.config.model_configs import APIProvider, OpenAICompatibleAuthType
 
 
+def normalize_chat_system_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve system authority/content for servers allowing one leading system.
+
+    This is opt-in at the provider boundary. The native context, chronological
+    user/assistant/tool sequence and their call IDs are left untouched.
+    """
+    systems = [m for m in messages if m.get('role') == 'system']
+    if not systems or (len(systems)==1 and messages[0].get('role')=='system'):
+        return list(messages)
+    contents = [m.get('content','') for m in systems]
+    if all(isinstance(content,str) for content in contents):
+        content = '\n\n'.join(contents)
+    else:
+        content = []
+        for part in contents:
+            if isinstance(part,str):
+                content.append({'type':'text','text':part})
+            elif isinstance(part,list):
+                content.extend(part)
+            else:
+                raise ValueError('unsupported system message content')
+    return [{'role':'system','content':content}, *[m for m in messages if m.get('role')!='system']]
+
+
 @dataclass(slots=True)
 class OpenAICompatibleClientConfig:
     """OpenAI 兼容客户端的基础配置。"""

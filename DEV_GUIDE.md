@@ -332,6 +332,55 @@ def stop():
 
 提交前检查语法、帮助文案、配置占位值和脱敏日志。测试脚本留在 Git 外，在 PR 中描述验证案例；不要使用 `git add -f` 上传真实聊天样本、配置或付费 API 探测输出。
 
+### 2.9 将壳子插件配置接入 MaiBot WebUI
+
+命令插件 `plugins/<name>.py`、自动化插件 `auto/<name>.py` 仍由 GSMPS Dispatcher 执行。WebUI 通过 `core/maibot_shell_registry.py` 登记管理条目，来源显示为 **GSMPS Wechatbot**；不要为显示配置而伪造 MaiBot 原生插件或迁移执行代码。对应 ID 分别为 `gsmps.command.<name>`、`gsmps.automation.<name>`，同名模块拥有独立开关。
+
+在模块顶层声明 **字面量** `WEBUI_CONFIG`，例如：
+
+```python
+WEBUI_CONFIG = {
+    'version': 1,
+    'fields': {
+        'reply_text': {
+            'type': 'str', 'default': '拍你吗', 'max_length': 200,
+            'label': '被拍一拍后的回复', 'reload': 'hot',
+        },
+        'timeout_seconds': {
+            'type': 'float', 'default': 8, 'min': 1, 'max': 30,
+            'label': '请求超时（秒）',
+            'config_path': 'print_server.timeout_seconds', 'reload': 'restart',
+        },
+    },
+}
+```
+
+登记器只用 AST 读取元数据，不导入或执行插件，因此声明不能使用函数调用、变量引用或字典展开。新增字段使用此格式；旧 `WEBUI_CONFIG_SCHEMA` 不作为 MaiBot WebUI 的数据源。所有展示字段必须有真实执行入口，禁止仅增加表单而不消费值。
+
+- 类型：`bool`、`int`、`float`、`str`、`list`（字符串列表，`item_type='str'`）、`json`（对象或数组，表单以 JSON 文本编辑）。必须声明 `type`、`default`，建议提供 `label`、`description`。数字可声明 `min`、`max`、`choices`，文本可声明 `max_length`。后端严格校验类型、范围、选项和大小，拒绝未知字段、NaN 和无穷值。
+- **即时读取**：不绑定原配置路径的字段，执行时调用 `core.shell_plugin_config.settings('gsmps.automation.patpat')['reply_text']`。显式使用 `reload='hot'`；保存后在下一次触发时生效，已运行的任务不被强行中断。
+- **原配置绑定**：`config_path` 为原 `config.json` 的点分路径。WebUI 首次展示部署现值，覆盖值保存于本机 `config/gsmps_management.json`，不改写原配置。Dispatcher 初始化前调用 `apply_overrides()` 将已声明绑定合并进完整配置，再传给原模块 `init(config)`。依赖启动缓存的字段必须标 `reload='restart'`，由操作者手动重启，不能声称热更新。热更新的绑定字段必须在执行时使用 `settings()` 读取，例如彩票 `_settings()`。
+- **共享配置**：相同 `config_path` 只存一份值，例如 `/theroom` 和锦标赛监控共用 `tournament.enabled`。不得为共享服务设置互相覆盖的模块私有副本。表单与源码中应说明共享关系。
+- **敏感字段**：`secret=True` 使用密码控件；读取接口、原始 TOML 和 schema 默认值均只返回 `********`。保存这个占位符会保留原值，显式留空会清除。勿将密钥放进 agent 能力目录、日志或提交版本库。管理状态文件与备份已被 Git 忽略。
+- **通用控制**：命令与自动化条目自动获得 `cooldown_seconds`、`allow_groups`、`allow_users`、`agent_enabled`。它们是额外限制，不替代原目标群、业务管理员权限或命令权限。后台任务的发送仍须经 Dispatcher 按目标群审核；不得绕过开关直接发送。后台广播传入 `_background=True`，执行群白名单和启停检查；没有请求用户，不应用用户白名单和用户冷却。限频只在处理有结果后登记，读取状态不能消耗冷却。
+- **保存与重置**：配置表单和原始 TOML 共用同一个校验保存入口，一次原子写入；修改失败不写入任何字段。重置先备份管理状态，再移除覆盖并恢复部署原值；共享路径会同步恢复。涉及 `restart` 的字段会提示下次重启生效。
+
+实际入口：`src/webui/services/gsmps_management.py` 生成原生表单 schema（含 `ui_type`），`src/webui/routers/plugin/config_routes.py` 复用现有配置路由。更新后端或前端代码后需要手动重启；前端修改需在 `dashboard/` 执行 `npm ci`、`npm run build`，本仓库 `.gsmps-managed` 标记使 WebUI 使用本地 `dashboard/dist`。
+
+验收至少覆盖：字段可发现和渲染、保存后重新读取一致、执行消费新值、重启绑定合并、共享字段同步、错误类型/越界/未知字段拒绝且不部分落盘、敏感值不泄露、关闭和权限限制阻止触发。自动化测试使用临时实例目录和假发送端，不向真实群发送测试消息。运行 `python -X utf8 scripts/maibot_shell_config_acceptance.py`。
+
+### 2.10 双平台壳子插件的消息与发送约定
+
+QQ 入站由 `core/shell_platform_bridge.py` 生成 Router 兼容结构，复用原 Dispatcher 执行插件；不复制插件为 MaiBot 原生插件。未被插件消费的消息只进入一次原生 LLM 核心。禁止将 QQ 消息送入微信 LLM 转译入口。
+
+- 使用 `platform`、`account_id`、`scope`、`native_session_id` 保留来源，`user_id`、`group_id` 保存平台真实 ID；昵称、群名仅用于展示，不能作为跨平台身份或发送键。微信用户以 wxid 识别，QQ 的兼容 `wxid` 为 `qq:<user_id>`，不能继承同名微信用户的权限或积分。
+- QQ 兼容目标键为 `qq:<account_id>:<scope>:group:<group_id>` 或 `qq:<account_id>:<scope>:private:<user_id>`，使用 `utils.platform_target` 构造和解析。会话状态、后续图片、队列去重和后台任务都要保存完整目标。不要把裸 QQ 群号交给旧微信发送接口。
+- 插件沿用 `core.sender.send()` 的兼容模式，但必须在真实 `legacy_plugin_scope` 中调用。发送器依据可信来源选择出口：QQ 转为原生组件交给 SendService/Broker；微信保留现有出口。后台线程必须保留上下文，后台显式目标通过 `context_for_target()` 恢复上下文。原生事件循环内使用异步发送，不能调用同步包装器阻塞自己。
+- QQ 不继承原微信 `group_features` 和群显示名白名单。准入由麦麦原生适配器策略控制，插件全局开关、原生会话命令禁用以及插件自己的业务授权继续生效。LLM 活跃度由原生聊天流设置控制；不要再增加一套壳子 QQ 群启用名单。
+- 插件消息保留 `plugin_trigger` / `plugin_output` 来源标记，不能当作自由 LLM 决策回复。引用、聊天记录正文不能被当作当前命令输入；拍一拍/戳一戳只接受可信适配器通知，不能凭文本冒充系统事件。
+
+验收使用临时实例、真实 Router/Dispatcher、原生发送及适配器编解码，仅截获最终外发；覆盖同名群隔离、改名后身份稳定、消息/媒体、连续交互、命令开关与普通 agent 权限。入口为 `scripts/maibot_dual_plugin_acceptance.py`。仅在 Router 中替换为记录处理器的全模块匹配矩阵，不代表每个插件的外部业务服务已实测可用。
+
 ## 第三部分：WeFlow 与 wxsendhook 接口规范
 
 ### 3.1 在运行时接入外部应用
@@ -689,7 +738,15 @@ Prompt 由稳定的系统身份/规则、按顺序标注的群历史、当前目
 
 ### 4.5 多 API 与请求生命周期
 
-API 列表按 `priority` 升序尝试，同优先级保留配置顺序。协议值为 `openai`、`responses`、`anthropic`。
+当前部署设置 `llm.model_config_source="maibot"` 后，模型端点、凭据和任务顺序由 MaiBot WebUI 及 `config/model_config.toml` 管理。原 `config.json.llm.apis` 已清理，壳子人设、上下文、记忆、学习和自主调度的旧配置也不再保留；重启不得覆盖 WebUI 修改或恢复已删除的端点。一次性迁移兼容文件 `config/gsmps_model_import_pending.json` 在下次启动合并后删除，不得作为持续同步来源。壳子插件使用原生 `LLMServiceClient`，兼容旧 `DeepSeekProvider` 的调用会转交原生模型池，不另建外部请求池，也不必强制经过 planner。辅助插件应直接调用 `native_model_bridge.shell_generate()`，不得为一次生成重新实例化整个 `MaibotLLMService`。
+
+人格、昵称、行为、表达的权威与模型导入模式无关，始终为 MaiBot 原生配置及 WebUI。不得重新从壳子的 `identity`、`assistant_nickname`、`prompt`、群级人格或风格覆盖创建原生提示词；不得从旧人格库回退读取。传输层可同步平台账号，不得改写原生人设或原生用户创建的群提示词。
+
+新增双端壳子插件默认支持微信与 QQ。若确有平台限制，在模块顶层声明可由 AST 读取的字面量 `SUPPORTED_PLATFORMS = ['wechat']` 或 `['qq']`；注册表、命令调用和 agent 工具目录均按该声明过滤，handler 也应校验可信 `context['platform']`。WebUI 配置继续使用独立的 `WEBUI_CONFIG` 字段声明与 `gsmps.command.<模块名>` 管理项，不迁移成原生插件。
+
+跨端账号关联只在积分、游戏记录和记忆业务调用 `utils.account_identity`，禁止把 transport context 的真实 `wxid/user_id` 全局替换成 canonical UID：管理员权限、群上下文和 @ 必须仍按来源平台校验。用户名绑定不得让 agent 代替用户认领账户。
+
+跨群发送使用真实 `session_id` 与平台、账号、连接作用域，不用群名猜测目标。共享记忆必须保留来源；转发输出在 Host 的 `plugin_scope` 中标记 `relay_origin`，不能接受 LLM 自报来源来伪造插件活动。管理控制字段按适配器能力处理：微信丢弃明确的 QQ 管理控制段，合法文本与 @ 保留；未知媒体或路由歧义明确失败。
 
 ```python
 from llm.provider import DeepSeekProvider
@@ -702,11 +759,11 @@ with provider.prompt_capture_kind("auxiliary"):
     ])
 ```
 
-这段代码会发起真实 API 请求，按配置计费。普通对话系统应复用已有 LLMService；独立插件可以使用 provider，但不要绕过权限、并发限制或输出校验。
+这段兼容代码通过原生模型池发起真实请求，按对应模型配置计费。新代码优先使用 `src.services.llm_service.LLMServiceClient`，传入真实用途、消息来源与会话 ID；不要硬编码端点、API Key 或新建 OpenAI 客户端绕过模型管理。
 
-当前池在请求内依次回退，某端点连续失败 3 次后临时移到队尾 30 分钟，成功后清除失败状态。状态保存在 **provider 实例内**；每次重建实例会丢失已累计的失败计数。修改配置文件也不会自动更新已有实例，需要重新创建或按应用生命周期重启。
+任务候选由原生 `model_task_config` 决定。额度耗尽跨任务冷却 10 分钟，普通 429 退避至少 30 秒并尊重 `Retry-After`；冷却期跳过上游 HTTP 调用。`request_min_interval` 控制同端点、凭据与模型的发送间隔。停用的 Provider 不创建客户端。旧配置尚未完成迁移的实例仍走原兼容入口，不能将其旧池行为当成当前生产实现。
 
-每个端点配置自己的超时，Chat/Responses 连接异常还可能重建客户端重试一次。**逐端点超时不是整个 API 池的总耗时上限**。多端点失败时应评估交互等待、工作线程占用和费用，不能把长期回退当作缓存或 prompt 的故障。
+每个端点配置自己的超时，单模型尝试次数含首次请求，0 或 1 表示不重试；SDK 自带重试关闭以避免嵌套重试。任务的 `hard_timeout` 限制单候选总等待时间。**逐端点超时不是整个 API 池的总耗时上限**。多端点失败时应评估交互等待、工作线程占用和费用。
 
 `send_chat()` 返回模型消息及工具调用等结构，`send()` 是只取文本的兼容入口。错误日志可能包含上游响应，公开 Issue 前应脱敏；不得把完整请求体或密钥作为用户错误提示。
 
@@ -824,3 +881,92 @@ history boundaries before selecting `protocol: "responses"`. A successful HTTP
 response alone does not establish cache support. Include an initial cold call,
 several historical appends, and an identical repeat; inspect provider usage and
 also test tool calling. Keep credentials and real transcripts out of reports.
+
+### Bound identity, state and cross-platform context
+
+Use `account_identity.actor(context)` for the wire actor and `canonical_user` /
+`bound_user` for shared business state. Never substitute the linked user's
+platform, ID, permission, @ target, account, scope or chat session. Native person
+IDs remain `md5(platform + '_' + user_id)`; nicknames are display metadata.
+Use `memory_aliases`, `linked_person_ids` and `linked_people` for verified links.
+Compact linked structured profiles separately and label each source; parsing
+concatenated profiles can overwrite sections. Native WebUI persona/style edits
+belong to the user; tests must not restore old hard-coded persona/defaults.
+
+Persistent sleep state is keyed by canonical actor, not the starting group.
+Every admitted human message in an enabled group rechecks it. Reply through
+the event's actual destination. Use `sleep_start_once` / `sleep_settle_once`:
+the state claim and shared wallet update must commit once in one transaction.
+Respect adapter policy, disabled chat commands and group plugin allowlists.
+Short-lived attachment/reply follow-ups remain scoped to their actual session.
+
+The SDK-only `community_context` plugin requires explicit scoped destinations
+and an exact shared group name. Peer data goes in a separate reference item,
+never local user history or actionable message IDs. It has no broadcaster.
+Native plugins must implement on_load/on_unload/on_config_update and declare
+every capability, including chat.get_all_streams for scoped QQ resolution.
+
+Private think events do not spend the real action budget; preserve old journals
+and the one-time bootstrap marker. Declining a repost creates no send attempt.
+Reserve real sends before RPC; never retry uncertain delivery. Preserve actual
+project progress when a later model reflection fails. Binding transactions must
+not depend on optional nickname/impression enrichment after commit.
+
+Acceptance: bind_entry_acceptance.py, linked_identity_acceptance.py,
+sleep_cross_platform_acceptance.py, community_context_acceptance.py plus the
+native bridge/dual-plugin suites under scripts/. Use isolated data and
+intercepted sends; never create test bindings or punish real group members.
+
+### Native model priority and web services (2026-10-31)
+
+`config/model_config.toml` is authoritative. Common generation tasks use the
+same sequential order: usable Gemini, then DeepSeek, then the configured model
+capability preference. Keep missing-key or failed profiles disabled; automatic
+selection must skip them without constructing a provider client. Explicitly
+requested models must not be silently substituted. Embedding/image-embedding
+keep their own fixed vector spaces, dimensions and dedicated task lists.
+
+For a strict Chat Completions template, opt in to provider-level
+`system_messages_at_start`. Only normalize the wire payload: preserve all system
+content and the chronological user/assistant/tool sequence, call IDs and results.
+Never rewrite native personality or expression prompts to fix provider syntax.
+
+Native `model_task_config.web_search.model_list` names one `web.services` entry,
+not an LLM. `parallel_mcp` reuses a named native MCP connection, stable hashed
+conversation identity, and the native source-labelled result store. Do not
+expose a second copy of the selected server's search/fetch tools. Autonomous
+life keeps its background exploration, but does not register duplicate
+conversation search tools when native search owns that function.
+
+Run `maibot_llm_format_acceptance.py`, `maibot_native_search_acceptance.py`
+(synthetic public network traffic), and the isolated native bridge suite.
+Serialize TOML with `newline=''` and parse the exact serialized bytes again
+before atomic replacement on Windows. Use AoT for `mcp.servers`, never append a
+regular table into a TOML array. Back up both native config files, preserve
+operator edits and personality settings, and never restart the production bot.
+
+For paired-community memory references, pass `include_shared=False` through
+`knowledge.search` and require a matching `search_scope` acknowledgement before
+labelling the result as belonging to the peer. The flag must survive the
+capability, MemoryService and A_Memorix host boundary; the host must not expand
+that request to admitted/shared/global sessions. Default searches keep their
+existing sharing policy. Old hosts without the acknowledgement provide only
+recent observations, never falsely attributed cross-group memory. Keep the
+reference as a separate, bounded source-labelled item with valid JSON.
+
+Profile injection must retain whichever verified platform profile succeeds
+when the other backend fails. Autonomous-life decision budgets must describe
+actual shares and private thought streaks; do not manufacture actions or
+messages to reach a numerical target.
+
+QQ bot display identity must come from the adapter's current account ID and
+`get_group_member_info`, scoped to the exact group. Carry it as
+`additional_config.platform_bot_identity` (`user_id`, `group_id`, `nickname`,
+`cardname`), refresh/cache it with a bounded TTL, and clear it on disconnect.
+Display-name lookup failure must never erase a valid structured self @.
+Preserve @ segment order/IDs when entering the shell Router. A leading self @
+can act as a command prefix; @other with the same card cannot. Dynamic aliases
+are local to each account/scope/group and must be replaced when names change.
+Do not write a group card into the global persona configuration. A successful
+shell response consumes its trigger once; an unhandled addressed message keeps
+its original self-mention flags for MaiBot's configured forced-reply policy.

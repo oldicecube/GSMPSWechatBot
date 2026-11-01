@@ -299,6 +299,14 @@ def handle(content, context):
     # ---------- 未知子命令 ----------
     return _help_text()
 
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'enabled': {'type': 'bool', 'default': True, 'label': '锦标赛业务启用', 'config_path': 'tournament.enabled', 'reload': 'restart'},
+    'min_matches_for_ranking': {'type': 'int', 'default': 5, 'min': 1, 'max': 1000, 'label': '进入排名的最少场次', 'config_path': 'tournament.min_matches_for_ranking', 'reload': 'restart'},
+    'leaderboard_top': {'type': 'int', 'default': 10, 'min': 1, 'max': 100, 'label': '榜单人数', 'config_path': 'tournament.leaderboard_top', 'reload': 'restart'},
+    'rcon_timeout': {'type': 'float', 'default': 10, 'min': 1, 'max': 60, 'label': 'RCON 超时（秒）', 'config_path': 'tournament.rcon_timeout', 'reload': 'restart'},
+    'usercache_path': {'type': 'str', 'default': '', 'label': 'Minecraft usercache.json 路径', 'config_path': 'tournament.usercache_path', 'reload': 'restart'},
+}}
+
 WEBUI_CONFIG_SCHEMA = {
     "title": "锦标赛",
     "fields": [

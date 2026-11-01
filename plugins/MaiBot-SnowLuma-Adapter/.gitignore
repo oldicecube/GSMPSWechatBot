@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+config.toml
+config.toml.backup
+config.toml.backup.*
+config_back/
+data/
+config2.toml
+uv.lock
+logs/**
+.vscode
+test/**
+**/__pycache__/**

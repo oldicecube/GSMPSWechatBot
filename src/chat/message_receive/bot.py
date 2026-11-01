@@ -55,7 +55,7 @@ def is_command_disabled(command_id: str) -> bool:
         bool: 命令是否已被停用。
     """
 
-    return command_id in global_config.plugin.disabled_commands
+    return command_id in {'core.clear', 'builtin.plugin-management.management'} or command_id in global_config.plugin.disabled_commands
 
 
 def register_chat_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
@@ -277,6 +277,9 @@ class ChatBot:
         """
         if not message.processed_plain_text:
             return False, None, True  # 没有文本内容，继续处理消息
+        from src.platform_io.chat_features import message_override
+        if message_override(message, 'plugins_enabled') is False:
+            return False, None, True
         try:
             text = message.processed_plain_text
 
@@ -286,6 +289,9 @@ class ChatBot:
                 command_executor, matched_groups, command_info = command_result
                 plugin_name = command_info.plugin_name
                 command_name = command_info.name
+                from src.common.bot_interaction_policy import annotate_message
+                if annotate_message(message, plugin_request=True):
+                    return False, None, True
                 if message.session_id and command_name in global_announcement_manager.get_disabled_chat_commands(
                     message.session_id
                 ):
@@ -339,6 +345,9 @@ class ChatBot:
 
                 # 获取插件配置
                 plugin_config = component_query_service.get_plugin_config(plugin_name)
+                message.message_info.additional_config['plugin_activity'] = dict(
+                    plugin_id=plugin_name, kind='plugin_trigger', trigger_message_id=message.message_id)
+                message.message_info.additional_config['learnable'] = False
 
                 try:
                     # 调用命令执行器
@@ -751,7 +760,7 @@ class ChatBot:
             logger.error(f"预处理消息失败: {e}")
             traceback.print_exc()
 
-    async def receive_message(self, message: SessionMessage) -> None:
+    async def receive_message(self, message: SessionMessage, *, raise_errors: bool = False) -> str:
         """处理单条入站会话消息。
 
         Args:
@@ -800,7 +809,7 @@ class ChatBot:
             )
             if before_process_result.aborted:
                 logger.info(f"消息 {message.message_id} 在预处理前被 Hook 中止")
-                return
+                return "hook_aborted"
 
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
@@ -824,7 +833,7 @@ class ChatBot:
             )
             if after_process_result.aborted:
                 logger.info(f"消息 {message.message_id} 在预处理后被 Hook 中止")
-                return
+                return "hook_aborted"
 
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
@@ -842,13 +851,13 @@ class ChatBot:
                     chat_name = group_info.group_name if group_info else "私聊"
                     logger.info(f"[{chat_name}]{user_info.user_nickname}:{text}")
                     logger.info(f"[过滤词识别]消息中含有{word}，filtered")
-                    return
+                    return "filtered"
                 is_banned_regex, pattern = MessageUtils.check_ban_regex(text)
                 if is_banned_regex:
                     chat_name = group_info.group_name if group_info else "私聊"
                     logger.info(f"[{chat_name}]{user_info.user_nickname}:{text}")
                     logger.info(f"[正则表达式过滤]消息匹配到{pattern}，filtered")
-                    return
+                    return "filtered"
 
             chat_manager.register_message(message)
 
@@ -866,12 +875,12 @@ class ChatBot:
             # message.update_chat_stream(chat)
 
             if await self._process_adapter_lifecycle_command(message):
-                return
+                return "command"
 
             # 调试用内置指令需要先写入持久化清理边界，再停止当前运行时，
             # 避免并发消息或进程重启重新带回清理前的短期上下文。
             if await self._process_clear_context_command(message):
-                return
+                return "command"
 
             # 命令处理 - 使用新插件系统检查并处理命令。
             # 命令处理器内部自行决定是否回复消息，这里只负责流程分发与拦截。
@@ -879,7 +888,7 @@ class ChatBot:
 
             # 如果是命令且不需要继续处理，则直接返回，避免落入 HeartFlow / MaiSaka。
             if is_command and await self._handle_command_processing_result(message, cmd_result, continue_process):
-                return
+                return "command"
 
             # continue_flag, modified_message = await events_manager.handle_mai_events(EventType.ON_MESSAGE, message)
             # if not continue_flag:
@@ -887,19 +896,28 @@ class ChatBot:
             # if modified_message and modified_message._modify_flags.modify_plain_text:
             #     message.processed_plain_text = modified_message.plain_text
 
+            from src.platform_io.chat_features import message_override
+            if message_override(message, 'llm_enabled') is False:
+                await MessageUtils.store_message_to_db_async(message)
+                return 'llm_disabled'
+
             async def preprocess():
                 if group_info is None:
                     logger.debug("[私聊]检测到私聊消息，路由到 Maisaka")
-                    await self.heartflow_message_receiver.process_message(message)
+                    await self.heartflow_message_receiver.process_message(message, raise_errors=raise_errors)
                 else:
                     logger.debug("[群聊]检测到群聊消息，路由到 Maisaka")
-                    await self.heartflow_message_receiver.process_message(message)
+                    await self.heartflow_message_receiver.process_message(message, raise_errors=raise_errors)
 
             await preprocess()
+            return "ingested"
 
         except Exception as e:
             logger.error(f"预处理消息失败: {e}")
             traceback.print_exc()
+            if raise_errors:
+                raise
+            return "error"
 
 
 # 创建全局ChatBot实例

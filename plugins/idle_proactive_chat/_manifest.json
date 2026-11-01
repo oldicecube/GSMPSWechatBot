@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "version": "1.0.5",
+  "name": "静默主动发言",
+  "description": "当白名单聊天流长时间没有新入站消息时，通过 Maisaka 主动任务自然发起聊天。",
+  "author": {
+    "name": "晴空",
+    "url": "https://github.com/XXXxx7258"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/XXXxx7258/idle_proactive_chat",
+    "homepage": "https://github.com/XXXxx7258/idle_proactive_chat",
+    "documentation": "https://github.com/XXXxx7258/idle_proactive_chat#readme",
+    "issues": "https://github.com/XXXxx7258/idle_proactive_chat/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.9.9"
+  },
+  "sdk": {
+    "min_version": "2.5.2",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "chat.get_all_streams",
+    "chat.get_group_streams",
+    "chat.get_private_streams",
+    "chat.get_stream_by_group_id",
+    "chat.get_stream_by_user_id",
+    "chat.open_session",
+    "message.get_by_time_in_chat",
+    "maisaka.context.append",
+    "maisaka.proactive.trigger"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "xxxxx7258.idle-proactive-chat"
+}

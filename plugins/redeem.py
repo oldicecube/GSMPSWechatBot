@@ -36,9 +36,10 @@ def init(config):
 
 
 def _wxid(context):
+    from utils.account_identity import canonical_user
     context = context if isinstance(context, dict) else {}
     raw = context.get("raw") if isinstance(context.get("raw"), dict) else {}
-    return str(context.get("wxid") or raw.get("wxid") or "").strip()
+    return canonical_user(str(context.get("wxid") or raw.get("wxid") or "").strip())
 
 
 def _group_name(context):
@@ -154,6 +155,10 @@ def _confirmation_message(context, product):
 
 
 def handle(content, context):
+    from utils.points_manager import binding_required
+    error = binding_required(context)
+    if error:
+        return error
     context = context if isinstance(context, dict) else {}
     product = _normalize_product(content)
     if product is None:
@@ -240,6 +245,12 @@ def handle(content, context):
     with _LOCK:
         _PENDING.pop(key, None)
     return f"兑换失败：{message}，已退回 {product['cost']} 积分"
+
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'redeem_url': {'type': 'str', 'default': 'http://127.0.0.1:3001/api/redeem/bot', 'label': '兑换服务地址', 'config_path': 'print_server.redeem_url', 'reload': 'restart'},
+    'redeem_token': {'type': 'str', 'default': '', 'secret': True, 'label': '兑换服务令牌', 'config_path': 'print_server.redeem_token', 'reload': 'restart'},
+    'timeout_seconds': {'type': 'float', 'default': 8, 'min': 1, 'max': 30, 'label': '请求超时（秒）', 'config_path': 'print_server.timeout_seconds', 'reload': 'restart'},
+}}
 
 WEBUI_CONFIG_SCHEMA = {
     "title": "兑换服务",

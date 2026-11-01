@@ -1,0 +1,1752 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { BotConfigPage } from '../bot'
+import { scrollToConfigSearchField } from '@/lib/config-search-navigation'
+import { fieldHooks } from '@/lib/field-hooks'
+import * as configApi from '@/lib/config-api'
+
+import type { ConfigSchema, FieldSchema } from '@/types/config-schema'
+import type { ReactNode } from 'react'
+
+const toastMock = vi.fn()
+
+// 路由 search 字符串（供 useRouterState mock 读取，可按用例改写）
+let routerSearchStr = ''
+// 源文件模式可按用例替换 smol-toml.parse；默认走真实解析
+let tomlParseOverride: ((input: string) => unknown) | null = null
+
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+  tomlParseOverride = null
+})
+
+vi.mock('@/hooks/use-toast', () => ({ useToast: () => ({ toast: toastMock }) }))
+vi.mock('@tanstack/react-router', () => ({
+  useNavigate: () => async () => {},
+  Link: ({ children }: { children?: ReactNode }) => (
+    <span data-testid="router-link">{children}</span>
+  ),
+  useRouterState: ({
+    select,
+  }: {
+    select: (state: { location: { searchStr: string } }) => string
+  }) => select({ location: { searchStr: routerSearchStr } }),
+}))
+vi.mock('@/lib/restart-context', () => ({
+  RestartProvider: ({ children }: { children: ReactNode }) => children,
+  useRestart: () => ({ isRestarting: false, triggerRestart: vi.fn() }),
+}))
+vi.mock('@/components/restart-overlay', () => ({ RestartOverlay: () => null }))
+
+// CodeEditor 桩：用原生 textarea 替代 Monaco，保留 value/onChange 数据链路
+vi.mock('@/components/CodeEditor', () => ({
+  CodeEditor: ({
+    value,
+    onChange,
+    placeholder,
+  }: {
+    value: string
+    onChange: (value: string) => void
+    placeholder?: string
+  }) => (
+    <textarea
+      aria-label="源码编辑器"
+      placeholder={placeholder}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+}))
+
+// 共享组页面由独立组件维护，这里只验证麦麦设置的模式入口。
+vi.mock('@/routes/chat-management', () => ({
+  SharedGroupsSettings: () => <div data-testid="shared-groups-settings" />,
+}))
+
+// CommandPermissions 桩：只验证页面把 plugin 分节传入并回写
+vi.mock('../bot/CommandPermissions', () => ({
+  CommandPermissions: ({
+    pluginSection,
+    onChange,
+  }: {
+    pluginSection: Record<string, unknown> | null
+    onChange: (value: Record<string, unknown>) => void
+  }) => (
+    <div data-testid="command-permissions">
+      <span data-testid="command-plugin">{JSON.stringify(pluginSection)}</span>
+      <button
+        type="button"
+        onClick={() =>
+          onChange({
+            ...(pluginSection ?? {}),
+            command_permissions: { demo: { allow_chats: [], allow_users: [] } },
+          })
+        }
+      >
+        change-plugin
+      </button>
+    </div>
+  ),
+}))
+
+vi.mock('@/lib/config-search-navigation', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/config-search-navigation')>()
+  return {
+    ...actual,
+    // mockReset 会清掉 factory 默认实现，beforeEach 会重新挂上
+    scrollToConfigSearchField: vi.fn(),
+  }
+})
+
+// DynamicConfigForm 桩：展示 schema 组织形式与传入的值，并提供浅/深/整节替换回调
+vi.mock('@/components/dynamic-form', () => ({
+  DynamicConfigForm: ({
+    schema,
+    values,
+    onChange,
+    advancedVisible,
+  }: {
+    schema: { className: string; nested?: Record<string, unknown> }
+    values: Record<string, unknown>
+    onChange: (fieldPath: string, value: unknown) => void
+    advancedVisible?: boolean
+  }) => (
+    <div
+      data-testid={`form-${schema.className}`}
+      data-advanced={String(Boolean(advancedVisible))}
+      data-config-field-path={schema.className}
+    >
+      <span data-testid={`form-${schema.className}-sections`}>
+        {Object.keys(schema.nested ?? {}).join(',')}
+      </span>
+      <span data-testid={`form-${schema.className}-values`}>{JSON.stringify(values)}</span>
+      {Object.keys(schema.nested ?? {}).map((sectionName) => (
+        <div key={sectionName}>
+          <button
+            type="button"
+            onClick={() => onChange(`${sectionName}.stub_field`, `${sectionName}-新值`)}
+          >
+            {`change-${schema.className}-${sectionName}`}
+          </button>
+          <button type="button" onClick={() => onChange(`${sectionName}.nested.deep`, 'deep-val')}>
+            {`change-deep-${schema.className}-${sectionName}`}
+          </button>
+          <button type="button" onClick={() => onChange(`${sectionName}.nested`, ['arr'])}>
+            {`change-array-${schema.className}-${sectionName}`}
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange(`${sectionName}.nested.deep`, 'from-array')}
+          >
+            {`change-through-array-${schema.className}-${sectionName}`}
+          </button>
+          <button type="button" onClick={() => onChange(sectionName, { replaced: true })}>
+            {`change-replace-${schema.className}-${sectionName}`}
+          </button>
+          <button type="button" onClick={() => onChange(`${sectionName}.`, 'blank-key')}>
+            {`change-blank-${schema.className}-${sectionName}`}
+          </button>
+        </div>
+      ))}
+      <button type="button" onClick={() => onChange('root_field', 'root-新值')}>
+        {`change-root-${schema.className}`}
+      </button>
+      <button type="button" onClick={() => onChange('nested.deep', 'deep-新值')}>
+        {`change-deep-root-${schema.className}`}
+      </button>
+      <button type="button" onClick={() => onChange('', 'empty-path')}>
+        {`change-empty-${schema.className}`}
+      </button>
+    </div>
+  ),
+}))
+
+vi.mock('@/lib/config-api', () => ({
+  getBotConfig: vi.fn(),
+  getBotConfigCached: vi.fn(),
+  getBotConfigRaw: vi.fn(),
+  getBotConfigSchema: vi.fn(),
+  updateBotConfig: vi.fn(),
+  updateBotConfigRaw: vi.fn(),
+  updateBotConfigSection: vi.fn(),
+}))
+
+vi.mock('smol-toml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('smol-toml')>()
+  return {
+    ...actual,
+    parse: (input: string) => (tomlParseOverride ? tomlParseOverride(input) : actual.parse(input)),
+  }
+})
+
+function baseConfig(): Record<string, unknown> {
+  return {
+    bot: { nickname: '麦麦', qq_account: 12345 },
+    personality: { personality: '原始人格' },
+    sub_feature: { enabled: true },
+    experimental: { debug: false },
+    // 旧版遗留 memory 分区：加载时应被剥离，不应进入表单与保存载荷
+    memory: { legacy: true },
+  }
+}
+
+function sectionSchema(
+  className: string,
+  classDoc: string,
+  ui: Partial<ConfigSchema> = {}
+): ConfigSchema {
+  return { className, classDoc, fields: [], nested: {}, ...ui }
+}
+
+function field(
+  name: string,
+  type: FieldSchema['type'],
+  extra: Partial<FieldSchema> = {}
+): FieldSchema {
+  return {
+    name,
+    type,
+    label: name,
+    description: '',
+    required: false,
+    ...extra,
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+/** 页面挂载时应注册的字段 hook 路径与类型（replace 为缺省） */
+const EXPECTED_FIELD_HOOKS: Array<[string, 'replace' | 'wrapper' | 'hidden']> = [
+  ['bot.platform', 'hidden'],
+  ['bot.alias_names', 'replace'],
+  ['bot.qq_account', 'hidden'],
+  ['bot.platforms', 'hidden'],
+  ['personality.multiple_reply_style', 'replace'],
+  ['chat.reply_style.chat_prompts', 'replace'],
+  ['chat.reply_timing.talk_value_rules', 'replace'],
+  ['experimental.focus_chat_whitelist', 'replace'],
+  ['experimental.focus_groups', 'replace'],
+  ['expression.expression_groups', 'replace'],
+  ['expression.learning_list', 'replace'],
+  ['jargon.jargon_groups', 'replace'],
+  ['jargon.learning_list', 'replace'],
+  ['a_memorix.global_memory_sharing_enabled', 'hidden'],
+  ['a_memorix.plugin.enabled', 'wrapper'],
+  ['a_memorix.person_profile.enabled', 'wrapper'],
+  ['a_memorix.integration.heuristic_memory_recall_enabled', 'wrapper'],
+  ['a_memorix.image_memory.enabled', 'wrapper'],
+  ['a_memorix.shared_memory_groups', 'replace'],
+  ['a_memorix.filter.chats', 'replace'],
+  ['a_memorix.filter.retrieval', 'wrapper'],
+  ['a_memorix.filter.retrieval.chat_stream.chats', 'replace'],
+  ['a_memorix.filter.retrieval.chat_summary.chats', 'replace'],
+  ['a_memorix.filter.retrieval.episode.chats', 'replace'],
+  ['keyword_reaction.keyword_rules', 'replace'],
+  ['keyword_reaction.regex_rules', 'replace'],
+  ['mcp.client.roots.items', 'replace'],
+  ['mcp.servers', 'replace'],
+]
+
+function chatSubtabSchema(): { schema: ConfigSchema } {
+  return {
+    schema: {
+      className: 'BotConfigRoot',
+      classDoc: '',
+      fields: [],
+      nested: {
+        chat: {
+          className: 'ChatSection',
+          classDoc: '聊天配置',
+          fields: [
+            field('enabled', 'boolean'),
+            field('reply_timing', 'object'),
+            field('reply_style', 'object'),
+            field('advanced_box', 'object'),
+          ],
+          nested: {
+            reply_timing: {
+              className: 'ReplyTiming',
+              classDoc: '回复时机文档',
+              fields: [],
+              nested: {},
+              uiLabel: '回复时机',
+              uiSubLabel: '时机子页',
+            },
+            reply_style: {
+              className: 'ReplyStyle',
+              classDoc: '',
+              fields: [],
+              nested: {},
+              uiLabel: '回复风格',
+            },
+            advanced_box: {
+              className: 'AdvancedBox',
+              classDoc: '高级文档',
+              fields: [],
+              nested: {},
+              uiAdvanced: true,
+            },
+          },
+          uiLabel: '聊天',
+          uiOrder: 1,
+          uiUseSubTabs: true,
+          uiRootSubLabel: '总览',
+        },
+        chat_inner: sectionSchema('ChatInner', '', {
+          uiParent: 'chat',
+          uiLabel: '内部组',
+          uiAdvanced: true,
+        }),
+        chat_leaf: sectionSchema('ChatLeaf', '叶子文档', { uiParent: 'chat_inner' }),
+        personality: sectionSchema('PersonalitySection', '人格配置', {
+          uiLabel: '人格',
+          uiOrder: 2,
+        }),
+        empty_sub: sectionSchema('EmptySub', '空', {
+          uiLabel: '空栏目',
+          uiOrder: 9,
+          uiUseSubTabs: true,
+        }),
+      },
+    },
+  }
+}
+
+function baseSchema(): { schema: ConfigSchema } {
+  return {
+    schema: {
+      className: 'BotConfigRoot',
+      classDoc: '',
+      fields: [],
+      nested: {
+        // uiOrder 故意与书写顺序相反，用于验证排序逻辑
+        bot: sectionSchema('BotSection', '机器人配置', { uiLabel: '机器人', uiOrder: 2 }),
+        personality: sectionSchema('PersonalitySection', '人格配置', {
+          uiLabel: '人格',
+          uiOrder: 1,
+        }),
+        // 无 uiLabel、有 uiParent：应归并进「机器人」tab
+        sub_feature: sectionSchema('SubFeatureSection', '子功能配置', { uiParent: 'bot' }),
+        // 高级栏目也应直接显示在页面下拉列表中。
+        experimental: sectionSchema('ExperimentalSection', '实验性配置', {
+          uiLabel: '实验性',
+          uiOrder: 3,
+          uiAdvanced: true,
+        }),
+      },
+    },
+  }
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  routerSearchStr = ''
+  fieldHooks.clear()
+  vi.mocked(scrollToConfigSearchField).mockImplementation(() => document.createElement('div'))
+  vi.mocked(configApi.getBotConfigCached).mockResolvedValue(baseConfig())
+  vi.mocked(configApi.getBotConfig).mockResolvedValue(baseConfig())
+  vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(baseSchema() as never)
+  // 实际接口返回 { content } 对象，页面从 .content 取原始 TOML
+  vi.mocked(configApi.getBotConfigRaw).mockResolvedValue({
+    content: 'title = "hello\\nworld"',
+  } as never)
+  vi.mocked(configApi.updateBotConfig).mockResolvedValue({})
+  vi.mocked(configApi.updateBotConfigRaw).mockResolvedValue({})
+  vi.mocked(configApi.updateBotConfigSection).mockResolvedValue({})
+})
+
+async function renderBotPage() {
+  const view = render(<BotConfigPage />)
+  // 等待初始加载完成（模式切换 tab 出现）
+  await screen.findByRole('tab', { name: '详细设置' })
+  return view
+}
+
+async function getSaveMenuItem(user: ReturnType<typeof userEvent.setup>) {
+  if (!screen.queryByRole('menuitem', { name: /手动保存/ })) {
+    await user.click(screen.getByRole('button', { name: '更多设置' }))
+  }
+  return screen.findByRole('menuitem', { name: /手动保存/ })
+}
+
+async function selectMoreMode(user: ReturnType<typeof userEvent.setup>, name: string) {
+  if (!screen.queryByRole('menuitem', { name })) {
+    await user.click(screen.getByRole('button', { name: '更多设置' }))
+  }
+  await user.click(screen.getByRole('menuitem', { name }))
+}
+
+/** 切换到「详细设置」模式并等待指定分节表单渲染完成 */
+async function enterDetailMode(
+  user: ReturnType<typeof userEvent.setup>,
+  formTestId = 'form-personality'
+) {
+  if (screen.getByRole('tab', { name: '详细设置' }).getAttribute('data-state') !== 'active') {
+    await user.click(screen.getByRole('tab', { name: '详细设置' }))
+  }
+  if (formTestId === 'form-personality' && !screen.queryByTestId(formTestId)) {
+    await selectConfigPage(user, '人格')
+  }
+  await screen.findByTestId(formTestId)
+}
+
+async function openConfigMenu(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: '选择设置页面' }))
+  return screen.findByRole('menu')
+}
+
+async function selectConfigPage(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await openConfigMenu(user)
+  await user.click(screen.getByRole('menuitem', { name }))
+}
+
+/** 栏目下拉菜单中的页面入口；每行另有一个仅含图标的「钉固 / 取消钉固」menuitem，不计入 */
+function getConfigPageMenuItems(menu: HTMLElement) {
+  return within(menu).getAllByRole('menuitem', { name: (name) => !/^(取消)?钉固/.test(name) })
+}
+
+describe('BotConfigPage 特征化', () => {
+  it('初始加载配置并展示详细设置', async () => {
+    await renderBotPage()
+    expect(configApi.getBotConfigCached).toHaveBeenCalledTimes(1)
+    expect(configApi.getBotConfigSchema).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('form-bot')).toBeInTheDocument()
+  })
+
+  it('初始加载失败时弹出加载失败 toast', async () => {
+    vi.mocked(configApi.getBotConfigCached).mockRejectedValue(new Error('网络错误'))
+    render(<BotConfigPage />)
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith({
+        title: '加载失败',
+        description: '网络错误',
+        variant: 'destructive',
+      })
+    )
+  })
+
+  it('手动保存：personality 变更后保存整份配置，载荷剥离 legacy memory 分区', async () => {
+    const user = userEvent.setup()
+    await renderBotPage()
+
+    // 初始无未保存更改：菜单中的手动保存禁用
+    expect(await getSaveMenuItem(user)).toHaveAttribute('aria-disabled', 'true')
+    await user.keyboard('{Escape}')
+
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    const saveButton = await getSaveMenuItem(user)
+    await user.click(saveButton)
+
+    await waitFor(() => expect(configApi.updateBotConfig).toHaveBeenCalledTimes(1))
+    const savedConfig = vi.mocked(configApi.updateBotConfig).mock.calls[0][0]
+    expect(savedConfig.personality).toEqual({
+      personality: '原始人格',
+      stub_field: 'personality-新值',
+    })
+    expect(savedConfig.bot).toEqual({ nickname: '麦麦', qq_account: 12345 })
+    // 加载时剥离的 legacy memory 不应回写
+    expect('memory' in savedConfig).toBe(false)
+
+    expect(toastMock).toHaveBeenCalledWith({ title: '保存成功', description: '麦麦设置已保存' })
+    // 手动保存经过 autosave barrier：待执行的分区防抖保存被取消
+    expect(configApi.updateBotConfigSection).not.toHaveBeenCalled()
+    // 保存完成后回到「已保存」状态
+    await getSaveMenuItem(user)
+  })
+
+  it('手动保存失败时弹出保存失败 toast', async () => {
+    vi.mocked(configApi.updateBotConfig).mockRejectedValue(new Error('后端拒绝'))
+    const user = userEvent.setup()
+    await renderBotPage()
+
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    await user.click(await getSaveMenuItem(user))
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith({
+        title: '保存失败',
+        description: '后端拒绝',
+        variant: 'destructive',
+      })
+    )
+  })
+
+  it('存在未保存更改时切换模式被阻止并提示', async () => {
+    const user = userEvent.setup()
+    await renderBotPage()
+
+    await enterDetailMode(user)
+    await user.click(screen.getByText('change-personality-personality'))
+    await selectMoreMode(user, '源文件编辑')
+
+    expect(toastMock).toHaveBeenCalledWith({
+      variant: 'destructive',
+      title: '切换失败',
+      description: '请先保存当前更改',
+    })
+    // 仍停留在详细设置模式
+    expect(screen.getByTestId('form-personality')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('TOML 配置内容')).not.toBeInTheDocument()
+  })
+
+  it('刷新按钮重新读取配置并提示已刷新', async () => {
+    const user = userEvent.setup()
+    await renderBotPage()
+
+    await user.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith({
+        title: '已刷新',
+        description: '已从 bot_config.toml 重新读取配置',
+      })
+    )
+    expect(configApi.getBotConfigCached).toHaveBeenCalledTimes(2)
+  })
+
+  describe('源文件模式', () => {
+    it('切换后加载原始 TOML，并把双引号字符串内的转义换行展开为真实换行', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      expect(configApi.getBotConfigRaw).toHaveBeenCalledTimes(1)
+      // \n 转义序列被展开成真实换行
+      expect(editor).toHaveValue('title = "hello\nworld"')
+      // 文件模式提示默认可见
+      expect(screen.getByText('文件模式：')).toBeInTheDocument()
+    })
+
+    it('编辑后保存：换行被转义回 \\n，保存成功后回读配置', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      // 双引号字符串内含真实换行，保存前应转义回 \n
+      fireEvent.change(editor, { target: { value: 'title = "a\nb"' } })
+
+      await user.click(await getSaveMenuItem(user))
+      await waitFor(() =>
+        expect(configApi.updateBotConfigRaw).toHaveBeenCalledWith('title = "a\\nb"')
+      )
+      expect(toastMock).toHaveBeenCalledWith({ title: '保存成功', description: '配置已保存' })
+      // 保存成功后重新加载可视化配置
+      await waitFor(() => expect(configApi.getBotConfigCached).toHaveBeenCalledTimes(2))
+    })
+
+    it('TOML 语法错误被前端拦截：不发请求并展示错误信息', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'a =' } })
+
+      await user.click(await getSaveMenuItem(user))
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: 'TOML 格式错误',
+          description: expect.any(String),
+        })
+      )
+      expect(configApi.updateBotConfigRaw).not.toHaveBeenCalled()
+      // 错误面板展示翻译后的错误信息
+      expect(await screen.findByText('⚠️ TOML 格式错误：')).toBeInTheDocument()
+    })
+
+    it('关闭文件模式提示后写入 localStorage 不再展示', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await screen.findByText('文件模式：')
+      await user.click(screen.getByRole('button', { name: '关闭文件模式提示' }))
+
+      expect(screen.queryByText('文件模式：')).not.toBeInTheDocument()
+      expect(localStorage.getItem('bot-config-file-mode-notice-dismissed')).toBe('true')
+    })
+  })
+
+  describe('详细设置模式', () => {
+    it('栏目下拉列表按 uiOrder 排序，包含高级栏目并归并 uiParent', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
+      expect(screen.getByTestId('form-personality-sections')).toHaveTextContent('personality')
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('原始人格')
+      const menu = await openConfigMenu(user)
+      expect(getConfigPageMenuItems(menu).map((item) => item.textContent)).toEqual([
+        '人格',
+        '机器人',
+        '实验性',
+      ])
+      await user.click(within(menu).getByRole('menuitem', { name: '机器人' }))
+      expect(await screen.findByTestId('form-bot-sections')).toHaveTextContent('bot,sub_feature')
+    })
+
+    it('表单修改更新分节值，防抖后按分节自动保存', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      await user.click(screen.getByText('change-personality-personality'))
+      // 分节值立即更新并回传表单
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('personality-新值')
+      // 出现未保存标记
+      expect(await getSaveMenuItem(user)).toBeInTheDocument()
+
+      // 2 秒防抖后触发分区自动保存
+      await waitFor(
+        () =>
+          expect(configApi.updateBotConfigSection).toHaveBeenCalledWith('personality', {
+            personality: '原始人格',
+            stub_field: 'personality-新值',
+          }),
+        { timeout: 4000 }
+      )
+      // 自动保存完成后回到「已保存」状态
+      await getSaveMenuItem(user)
+    })
+
+    it('「高级设置」按钮切换表单的 advancedVisible', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      expect(screen.getByTestId('form-personality')).toHaveAttribute('data-advanced', 'false')
+      await user.click(screen.getByRole('switch', { name: '高级设置' }))
+      expect(screen.getByTestId('form-personality')).toHaveAttribute('data-advanced', 'true')
+    })
+
+    it('首次进入实验性 tab 弹出提示，确认后写入 localStorage', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      await selectConfigPage(user, '实验性')
+
+      // 实验性功能提示对话框
+      expect(await screen.findByText('实验性功能')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: '我知道了' }))
+
+      await waitFor(() => expect(screen.queryByText('实验性功能')).not.toBeInTheDocument())
+      expect(localStorage.getItem('bot-config-experimental-features-notice-dismissed')).toBe('true')
+      // tab 内容为实验性分节表单
+      expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
+    })
+
+    it('栏目入口无需旧版展开引导即可显示全部页面', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+      expect(screen.queryByText(/展开隐藏配置栏目/)).not.toBeInTheDocument()
+      const menu = await openConfigMenu(user)
+      expect(getConfigPageMenuItems(menu)).toHaveLength(3)
+    })
+  })
+
+  it('URL 携带 field 搜索参数时自动切到详细设置并激活目标 tab（含高级展开）', async () => {
+    routerSearchStr = '?field=experimental.debug'
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    await renderBotPage()
+
+    // 经 requestAnimationFrame 链自动切换：detail 模式 + experimental tab + 高级可见
+    const experimentalForm = await screen.findByTestId('form-experimental')
+    expect(experimentalForm).toHaveAttribute('data-advanced', 'true')
+    expect(screen.getByTestId('form-experimental-values')).toHaveTextContent('debug')
+    await waitFor(() =>
+      expect(scrollToConfigSearchField).toHaveBeenCalledWith('experimental.debug')
+    )
+  })
+
+  describe('字段 hook 挂载', () => {
+    it('挂载时按路径注册 hook，并带上 replace/hidden/wrapper 类型', async () => {
+      await renderBotPage()
+
+      expect(fieldHooks.getAllPaths().sort()).toEqual(
+        EXPECTED_FIELD_HOOKS.map(([path]) => path).sort()
+      )
+      for (const [fieldPath, hookType] of EXPECTED_FIELD_HOOKS) {
+        expect(fieldHooks.get(fieldPath)?.type).toBe(hookType)
+      }
+    })
+
+    it('卸载时注销全部字段 hook', async () => {
+      const { unmount } = await renderBotPage()
+      expect(fieldHooks.has('bot.platform')).toBe(true)
+      expect(fieldHooks.has('a_memorix.filter.retrieval')).toBe(true)
+
+      unmount()
+
+      expect(fieldHooks.getAllPaths()).toEqual([])
+    })
+  })
+
+  describe('加载与保存错误', () => {
+    it('配置未返回前展示加载中状态', async () => {
+      const deferred = createDeferred<Record<string, unknown>>()
+      vi.mocked(configApi.getBotConfigCached).mockReturnValue(deferred.promise)
+
+      render(<BotConfigPage />)
+      expect(screen.getByRole('status', { name: '加载中' })).toBeInTheDocument()
+
+      deferred.resolve(baseConfig())
+      await screen.findByRole('tab', { name: '详细设置' })
+      expect(screen.queryByRole('status', { name: '加载中' })).not.toBeInTheDocument()
+    })
+
+    it('初始加载失败且原因不是 Error 时使用兜底文案', async () => {
+      vi.mocked(configApi.getBotConfigCached).mockRejectedValue('offline')
+      render(<BotConfigPage />)
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '加载失败',
+          description: '加载配置失败',
+          variant: 'destructive',
+        })
+      )
+    })
+
+    it('schema 加载失败时仍可进入详细设置，但不渲染分节 tab', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockRejectedValue(new Error('schema 不可用'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
+
+      expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
+      expect(screen.queryByTestId(/form-/)).not.toBeInTheDocument()
+    })
+
+    it('schema 返回空值时详细设置不渲染分组', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(null as never)
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
+      expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
+    })
+
+    it('schema 缺少 nested 时详细设置不渲染分组', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: { className: 'EmptyRoot', classDoc: '', fields: [] },
+      } as never)
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      expect(configApi.getBotConfig).not.toHaveBeenCalled()
+      expect(document.querySelector('[data-config-bot-tab-list="true"]')).toBeNull()
+    })
+
+    it('命令管理模式挂载命令权限；plugin 缺失时传入 null，回写后可保存', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '命令管理' }))
+      expect(await screen.findByTestId('command-plugin')).toHaveTextContent('null')
+
+      await user.click(screen.getByText('change-plugin'))
+      await user.click(await getSaveMenuItem(user))
+
+      await waitFor(() => expect(configApi.updateBotConfig).toHaveBeenCalledTimes(1))
+      const savedConfig = vi.mocked(configApi.updateBotConfig).mock.calls[0][0] as Record<
+        string,
+        unknown
+      >
+      expect(savedConfig.plugin).toEqual({
+        command_permissions: { demo: { allow_chats: [], allow_users: [] } },
+      })
+    })
+
+    it('命令管理模式把已有 plugin 分节传给命令权限面板', async () => {
+      const configWithPlugin = {
+        ...baseConfig(),
+        plugin: { permission: ['qq:1'], command_permissions: {} },
+      }
+      vi.mocked(configApi.getBotConfigCached).mockResolvedValue(configWithPlugin)
+      vi.mocked(configApi.getBotConfig).mockResolvedValue(configWithPlugin)
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '命令管理' }))
+      expect(await screen.findByTestId('command-plugin')).toHaveTextContent('qq:1')
+    })
+
+    it('切到可视化模式时 getBotConfig 失败会提示无法加载配置文件', async () => {
+      vi.mocked(configApi.getBotConfig).mockRejectedValue(new Error('可视化失败'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '加载失败',
+          description: '无法加载配置文件',
+          variant: 'destructive',
+        })
+      )
+    })
+
+    it('切到源文件模式时加载原始配置失败（Error）', async () => {
+      vi.mocked(configApi.getBotConfigRaw).mockRejectedValue(new Error('源码失败'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: '加载失败',
+          description: '源码失败',
+        })
+      )
+    })
+
+    it('切到源文件模式时加载失败且原因不是 Error 时使用兜底文案', async () => {
+      vi.mocked(configApi.getBotConfigRaw).mockRejectedValue('raw-down')
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: '加载失败',
+          description: '加载源代码失败',
+        })
+      )
+    })
+
+    it('刷新失败时只提示加载失败，不提示已刷新', async () => {
+      vi.mocked(configApi.getBotConfigCached)
+        .mockResolvedValueOnce(baseConfig())
+        .mockRejectedValueOnce(new Error('刷新失败'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('button', { name: '刷新' }))
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '加载失败',
+          description: '刷新失败',
+          variant: 'destructive',
+        })
+      )
+      expect(toastMock).not.toHaveBeenCalledWith({
+        title: '已刷新',
+        description: '已从 bot_config.toml 重新读取配置',
+      })
+    })
+
+    it('源文件模式下刷新会同时回读可视化配置和原始 TOML', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await screen.findByPlaceholderText('TOML 配置内容')
+      await user.click(screen.getByRole('button', { name: '刷新' }))
+
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '已刷新',
+          description: '已从 bot_config.toml 重新读取配置',
+        })
+      )
+      expect(configApi.getBotConfigCached).toHaveBeenCalledTimes(2)
+      expect(configApi.getBotConfigRaw).toHaveBeenCalledTimes(2)
+    })
+
+    it('源文件模式刷新时原始 TOML 再读失败仍提示已刷新', async () => {
+      vi.mocked(configApi.getBotConfigRaw)
+        .mockResolvedValueOnce({ content: 'title = "ok"' } as never)
+        .mockRejectedValueOnce(new Error('二次失败'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await screen.findByPlaceholderText('TOML 配置内容')
+      toastMock.mockClear()
+      await user.click(screen.getByRole('button', { name: '刷新' }))
+
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: '加载失败',
+          description: '二次失败',
+        })
+      )
+      expect(toastMock).toHaveBeenCalledWith({
+        title: '已刷新',
+        description: '已从 bot_config.toml 重新读取配置',
+      })
+    })
+
+    it('源文件保存接口失败时展示保存失败并写入错误面板', async () => {
+      vi.mocked(configApi.updateBotConfigRaw).mockRejectedValue(new Error('磁盘满'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'title = "ok"' } })
+      await user.click(await getSaveMenuItem(user))
+
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: '保存失败',
+          description: '磁盘满',
+        })
+      )
+      expect(await screen.findByText('磁盘满')).toBeInTheDocument()
+    })
+
+    it('源文件保存接口抛出非 Error 时使用兜底文案', async () => {
+      vi.mocked(configApi.updateBotConfigRaw).mockRejectedValue('write-fail')
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'title = "ok"' } })
+      await user.click(await getSaveMenuItem(user))
+
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: '保存失败',
+          description: '保存配置失败',
+        })
+      )
+    })
+
+    it('编辑源码会清掉先前的 TOML 错误面板', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'a =' } })
+      await user.click(await getSaveMenuItem(user))
+      expect(await screen.findByText('⚠️ TOML 格式错误：')).toBeInTheDocument()
+
+      fireEvent.change(editor, { target: { value: 'title = "fixed"' } })
+      expect(screen.queryByText('⚠️ TOML 格式错误：')).not.toBeInTheDocument()
+    })
+
+    it('加载时展开双引号内的 \\t/\\\\，保存时再转回转义序列', async () => {
+      // jsdom textarea 会把 \\r 归一成换行，这里只锁定 tab 与反斜杠
+      vi.mocked(configApi.getBotConfigRaw).mockResolvedValue({
+        content: 'msg = "a\\tb\\\\e"',
+      } as never)
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      expect(editor).toHaveValue('msg = "a\tb\\e"')
+
+      // 必须改成不同内容，相同值不会把保存按钮切到「保存」
+      fireEvent.change(editor, { target: { value: 'msg = "z\tb\\e"' } })
+      await user.click(await getSaveMenuItem(user))
+      await waitFor(() =>
+        expect(configApi.updateBotConfigRaw).toHaveBeenCalledWith('msg = "z\\tb\\\\e"')
+      )
+    })
+
+    it('手动保存进行中时按钮显示保存中', async () => {
+      const deferred = createDeferred<Record<string, unknown>>()
+      vi.mocked(configApi.updateBotConfig).mockReturnValue(deferred.promise)
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await enterDetailMode(user)
+      await user.click(screen.getByText('change-personality-personality'))
+      await user.click(await getSaveMenuItem(user))
+
+      expect(await getSaveMenuItem(user)).toHaveAttribute('aria-disabled', 'true')
+      deferred.resolve({})
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '保存成功',
+          description: '麦麦设置已保存',
+        })
+      )
+    })
+
+    it('从源文件切回共享组设置会重新拉取可视化配置', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      await screen.findByPlaceholderText('TOML 配置内容')
+      await selectMoreMode(user, '共享组设置')
+
+      await waitFor(() => expect(configApi.getBotConfig).toHaveBeenCalledTimes(1))
+      expect(await screen.findByTestId('shared-groups-settings')).toBeInTheDocument()
+      expect(screen.queryByPlaceholderText('TOML 配置内容')).not.toBeInTheDocument()
+    })
+
+    it('源文件保存成功但回读配置失败时仍提示保存成功并再提示加载失败', async () => {
+      vi.mocked(configApi.getBotConfigCached)
+        .mockResolvedValueOnce(baseConfig())
+        .mockRejectedValueOnce(new Error('回读失败'))
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'title = "ok"' } })
+      await user.click(await getSaveMenuItem(user))
+
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({ title: '保存成功', description: '配置已保存' })
+      )
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          title: '加载失败',
+          description: '回读失败',
+          variant: 'destructive',
+        })
+      )
+    })
+
+    it('非法键名会被翻译成中文 TOML 错误', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await selectMoreMode(user, '源文件编辑')
+      const editor = await screen.findByPlaceholderText('TOML 配置内容')
+      fireEvent.change(editor, { target: { value: 'foo bar = 1' } })
+      await user.click(await getSaveMenuItem(user))
+
+      // 翻译后仍保留 smol-toml 的多行指针，所以只匹配中文主句
+      expect(await screen.findByText(/键名只能包含字母、数字、短横线和下划线/)).toBeInTheDocument()
+      expect(configApi.updateBotConfigRaw).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('详细设置分节导航', () => {
+    it('关闭栏目菜单保留已选中的高级页面', async () => {
+      localStorage.setItem('bot-config-experimental-features-notice-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await selectConfigPage(user, '实验性')
+      expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
+      await openConfigMenu(user)
+      await user.keyboard('{Escape}')
+      expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
+    })
+
+    it('关闭栏目菜单保留普通页面', async () => {
+      const user = userEvent.setup()
+      await renderBotPage()
+      await selectConfigPage(user, '机器人')
+      expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
+      const menu = await openConfigMenu(user)
+      expect(within(menu).getByRole('menuitem', { name: '实验性' })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      expect(screen.getByTestId('form-bot')).toBeInTheDocument()
+    })
+
+    it('没有高级 tab 时不渲染更多按钮', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: {
+          className: 'BotConfigRoot',
+          classDoc: '',
+          fields: [],
+          nested: {
+            personality: sectionSchema('PersonalitySection', '人格配置', {
+              uiLabel: '人格',
+              uiOrder: 1,
+            }),
+          },
+        },
+      } as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      expect(screen.queryByRole('button', { name: '更多' })).not.toBeInTheDocument()
+    })
+
+    it('第一个 tab 就是实验性时进入详细设置即弹出提示', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: {
+          className: 'BotConfigRoot',
+          classDoc: '',
+          fields: [],
+          nested: {
+            experimental: sectionSchema('ExperimentalSection', '实验性配置', {
+              uiLabel: '实验性',
+              uiOrder: 0,
+              uiAdvanced: true,
+            }),
+            personality: sectionSchema('PersonalitySection', '人格配置', {
+              uiLabel: '人格',
+              uiOrder: 1,
+            }),
+          },
+        },
+      } as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      render(<BotConfigPage />)
+      expect(await screen.findByText('实验性功能')).toBeInTheDocument()
+    })
+
+    it('已关闭实验性提示后再进入该 tab 不再弹出', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      localStorage.setItem('bot-config-experimental-features-notice-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      await selectConfigPage(user, '实验性')
+
+      expect(screen.queryByText('实验性功能')).not.toBeInTheDocument()
+      expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
+    })
+
+    it('Escape 关闭实验性提示并写入 localStorage', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      await selectConfigPage(user, '实验性')
+      expect(await screen.findByText('实验性功能')).toBeInTheDocument()
+
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByText('实验性功能')).not.toBeInTheDocument())
+      expect(localStorage.getItem('bot-config-experimental-features-notice-dismissed')).toBe('true')
+    })
+
+    it('全部为高级栏目时下拉菜单直接显示全部栏目', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: {
+          className: 'BotConfigRoot',
+          classDoc: '',
+          fields: [],
+          nested: {
+            experimental: sectionSchema('ExperimentalSection', '实验性配置', {
+              uiLabel: '实验性',
+              uiOrder: 1,
+              uiAdvanced: true,
+            }),
+          },
+        },
+      } as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      localStorage.setItem('bot-config-experimental-features-notice-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+
+      await user.click(screen.getByRole('tab', { name: '详细设置' }))
+      const tabList = await openConfigMenu(user)
+      expect(within(tabList).getByRole('menuitem', { name: '实验性' })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
+    })
+
+    it('uiUseSubTabs 按根字段/子类/高级子页拆分，回复风格以聊天流prompt子页默认显示', async () => {
+      const config = {
+        ...baseConfig(),
+        chat: { enabled: true, reply_timing: { talk_value: 1 }, reply_style: { style: 'a' } },
+      }
+      vi.mocked(configApi.getBotConfigCached).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfig).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(chatSubtabSchema() as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user, 'form-ChatSectionRoot')
+
+      const tabList = await openConfigMenu(user)
+      expect(within(tabList).getByRole('menuitem', { name: '聊天' })).toBeInTheDocument()
+      await user.click(within(tabList).getByRole('menuitem', { name: '空栏目' }))
+      expect(screen.queryByTestId('form-EmptySub')).not.toBeInTheDocument()
+
+      await selectConfigPage(user, '聊天')
+      const subtabList = document.querySelector(
+        '[data-config-bot-subtab-list="true"]'
+      ) as HTMLElement
+      const defaultSubtabNames = within(subtabList)
+        .getAllByRole('tab')
+        .map((tab) => tab.textContent)
+      // 回复风格的基础提示词已迁至人格配置，其余字段以「聊天流prompt」子页默认显示，不再折叠在高级子页中。
+      expect(defaultSubtabNames).toEqual(['总览', '时机子页', '聊天流prompt'])
+      // 不再以「回复风格」原名列为聊天子页。
+      expect(within(subtabList).queryByRole('tab', { name: '回复风格' })).not.toBeInTheDocument()
+
+      await user.click(within(subtabList).getByRole('tab', { name: '时机子页' }))
+      expect(await screen.findByTestId('form-ReplyTiming-values')).toHaveTextContent('talk_value')
+      expect(screen.queryByText('麦麦聊天')).not.toBeInTheDocument()
+
+      await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
+      expect(within(subtabList).getByRole('tab', { name: '高级文档' })).toBeInTheDocument()
+      expect(within(subtabList).getByRole('tab', { name: '内部组' })).toBeInTheDocument()
+
+      await user.click(within(subtabList).getByRole('tab', { name: '内部组' }))
+      expect(await screen.findByTestId('form-chat_inner.chat_leaf-sections')).toHaveTextContent(
+        'chat_inner,chat_leaf'
+      )
+
+      await user.click(within(subtabList).getByRole('button', { name: '收起设置栏目' }))
+      expect(within(subtabList).queryByRole('tab', { name: '内部组' })).not.toBeInTheDocument()
+      expect(await screen.findByTestId('form-ChatSectionRoot')).toBeInTheDocument()
+    })
+
+    it('子页表单修改会写入嵌套路径，空 fieldPath 被忽略', async () => {
+      const config = {
+        ...baseConfig(),
+        chat: { enabled: true, reply_timing: {}, reply_style: {} },
+      }
+      vi.mocked(configApi.getBotConfigCached).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfig).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(chatSubtabSchema() as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user, 'form-ChatSectionRoot')
+
+      await user.click(screen.getByText('change-root-ChatSectionRoot'))
+      expect(screen.getByTestId('form-ChatSectionRoot-values')).toHaveTextContent('root-新值')
+
+      await user.click(screen.getByText('change-deep-root-ChatSectionRoot'))
+      expect(screen.getByTestId('form-ChatSectionRoot-values')).toHaveTextContent('deep-新值')
+
+      const beforeEmpty = screen.getByTestId('form-ChatSectionRoot-values').textContent
+      await user.click(screen.getByText('change-empty-ChatSectionRoot'))
+      expect(screen.getByTestId('form-ChatSectionRoot-values').textContent).toBe(beforeEmpty)
+    })
+
+    it('普通 tab 的深层/整节/穿越数组更新会写回分节值', async () => {
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user)
+
+      await user.click(screen.getByText('change-deep-personality-personality'))
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('deep-val')
+
+      await user.click(screen.getByText('change-array-personality-personality'))
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('["arr"]')
+      await user.click(screen.getByText('change-through-array-personality-personality'))
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('from-array')
+
+      const beforeBlank = screen.getByTestId('form-personality-values').textContent
+      await user.click(screen.getByText('change-blank-personality-personality'))
+      expect(screen.getByTestId('form-personality-values').textContent).toBe(beforeBlank)
+
+      await user.click(screen.getByText('change-replace-personality-personality'))
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('{"replaced":true}')
+
+      await user.click(screen.getByText('change-empty-personality'))
+      expect(screen.getByTestId('form-personality-values')).toHaveTextContent('{"replaced":true}')
+    })
+
+    it('URL field 指向子类时激活对应子页并滚动定位', async () => {
+      const config = {
+        ...baseConfig(),
+        chat: { enabled: true, reply_timing: { talk_value: 1 }, reply_style: {} },
+      }
+      vi.mocked(configApi.getBotConfigCached).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfig).mockResolvedValue(config)
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(chatSubtabSchema() as never)
+      routerSearchStr = '?field=chat.reply_timing'
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      await renderBotPage()
+
+      expect(await screen.findByTestId('form-ReplyTiming')).toHaveAttribute('data-advanced', 'true')
+      await waitFor(() =>
+        expect(scrollToConfigSearchField).toHaveBeenCalledWith('chat.reply_timing')
+      )
+    })
+
+    it('URL field 指向未知分节时仍切到详细设置并停留在默认 tab', async () => {
+      routerSearchStr = '?field=ghost.missing'
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      await renderBotPage()
+
+      expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
+      await waitFor(() => expect(scrollToConfigSearchField).toHaveBeenCalledWith('ghost.missing'))
+    })
+
+    it('uiParent 成环的字段不会生成 tab，只保留可解析的 host', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: {
+          className: 'BotConfigRoot',
+          classDoc: '',
+          fields: [],
+          nested: {
+            solo: sectionSchema('SoloSection', '单独', { uiLabel: '单独', uiOrder: 0 }),
+            loop_a: sectionSchema('LoopA', '环A', {
+              uiLabel: '环A',
+              uiParent: 'loop_b',
+              uiOrder: 1,
+            }),
+            loop_b: sectionSchema('LoopB', '环B', {
+              uiLabel: '环B',
+              uiParent: 'loop_a',
+              uiOrder: 2,
+            }),
+          },
+        },
+      } as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user, 'form-solo')
+
+      const tabList = await openConfigMenu(user)
+      const tabNames = getConfigPageMenuItems(tabList).map((tab) => tab.textContent)
+      expect(tabNames).toEqual(['单独'])
+    })
+
+    it('相同 uiOrder 的 tab 按中文 locale 标签排序', async () => {
+      vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+        schema: {
+          className: 'BotConfigRoot',
+          classDoc: '',
+          fields: [],
+          nested: {
+            zeta: sectionSchema('ZetaSection', 'Z', { uiLabel: 'zeta配置', uiOrder: 5 }),
+            alpha: sectionSchema('AlphaSection', 'A', { uiLabel: 'alpha配置', uiOrder: 5 }),
+          },
+        },
+      } as never)
+      localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+      const user = userEvent.setup()
+      await renderBotPage()
+      await enterDetailMode(user, 'form-alpha')
+
+      const tabList = await openConfigMenu(user)
+      const tabNames = getConfigPageMenuItems(tabList).map((tab) => tab.textContent)
+      expect(tabNames).toEqual(['alpha配置', 'zeta配置'])
+    })
+  })
+})
+
+describe('BotConfigPage 补充覆盖', () => {
+  it('无 uiOrder 的 tab 排在后面；无 uiLabel / 指向缺失 host 的分节不生成 tab', async () => {
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+      schema: {
+        className: 'BotConfigRoot',
+        classDoc: '',
+        fields: [],
+        nested: {
+          ordered: sectionSchema('OrderedSection', '有序', {
+            uiLabel: '有序',
+            uiOrder: 0,
+          }),
+          plain: sectionSchema('PlainSection', '无序', { uiLabel: '无序' }),
+          ghost: sectionSchema('GhostSection', '幽灵'),
+          lost: sectionSchema('LostSection', '丢失', {
+            uiLabel: '丢失',
+            uiParent: 'missing_host',
+          }),
+          child: sectionSchema('ChildSection', '子', {
+            uiLabel: '子栏目',
+            uiParent: 'ghost',
+          }),
+        },
+      },
+    } as never)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await user.click(screen.getByRole('tab', { name: '详细设置' }))
+    const tabList = await openConfigMenu(user)
+    const tabNames = getConfigPageMenuItems(tabList).map((tab) => tab.textContent)
+    expect(tabNames).toEqual(['有序', '无序'])
+  })
+
+  it('配置数据无法解析时走加载失败兜底', async () => {
+    vi.mocked(configApi.getBotConfigCached).mockResolvedValue(null as never)
+    render(<BotConfigPage />)
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith({
+        title: '加载失败',
+        description: '无法加载配置文件',
+        variant: 'destructive',
+      })
+    )
+    expect(await screen.findByRole('tab', { name: '详细设置' })).toBeInTheDocument()
+  })
+
+  it('分节值为 null 时按空对象展示', async () => {
+    const configWithNullPersonality = {
+      ...baseConfig(),
+      personality: null,
+    }
+    vi.mocked(configApi.getBotConfigCached).mockResolvedValue(configWithNullPersonality)
+    vi.mocked(configApi.getBotConfig).mockResolvedValue(configWithNullPersonality)
+    await renderBotPage()
+    const user = userEvent.setup()
+    await enterDetailMode(user)
+    expect(screen.getByTestId('form-personality-values')).toHaveTextContent('{}')
+  })
+
+  it('TOML 单行错误会翻译，非 Error 使用兜底文案', async () => {
+    const user = userEvent.setup()
+    await renderBotPage()
+    await selectMoreMode(user, '源文件编辑')
+    const editor = await screen.findByPlaceholderText('TOML 配置内容')
+    fireEvent.change(editor, { target: { value: 'title = "ok"' } })
+
+    const cases: Array<{ err: unknown; description: string | RegExp }> = [
+      { err: new Error('Unexpected token'), description: '意外的标记' },
+      { err: new Error('Invalid number'), description: '无效的数字' },
+      { err: new Error('Invalid date'), description: '无效的日期格式' },
+      { err: new Error('Invalid boolean'), description: '无效的布尔值（应为 true 或 false）' },
+      { err: new Error('Unexpected character'), description: '意外的字符' },
+      { err: new Error('unrecognized escape sequence'), description: '无法识别的转义序列' },
+      {
+        err: new Error('Unexpected end of input'),
+        description: '意外的文件结束（可能缺少闭合符号）',
+      },
+      {
+        err: new Error('Error: Invalid TOML document: unrecognized escape sequence'),
+        description:
+          'TOML 文档错误：无法识别的转义序列（提示：在双引号字符串中使用 \\\\ 转义反斜杠，或使用单引号字符串）',
+      },
+      {
+        err: new Error('Invalid TOML document: boom'),
+        description: 'TOML 文档错误：boom',
+      },
+      {
+        err: new Error('Unexpected character x at line 3, column 4'),
+        description: '第 3 行第 4 列：意外的字符',
+      },
+      {
+        err: new Error('Expected } at line 3, column 4'),
+        description: '第 3 行第 4 列：缺少必要的字符',
+      },
+      {
+        err: new Error('Invalid foo at line 3, column 4'),
+        description: '第 3 行第 4 列：无效的语法',
+      },
+      {
+        err: new Error('Unterminated string at line 2'),
+        description: '第 2 行：字符串未正常结束（缺少引号）',
+      },
+      {
+        err: new Error('Duplicate key x at line 5'),
+        description: '第 5 行：重复的键名',
+      },
+      {
+        err: new Error('Invalid escape sequence at line 1'),
+        description: '第 1 行：无效的转义序列（提示：在双引号字符串中使用 \\\\ 转义反斜杠）',
+      },
+      {
+        err: new Error('Expected string but got integer at line 2'),
+        description: '第 2 行：类型不匹配',
+      },
+      {
+        err: new Error('line 8, column 2'),
+        description: '第 8 行第 2 列',
+      },
+      { err: 'not-an-error', description: 'TOML 格式错误' },
+    ]
+
+    for (const { err, description } of cases) {
+      toastMock.mockClear()
+      tomlParseOverride = () => {
+        throw err
+      }
+      await user.click(await getSaveMenuItem(user))
+      await waitFor(() =>
+        expect(toastMock).toHaveBeenCalledWith({
+          variant: 'destructive',
+          title: 'TOML 格式错误',
+          description,
+        })
+      )
+    }
+    expect(configApi.updateBotConfigRaw).not.toHaveBeenCalled()
+  })
+
+  it('关闭文件模式提示后仍展示 TOML 错误面板', async () => {
+    localStorage.setItem('bot-config-file-mode-notice-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await selectMoreMode(user, '源文件编辑')
+    const editor = await screen.findByPlaceholderText('TOML 配置内容')
+    expect(screen.queryByText('文件模式：')).not.toBeInTheDocument()
+
+    fireEvent.change(editor, { target: { value: 'a =' } })
+    await user.click(await getSaveMenuItem(user))
+    expect(await screen.findByText('⚠️ TOML 格式错误：')).toBeInTheDocument()
+    expect(screen.queryByText('文件模式：')).not.toBeInTheDocument()
+  })
+
+  it('分区自动保存进行中时按钮显示自动保存中', async () => {
+    const deferred = createDeferred<Record<string, unknown>>()
+    vi.mocked(configApi.updateBotConfigSection).mockReturnValue(deferred.promise)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await enterDetailMode(user)
+
+    await user.click(screen.getByText('change-personality-personality'))
+    await getSaveMenuItem(user)
+    await waitFor(
+      () =>
+        expect(screen.getByRole('menuitem', { name: /手动保存/ })).toHaveAttribute(
+          'aria-disabled',
+          'true'
+        ),
+      {
+        timeout: 4000,
+      }
+    )
+
+    deferred.resolve({})
+    await getSaveMenuItem(user)
+  })
+
+  it('URL field 仅分节名时不切子页；定位失败也不会抛错', async () => {
+    routerSearchStr = '?field=personality'
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    vi.mocked(scrollToConfigSearchField).mockReturnValue(null)
+    await renderBotPage()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('form-personality')).toHaveAttribute('data-advanced', 'true')
+    )
+    await waitFor(() => expect(scrollToConfigSearchField).toHaveBeenCalledWith('personality'))
+  })
+
+  it('刷新后 schema 不再包含当前 tab 时回退到第一个可用 tab', async () => {
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await enterDetailMode(user)
+
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '机器人' }))
+    expect(await screen.findByTestId('form-bot')).toBeInTheDocument()
+
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+      schema: {
+        className: 'BotConfigRoot',
+        classDoc: '',
+        fields: [],
+        nested: {
+          personality: sectionSchema('PersonalitySection', '人格配置', {
+            uiLabel: '人格',
+            uiOrder: 1,
+          }),
+        },
+      },
+    } as never)
+
+    await user.click(screen.getByRole('button', { name: '刷新' }))
+    expect(await screen.findByTestId('form-personality')).toBeInTheDocument()
+    expect(screen.queryByTestId('form-bot')).not.toBeInTheDocument()
+  })
+
+  it('子页与分组表单会写入嵌套路径，空 fieldPath 被忽略', async () => {
+    const config = {
+      ...baseConfig(),
+      chat: { enabled: true, reply_style: { style: 'a' } },
+    }
+    vi.mocked(configApi.getBotConfigCached).mockResolvedValue(config)
+    vi.mocked(configApi.getBotConfig).mockResolvedValue(config)
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue(chatSubtabSchema() as never)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await enterDetailMode(user, 'form-ChatSectionRoot')
+
+    const subtabList = document.querySelector('[data-config-bot-subtab-list="true"]') as HTMLElement
+    await user.click(within(subtabList).getByRole('tab', { name: '时机子页' }))
+    expect(await screen.findByTestId('form-ReplyTiming-values')).toHaveTextContent('{}')
+    await user.click(screen.getByText('change-root-ReplyTiming'))
+    expect(screen.getByTestId('form-ReplyTiming-values')).toHaveTextContent('root-新值')
+    await user.click(screen.getByText('change-deep-root-ReplyTiming'))
+    expect(screen.getByTestId('form-ReplyTiming-values')).toHaveTextContent('deep-新值')
+
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
+    await user.click(within(subtabList).getByRole('tab', { name: '内部组' }))
+    const groupForm = await screen.findByTestId('form-chat_inner.chat_leaf-values')
+    const beforeEmpty = groupForm.textContent
+    await user.click(screen.getByText('change-empty-chat_inner.chat_leaf'))
+    expect(screen.getByTestId('form-chat_inner.chat_leaf-values').textContent).toBe(beforeEmpty)
+
+    await user.click(screen.getByText('change-chat_inner.chat_leaf-chat_inner'))
+    expect(screen.getByTestId('form-chat_inner.chat_leaf-values')).toHaveTextContent(
+      'chat_inner-新值'
+    )
+  })
+
+  it('子页标签回退到字段名；nested 缺失时仍渲染根子页', async () => {
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+      schema: {
+        className: 'BotConfigRoot',
+        classDoc: '',
+        fields: [],
+        nested: {
+          chat: {
+            className: 'ChatSection',
+            classDoc: '',
+            fields: [
+              field('enabled', 'boolean'),
+              field('mystery', 'object'),
+              field('notes', 'string'),
+            ],
+            nested: {
+              mystery: {
+                className: 'Mystery',
+                classDoc: '',
+                fields: [],
+                nested: {},
+              },
+              notes: {
+                className: 'Notes',
+                classDoc: '备注',
+                fields: [],
+                nested: {},
+              },
+            },
+            uiLabel: '聊天',
+            uiOrder: 1,
+            uiUseSubTabs: true,
+          },
+          chat_inner: sectionSchema('ChatInner', '', {
+            uiParent: 'chat',
+            uiAdvanced: true,
+          }),
+          chat_leaf: sectionSchema('ChatLeaf', '', { uiParent: 'chat_inner' }),
+          bare: {
+            className: 'Bare',
+            classDoc: '裸',
+            fields: [field('enabled', 'boolean')],
+            nested: undefined,
+            uiLabel: '裸配置',
+            uiOrder: 2,
+            uiUseSubTabs: true,
+          },
+        },
+      },
+    } as never)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await enterDetailMode(user, 'form-ChatSectionRoot')
+
+    const subtabList = document.querySelector('[data-config-bot-subtab-list="true"]') as HTMLElement
+    expect(within(subtabList).getByRole('tab', { name: 'mystery' })).toBeInTheDocument()
+    expect(within(subtabList).queryByRole('tab', { name: '备注' })).not.toBeInTheDocument()
+
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
+    await user.click(within(subtabList).getByRole('tab', { name: 'chat_inner' }))
+    expect(await screen.findByTestId('form-chat_inner.chat_leaf-sections')).toHaveTextContent(
+      'chat_inner,chat_leaf'
+    )
+
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '裸配置' }))
+    expect(await screen.findByTestId('form-BareRoot')).toBeInTheDocument()
+  })
+
+  it('子页全部为高级时收起回退到第一个子页 id', async () => {
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+      schema: {
+        className: 'BotConfigRoot',
+        classDoc: '',
+        fields: [],
+        nested: {
+          secret_host: {
+            className: 'SecretHost',
+            classDoc: '',
+            fields: [field('secret', 'object')],
+            nested: {
+              secret: {
+                className: 'Secret',
+                classDoc: '机密页',
+                fields: [],
+                nested: {},
+                uiAdvanced: true,
+              },
+            },
+            uiLabel: '机密',
+            uiUseSubTabs: true,
+          },
+        },
+      },
+    } as never)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await user.click(screen.getByRole('tab', { name: '详细设置' }))
+
+    const subtabList = await waitFor(() => {
+      const node = document.querySelector(
+        '[data-config-bot-subtab-list="true"]'
+      ) as HTMLElement | null
+      if (!node) throw new Error('missing subtab list')
+      return node
+    })
+    expect(within(subtabList).queryByRole('tab', { name: '机密页' })).not.toBeInTheDocument()
+    await user.click(within(subtabList).getByRole('button', { name: '展开更多设置栏目' }))
+    expect(within(subtabList).getByRole('tab', { name: '机密页' })).toBeInTheDocument()
+    expect(await screen.findByTestId('form-Secret')).toBeInTheDocument()
+
+    await user.click(within(subtabList).getByRole('button', { name: '收起设置栏目' }))
+    expect(within(subtabList).queryByRole('tab', { name: '机密页' })).not.toBeInTheDocument()
+  })
+
+  it('全部为高级栏目时关闭菜单保持唯一页面', async () => {
+    vi.mocked(configApi.getBotConfigSchema).mockResolvedValue({
+      schema: {
+        className: 'BotConfigRoot',
+        classDoc: '',
+        fields: [],
+        nested: {
+          experimental: sectionSchema('ExperimentalSection', '实验性配置', {
+            uiLabel: '实验性',
+            uiOrder: 1,
+            uiAdvanced: true,
+          }),
+        },
+      },
+    } as never)
+    localStorage.setItem('bot-config-tabs-guide-dismissed', 'true')
+    localStorage.setItem('bot-config-experimental-features-notice-dismissed', 'true')
+    const user = userEvent.setup()
+    await renderBotPage()
+    await user.click(screen.getByRole('tab', { name: '详细设置' }))
+
+    const tabList = await openConfigMenu(user)
+    await user.click(within(tabList).getByRole('menuitem', { name: '实验性' }))
+    expect(await screen.findByTestId('form-experimental')).toBeInTheDocument()
+
+    await openConfigMenu(user)
+    await user.keyboard('{Escape}')
+    expect(screen.getByTestId('form-experimental')).toBeInTheDocument()
+  })
+})

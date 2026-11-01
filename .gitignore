@@ -139,6 +139,14 @@ prompt.txt
 
 # Runtime/diagnostic output and native replacement backups
 /temp/
+
+# Local runtime/downloaded dependencies and generated dashboard artifacts.
+/depends-data/*
+!/depends-data/char_frequency.json
+/dashboard/node_modules/
+/dashboard/dist/
+/plugins/data/
+/docs/maibot-wechat-acceptance/
 /weflow-core/.weflow-data/
 *.bak-expiry*
 *.dll.backup-*
@@ -180,3 +188,13 @@ prompt.txt
 
 # Local task tracking
 /TODO.md
+
+# Local QQ runtime, authentication and access policy
+/depends-data/napcat/
+/plugins/MaiBot-SnowLuma-Adapter/config.toml
+/config/adapter_policy.toml
+/config/gsmps_management.json
+/config/gsmps_management.json.*
+/config/gsmps_model_import_pending.json
+/config/gsmps_model_import_pending.tmp
+/dashboard/node_modules/

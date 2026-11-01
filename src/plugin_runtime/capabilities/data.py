@@ -839,7 +839,9 @@ class RuntimeDataCapabilityMixin:
             return {"success": False, "error": "缺少必要参数 chat_id"}
 
         try:
-            value = self._get_frequency_adjust_value(chat_id) * ChatConfigUtils.get_talk_value(chat_id)
+            from src.platform_io.chat_features import session_override
+            value = 0.0 if any(session_override(chat_id,feature) is False for feature in ('llm_enabled','plugins_enabled')) else (
+                self._get_frequency_adjust_value(chat_id) * ChatConfigUtils.get_talk_value(chat_id))
             return {"success": True, "value": value}
         except Exception as e:
             logger.error(f"[cap.frequency.get_current_talk_value] 执行失败: {e}", exc_info=True)
@@ -1406,12 +1408,14 @@ class RuntimeDataCapabilityMixin:
                 respect_filter=respect_filter,
                 user_id=user_id,
                 group_id=group_id,
+                include_shared=args.get('include_shared', True) is True,
             )
             if not result.success:
                 return {"success": False, "error": result.error or "长期记忆检索失败"}
             knowledge_info = result.to_text(limit=limit_value)
             content = f"你知道这些知识: {knowledge_info}" if knowledge_info else f"你不太了解有关{query}的知识"
-            return {"success": True, "content": content}
+            return {"success": True, "content": content,
+                    "search_scope": {"chat_id": chat_id, "include_shared": args.get('include_shared', True) is True}}
         except Exception as e:
             logger.error(f"[cap.knowledge.search] 执行失败: {e}", exc_info=True)
             return {"success": False, "error": str(e)}

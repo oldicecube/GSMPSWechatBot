@@ -123,7 +123,8 @@ async def websocket_logs(websocket: WebSocket, token: Optional[str] = Query(None
 
     示例：ws://host/ws/logs?token=xxx
     """
-    is_authenticated = False
+    from src.webui.middleware.network_access import auth_enabled
+    is_authenticated = not auth_enabled()
 
     # 方式 1: 尝试验证临时 WebSocket token（推荐方式）
     if token and verify_ws_token(token):

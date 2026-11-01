@@ -1,5 +1,30 @@
 from datetime import datetime, date
 
+
+def binding_required(context):
+    from utils.account_identity import actor, bound_user
+    return None if bound_user(actor(context)) else '积分系统仅对已绑定游戏账号的玩家开放，请先 /bind <游戏玩家名>'
+
+
+def claim_sign(wxid, amount):
+    """One daily reward across linked platforms, including concurrent requests."""
+    from contextlib import closing
+    from utils.account_identity import bound_user
+    from utils import sqlite_store as store
+    key = bound_user(wxid)
+    if not key:
+        return False, 0.0
+    now = datetime.now().isoformat()
+    with store._LOCK, closing(store._connect()) as conn, conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT points,last_sign_at FROM user_points WHERE wxid=?', (key,)).fetchone()
+        if row and row[1] and str(row[1])[:10] == now[:10]:
+            return False, float(row[0])
+        conn.execute('INSERT INTO user_points(wxid,points,created_at,updated_at,last_sign_at) VALUES(?,?,?,?,?) '
+                     'ON CONFLICT(wxid) DO UPDATE SET points=points+excluded.points,updated_at=excluded.updated_at,last_sign_at=excluded.last_sign_at',
+                     (key, float(amount), now, now, now))
+        return True, float(conn.execute('SELECT points FROM user_points WHERE wxid=?', (key,)).fetchone()[0])
+
 from utils.sqlite_store import (
     user_points_get, user_points_add, user_points_set,
     user_points_set_sign, user_points_get_sign_date, user_points_try_spend,

@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "id": "github.cateye.mai-forward",
+  "version": "0.1.3",
+  "name": "麦麦转发",
+  "description": "消息打包转发/复读/收藏分享：内容从 NapCat/宿主数据库原样读取（不从 LLM 文本构造）；提供 forward_messages（转发到其他聊天，群聊注入 [转发工具] 标注记录、私聊只真发不入库）、repeat_message（复读）、pack_chat_messages（把感兴趣的消息打包到本地，返回 pack_id）、list_message_packs（列包+概括）、share_message_pack（把打包内容以合并转发分享到当前聊天，受名单限制，支持分享后销毁/最大分享次数）。",
+  "author": { "name": "cateye", "url": "https://github.com/cateyemizuki" },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/cateyemizuki/cateye_mai_forward",
+    "homepage": "https://github.com/cateyemizuki/cateye_mai_forward",
+    "documentation": "https://github.com/cateyemizuki/cateye_mai_forward/blob/main/README.md",
+    "issues": "https://github.com/cateyemizuki/cateye_mai_forward/issues"
+  },
+  "host_application": { "min_version": "1.0.0", "max_version": "1.99.99" },
+  "sdk": { "min_version": "2.5.0", "max_version": "2.99.99" },
+  "dependencies": [],
+  "capabilities": [
+    "send.text",
+    "send.emoji",
+    "send.hybrid",
+    "send.forward",
+    "message.get_by_id",
+    "chat.get_all_streams",
+    "chat.get_stream_by_group_id",
+    "chat.get_stream_by_user_id",
+    "chat.open_session",
+    "api.call"
+  ],
+  "i18n": { "default_locale": "zh-CN" },
+  "plugin_type": "tool",
+  "display": {
+    "icon": { "type": "lucide", "value": "forward", "fallback": "mai-forward" }
+  }
+}

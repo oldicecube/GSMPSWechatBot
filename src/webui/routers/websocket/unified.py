@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from src.common.logger import get_logger
 from src.webui.core import get_token_manager
+from src.webui.middleware.network_access import auth_enabled
 from src.webui.logs_ws import load_recent_logs
 from src.webui.routers.chat.service import (
     chat_manager,
@@ -80,6 +81,8 @@ async def authenticate_websocket_connection(websocket: WebSocket, token: Optiona
     Returns:
         bool: 认证通过时返回 ``True``。
     """
+    if not auth_enabled():
+        return True
     if token and verify_ws_token(token):
         logger.debug("统一 WebSocket 使用临时 token 认证成功")
         return True

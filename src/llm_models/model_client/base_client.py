@@ -677,6 +677,8 @@ class ClientRegistry:
         Returns:
             BaseClient: 注册的 API 客户端实例。
         """
+        if not api_provider.enabled:
+            raise ValueError(f'API provider {api_provider.name} is disabled')
         from . import ensure_client_type_loaded
 
         ensure_client_type_loaded(api_provider.client_type)
@@ -713,6 +715,8 @@ class ClientRegistry:
 
     async def get_client_class_instance_async(self, api_provider: APIProvider) -> BaseClient:
         """异步获取客户端：重初始化在线程中执行，缓存仍按调用方事件循环隔离。"""
+        if not api_provider.enabled:
+            raise ValueError(f'API provider {api_provider.name} is disabled')
         from . import ensure_client_type_loaded
 
         loop = asyncio.get_running_loop()

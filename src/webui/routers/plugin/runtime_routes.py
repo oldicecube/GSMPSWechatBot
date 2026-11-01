@@ -40,6 +40,7 @@ def _serialize_component_entry(component: ComponentEntry) -> Dict[str, Any]:
         description = component.description
 
     data: Dict[str, Any] = {
+        "source": "maibot",
         "name": component.name,
         "description": description,
         "enabled": component.enabled,
@@ -164,6 +165,9 @@ def list_plugin_components(plugin_id: str, maibot_session: Optional[str] = Cooki
     """返回指定插件当前注册的全部组件。"""
 
     require_plugin_token(maibot_session)
+    from core.maibot_shell_registry import find, commands
+    if find(plugin_id):
+        return {'success': True, 'components': commands(plugin_id)}
     _ensure_installed_plugin(plugin_id)
 
     components = []
@@ -181,18 +185,9 @@ def list_runtime_commands(maibot_session: Optional[str] = Cookie(None)) -> Dict[
     """返回当前注册的命令及其插件归属，供统一权限管理页面使用。"""
 
     require_plugin_token(maibot_session)
-    commands: List[Dict[str, Any]] = [
-        {
-            "id": "core.clear",
-            "name": "clear",
-            "description": "清空当前聊天的 Maisaka 历史上下文",
-            "plugin_name": "MaiBot 核心",
-            "pattern": "^/clear$",
-            "aliases": [],
-            "permission": "operator",
-            "enabled": True,
-        }
-    ]
+    from core.maibot_shell_registry import commands as shell_commands
+    from src.webui.services.gsmps_management import RETIRED_COMMANDS
+    commands: List[Dict[str, Any]] = shell_commands()
     for supervisor in component_query_service._iter_supervisors():
         for component in supervisor.component_registry.get_components_by_type(
             ComponentTypes.COMMAND.value,
@@ -202,7 +197,8 @@ def list_runtime_commands(maibot_session: Optional[str] = Cookie(None)) -> Dict[
                 continue
             command = _serialize_component_entry(component)
             command["id"] = f"{component.plugin_id}.{component.name}"
-            commands.append(command)
+            if command['id'] not in RETIRED_COMMANDS:
+                commands.append(command)
 
     commands.sort(key=lambda command: (str(command["plugin_name"]), str(command["name"])))
     return {"success": True, "commands": commands}

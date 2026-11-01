@@ -40,6 +40,7 @@ from .official_configs import (
     ExperimentalConfig,
     ExpressionConfig,
     JargonConfig,
+    LearningConfig,
     KeywordReactionConfig,
     LogConfig,
     MaimMessageConfig,
@@ -124,6 +125,8 @@ class Config(ConfigBase):
 
     jargon: JargonConfig = Field(default_factory=JargonConfig)
     """黑话配置类"""
+
+    learning: LearningConfig = Field(default_factory=LearningConfig)
 
     a_memorix: AMemorixConfig = Field(default_factory=AMemorixConfig)
     """A_Memorix 长期记忆子系统配置"""

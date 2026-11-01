@@ -1,0 +1,390 @@
+"""事件路由协调器。"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol
+
+import asyncio
+
+from ..config import QQPluginSettings
+from ..profile import PROFILE_BY_TYPE, probe_client_profile
+from ..types import QQPayloadDict
+from .bundle import QQRuntimeBundle
+
+
+class _GatewayCapabilityProtocol(Protocol):
+    """插件网关能力协议。"""
+
+    async def route_message(
+        self,
+        gateway_name: str,
+        message: Dict[str, Any],
+        *,
+        route_metadata: Optional[Dict[str, Any]] = None,
+        external_message_id: str = "",
+        dedupe_key: str = "",
+    ) -> bool:
+        """向 Host 注入一条消息。"""
+        ...
+
+
+class QQEventRouter:
+    """协调 运行时组件处理各类平台事件。"""
+
+    def __init__(
+        self,
+        gateway_capability: _GatewayCapabilityProtocol,
+        logger: Any,
+        gateway_name: str,
+        load_settings: Callable[[], QQPluginSettings],
+    ) -> None:
+        """初始化事件路由器。
+
+        Args:
+            gateway_capability: SDK 提供的消息网关能力对象。
+            logger: 插件日志对象。
+            gateway_name: 当前消息网关名称。
+            load_settings: 返回当前生效插件配置的回调。
+        """
+        self._gateway_capability = gateway_capability
+        self._logger = logger
+        self._gateway_name = gateway_name
+        self._load_settings = load_settings
+        self._runtime: Optional[QQRuntimeBundle] = None
+
+    def bind_runtime(self, runtime: QQRuntimeBundle) -> None:
+        """绑定当前路由器使用的运行时依赖。
+
+        Args:
+            runtime: 已初始化的运行时组件集合。
+        """
+        self._runtime = runtime
+
+    def reset_caches(self) -> None:
+        """重置与路由相关的短期缓存。"""
+        runtime = self._runtime
+        if runtime is None:
+            return
+        runtime.official_bot_guard.clear_cache()
+        runtime.notice_codec.clear_cache()
+        runtime.inbound_codec.clear_cache()
+
+    async def handle_transport_payload(self, payload: QQPayloadDict) -> None:
+        """处理来自传输层的非 echo 载荷。
+
+        Args:
+            payload: 对端推送的原始事件数据。
+        """
+        post_type = str(payload.get("post_type") or "").strip()
+        if post_type == "message":
+            await self.handle_inbound_message(payload)
+            return
+        if post_type == "notice":
+            await self.handle_notice_event(payload)
+            return
+        if post_type == "meta_event":
+            await self.handle_meta_event(payload)
+            return
+        # SnowLuma 部分版本的推送可能缺失 post_type 但携带 message 字段；按消息路由兼容。
+        runtime = self._runtime
+        if (
+            runtime is not None
+            and runtime.profile.client_type == "snowluma"
+            and "message" in payload
+            and post_type != "request"
+        ):
+            await self.handle_inbound_message(payload)
+
+    async def handle_inbound_message(self, payload: QQPayloadDict) -> None:
+        """处理单条 入站消息并注入 Host。
+
+        Args:
+            payload: NapCat / OneBot 推送的原始消息事件。
+        """
+        runtime = self._require_runtime()
+        settings = self._load_settings()
+
+        self_id = str(payload.get("self_id") or "").strip()
+        # 普通消息只声明自身归属；连接身份由初始化/生命周期上报，不由消息改写。
+        known_account = str(runtime.runtime_state.account_id or '').strip()
+        if not self_id or not known_account or self_id != known_account:
+            self._logger.warning('QQ消息账号与已登录连接不一致或连接身份尚未就绪，已丢弃')
+            return
+
+        sender = payload.get("sender", {})
+        if not isinstance(sender, Mapping):
+            sender = {}
+
+        sender_user_id = str(payload.get("user_id") or sender.get("user_id") or "").strip()
+        if not sender_user_id:
+            return
+
+        # 在成员查询和消息解析前拦截，群聊、私聊共用发送者黑名单。
+        if sender_user_id in settings.filters.ban_user_id:
+            self._logger.debug(f"用户 {sender_user_id} 在黑名单中，消息已丢弃")
+            return
+
+        group_id = str(payload.get("group_id") or "").strip()
+        if self_id and sender_user_id == self_id and settings.debug.ignore_self_message:
+            return
+        if await runtime.official_bot_guard.should_reject(
+            sender_user_id=sender_user_id,
+            group_id=group_id,
+            ban_qq_bot=settings.filters.ban_qq_bot,
+            payload=payload,
+            sender=sender,
+        ):
+            return
+
+        try:
+            message_dict = await runtime.inbound_codec.build_message_dict(payload, self_id, sender_user_id, sender)
+        except ValueError as exc:
+            self._logger.warning(f"入站消息格式不受支持，已丢弃: {exc}")
+            return
+
+        plain_text = str(message_dict.get("processed_plain_text") or "").strip()
+        if not runtime.regex_filter.is_message_allowed(plain_text, settings.filters):
+            return
+
+        message_dict["account_id"] = self_id
+        message_dict["scope"] = settings.client.connection_id or None
+        external_message_id = str(payload.get("message_id") or "").strip()
+        accepted = await self._gateway_capability.route_message(
+            gateway_name=self._gateway_name,
+            message=message_dict,
+            external_message_id=external_message_id,
+            dedupe_key=external_message_id,
+        )
+        if not accepted:
+            self._logger.debug(f"Host 丢弃了 入站消息: {external_message_id or '无消息 ID'}")
+
+    async def handle_notice_event(self, payload: QQPayloadDict) -> None:
+        """处理 对端 ``notice`` 事件并注入 Host。
+
+        Args:
+            payload: 对端推送的通知事件。
+        """
+        runtime = self._require_runtime()
+        settings = self._load_settings()
+
+        self_id = str(payload.get("self_id") or "").strip()
+
+        if not self_id or self_id != str(runtime.runtime_state.account_id or ''):
+            self._logger.warning('忽略来源账号与当前QQ连接不一致的通知')
+            return
+        await runtime.ban_tracker.record_notice(payload)
+        await self.route_notice_payload(payload, self_id, settings.client.connection_id)
+
+    async def route_notice_payload(
+        self,
+        payload: QQPayloadDict,
+        self_id: str,
+        connection_id: str,
+    ) -> None:
+        """将单条通知载荷转换并注入 Host。
+
+        Args:
+            payload: OneBot 通知载荷。
+            self_id: 当前机器人账号 ID。
+            connection_id: 当前连接标识。
+        """
+        runtime = self._require_runtime()
+        settings = self._load_settings()
+
+        if (not self_id or self_id != str(runtime.runtime_state.account_id or '')
+                or str(connection_id or '') != str(runtime.runtime_state.scope or '')
+                or str(payload.get('self_id') or '') != self_id):
+            self._logger.warning('忽略来源账号或连接不一致的QQ通知')
+            return
+        notice_type = str(payload.get("notice_type") or "").strip()
+        sub_type = str(payload.get("sub_type") or "").strip()
+        if not runtime.notice_filter.is_notice_event_allowed(notice_type, sub_type, settings.notice):
+            self._logger.debug(
+                f"通知事件未启用，已丢弃: {notice_type}.{sub_type or '<空>'}"
+            )
+            return
+
+        message_dict = await runtime.notice_codec.build_notice_message_dict(payload)
+        if message_dict is None:
+            return
+
+        message_dict["account_id"] = self_id
+        message_dict["scope"] = connection_id or None
+        external_message_id = str(payload.get("message_id") or "").strip()
+        dedupe_key = runtime.notice_codec.build_notice_dedupe_key(payload) or ""
+        accepted = await self._gateway_capability.route_message(
+            gateway_name=self._gateway_name,
+            message=message_dict,
+            external_message_id=external_message_id,
+            dedupe_key=dedupe_key,
+        )
+        if not accepted:
+            self._logger.debug(f"Host 丢弃了 通知事件: {external_message_id or dedupe_key or '无消息 ID'}")
+
+    async def emit_natural_lift_notice(self, payload: QQPayloadDict) -> None:
+        """注入一条由适配器合成的自然解除禁言通知。
+
+        Args:
+            payload: 合成后的 OneBot 通知载荷。
+        """
+        runtime = self._require_runtime()
+        account_id = runtime.runtime_state.account_id
+        if not account_id:
+            raise RuntimeError("自然解除禁言通知缺少已就绪连接的账号归属")
+
+        # 定时器生成的通知没有对端 self_id；以当前连接身份构造通知，供解析和路由共同使用。
+        notice_payload = dict(payload)
+        notice_payload["self_id"] = account_id
+        await self.route_notice_payload(notice_payload, account_id, runtime.runtime_state.scope or "")
+
+    async def handle_meta_event(self, payload: QQPayloadDict) -> None:
+        """处理 对端 ``meta_event`` 事件。
+
+        Args:
+            payload: 对端推送的元事件。
+        """
+        runtime = self._require_runtime()
+        settings = self._load_settings()
+
+        meta_event_type = str(payload.get("meta_event_type") or "").strip()
+        self_id = str(payload.get("self_id") or "").strip()
+        should_report_connected = False
+        if meta_event_type == "lifecycle":
+            should_report_connected = str(payload.get("sub_type") or "").strip() == "connect"
+        elif meta_event_type == "heartbeat":
+            status = payload.get("status", {})
+            if not isinstance(status, Mapping):
+                status = {}
+            should_report_connected = bool(status.get("online", False)) and bool(status.get("good", False))
+
+        if self_id and should_report_connected:
+            await runtime.runtime_state.report_connected(self_id, settings.client)
+        elif meta_event_type == "heartbeat" and not should_report_connected:
+            await runtime.runtime_state.report_disconnected()
+
+        await runtime.heartbeat_monitor.observe_meta_event(payload, settings.client.heartbeat_interval)
+        await runtime.notice_codec.handle_meta_event(payload)
+
+    async def bootstrap_adapter_runtime_state(self) -> None:
+        """在连接建立后探测对端类型、获取账号信息并激活消息网关路由。"""
+        runtime = self._require_runtime()
+        settings = self._load_settings()
+
+        # 连接建立后先探测对端客户端类型：auto 模式判定画像，显式声明做一致性校验。
+        try:
+            detected_type, app_name, app_version = await probe_client_profile(
+                runtime.action_service.call_action_data,
+                self._logger,
+            )
+        except Exception as exc:
+            self._logger.error(f"客户端类型探测失败，消息网关保持未就绪: {exc}")
+            return
+
+        declared_type = settings.client.client_type
+        if declared_type != "auto" and declared_type != detected_type:
+            # 按配置声明继续运行，不静默改判；提醒用户配置与对端不一致。
+            self._logger.warning(
+                f"配置声明 client_type={declared_type}，但对端 app_name='{app_name}' 判定为 {detected_type}；"
+                "将按配置声明的画像运行，如需跟随对端请改为 auto"
+            )
+        else:
+            runtime.profile_state.update(PROFILE_BY_TYPE[detected_type])
+        effective_profile = runtime.profile
+        self._logger.info(
+            f"客户端画像已生效: client_type={effective_profile.client_type} "
+            f"app_name={app_name or '<空>'} app_version={app_version or '<空>'}"
+        )
+
+        max_attempts = 3
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                login_info = await runtime.query_service.get_login_info()
+                self_id = self._extract_self_id_from_login_response(login_info)
+                await runtime.runtime_state.report_connected(self_id, settings.client)
+                await self._warm_bot_group_identities(runtime, settings, self_id)
+                await runtime.heartbeat_monitor.start(self_id, settings.client.heartbeat_interval)
+                await runtime.ban_tracker.start()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                self._logger.warning(f"消息网关获取登录信息失败，第 {attempt}/{max_attempts} 次重试: {exc}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(1.0)
+
+        if last_error is not None:
+            self._logger.error(f"消息网关未能完成路由激活，连接将保持只接收状态: {last_error}")
+
+    async def _warm_bot_group_identities(self, runtime, settings, self_id: str) -> None:
+        """Resolve the bot's current group cards before the first LLM turn."""
+        groups = set(str(x).strip() for x in (settings.mute.allowed_groups or []) if str(x).strip())
+        if not groups:
+            return
+        from src.platform_io.bot_identity import remember
+        for group_id in sorted(groups):
+            try:
+                member = await runtime.query_service.get_group_member_info(group_id, self_id, no_cache=True)
+                if isinstance(member, dict):
+                    remember(platform='qq', account_id=self_id, scope=str(settings.client.connection_id or ''),
+                             group_id=group_id, nickname=str(member.get('nickname') or ''),
+                             cardname=str(member.get('card') or ''))
+            except Exception as exc:
+                self._logger.debug(f"预热 QQ bot 群名片失败: group_id={group_id} err={exc}")
+
+    async def handle_transport_disconnected(self) -> None:
+        """处理传输层断开事件。"""
+        runtime = self._require_runtime()
+        await runtime.heartbeat_monitor.stop()
+        await runtime.ban_tracker.stop()
+        self.reset_caches()
+        await runtime.runtime_state.report_disconnected()
+
+    async def handle_heartbeat_timeout(self, self_id: str) -> None:
+        """处理 对端心跳长时间未更新的情况。
+
+        Args:
+            self_id: 当前机器人账号 ID。
+        """
+        runtime = self._require_runtime()
+        if self_id:
+            self._logger.warning(f"Bot {self_id} 心跳超时，暂时将消息网关标记为未就绪")
+        else:
+            self._logger.warning("对端心跳超时，暂时将消息网关标记为未就绪")
+        await runtime.runtime_state.report_disconnected()
+
+    def _require_runtime(self) -> QQRuntimeBundle:
+        """返回当前已绑定的运行时依赖。
+
+        Returns:
+            QQRuntimeBundle: 已初始化的运行时依赖。
+
+        Raises:
+            RuntimeError: 当运行时尚未绑定时抛出。
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("适配器运行时尚未初始化")
+        return runtime
+
+    @staticmethod
+    def _extract_self_id_from_login_response(response: Optional[Dict[str, Any]]) -> str:
+        """从 ``get_login_info`` 查询结果中提取当前账号 ID。
+
+        Args:
+            response: 对端返回的登录信息字典。
+
+        Returns:
+            str: 规范化后的账号 ID 字符串。
+
+        Raises:
+            ValueError: 当响应中缺少有效账号 ID 时抛出。
+        """
+        if not isinstance(response, Mapping):
+            raise ValueError("get_login_info 响应缺少 data 字段")
+
+        self_id = str(response.get("user_id") or "").strip()
+        if not self_id:
+            raise ValueError("get_login_info 响应缺少有效的 user_id")
+        return self_id

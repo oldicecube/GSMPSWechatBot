@@ -3,6 +3,10 @@
 校园幽默段子生成器；部署专用风格提示词仅保存在本地。
 """
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 from llm.config import get_llm_config
 from llm.core.response_parser import (
     BALANCE_ERROR_MESSAGE,
@@ -83,8 +87,7 @@ def handle(content: str, context: dict) -> str | None:
         return "❌ LLM 功能未启用，无法使用 校园段子生成器"
 
     try:
-        from llm.core.maibot_service import MaibotLLMService
-        provider = MaibotLLMService()
+        from llm.core.native_model_bridge import shell_generate
     except Exception as e:
         return f"❌ MaiBot LLM 客户端初始化失败：{e}"
 
@@ -94,7 +97,7 @@ def handle(content: str, context: dict) -> str | None:
     ]
 
     try:
-        response_text = str(provider._provider_call(messages, task_name="utils").content or "")
+        response_text = str(shell_generate(messages, task_name="utils").content or "")
     except Exception as e:
         if is_insufficient_balance_error(e):
             return BALANCE_ERROR_MESSAGE

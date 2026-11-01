@@ -51,7 +51,11 @@ def _normalize_limit(raw_limit: Any) -> int:
 
 
 def _extract_profile_text(payload: Dict[str, Any]) -> str:
-    return str(payload.get("profile_text") or payload.get("summary") or "").strip()
+    parts = [str(payload.get("profile_text") or payload.get("summary") or "").strip()]
+    for linked in payload.get('linked_profiles') or []:
+        if linked.get('profile_text'):
+            parts.append('[同一人的关联账号 '+str(linked.get('platform'))+':'+str(linked.get('user_id'))+'；非本群即时对话]\n'+linked['profile_text'])
+    return '\n\n'.join(x for x in parts if x)
 
 
 def _extract_traits(profile_text: str) -> list[str]:
@@ -74,7 +78,7 @@ def _build_structured_content(
 ) -> Dict[str, Any]:
     profile_text = _extract_profile_text(payload)
     return {
-        "success": bool(payload.get("success")),
+        "success": bool(payload.get("success") or payload.get('linked_profiles')),
         "summary": profile_text,
         "traits": _extract_traits(profile_text),
         "person_id": str(payload.get("person_id") or requested_person_id or "").strip(),
@@ -82,6 +86,8 @@ def _build_structured_content(
         "profile_source": str(payload.get("profile_source") or "").strip(),
         "has_manual_override": bool(payload.get("has_manual_override", False)),
         "from_cache": bool(payload.get("from_cache", False)),
+        "linked_profiles": payload.get('linked_profiles') or [],
+        "same_person_across_platforms": bool(payload.get('same_person_across_platforms')),
         "limit": limit,
     }
 
@@ -134,7 +140,7 @@ async def handle_tool(
         requested_person_name=person_name,
         limit=limit,
     )
-    if not bool(payload.get("success")):
+    if not bool(payload.get("success")) and not payload.get('linked_profiles'):
         error_message = str(payload.get("error") or "未找到人物画像。").strip()
         return tool_ctx.build_failure_result(
             invocation.tool_name,

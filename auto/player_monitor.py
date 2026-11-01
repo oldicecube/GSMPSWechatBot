@@ -1,3 +1,12 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1,
+ 'fields': {'poll_interval_seconds': {'type': 'int',
+                                      'default': 10,
+                                      'min': 5,
+                                      'max': 600,
+                                      'label': '在线玩家轮询间隔（秒）'}}}
+
 import os
 import threading
 import time
@@ -107,6 +116,10 @@ def start(sender):
         empty_cooldown = False  # 空列表冷却标记：防止因拉取失败/假人移除导致的误判
 
         while True:
+            from core.maibot_shell_registry import allowed
+            if not allowed('gsmps.automation.player_monitor'):
+                time.sleep(5)
+                continue
             tick += 1
 
             try:
@@ -286,7 +299,8 @@ def start(sender):
             except Exception as e:
                 print("[MC ERROR] loop exception:", e)
 
-            time.sleep(10)
+            from core.shell_plugin_config import settings
+            time.sleep(settings('gsmps.automation.player_monitor')['poll_interval_seconds'])
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()

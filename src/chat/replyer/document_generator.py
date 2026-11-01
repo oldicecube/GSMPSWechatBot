@@ -42,8 +42,10 @@ class DocumentReplyGenerator(MaisakaReplyGenerator):
             "maisaka_replyer_document", identity=self._build_personality_prompt(),
             reply_style=self._select_reply_style(), expression_habits=expression_habits,
         )
-        return [
+        items = [
             ContextItemBuilder().set_role(RoleType.System).add_text_content(system_prompt).build(),
             ContextItemBuilder().set_role(RoleType.User).add_text_content(reference).build(),
-            ContextItemBuilder().set_role(RoleType.User).add_text_content(reply_requirements).build(),
         ]
+        if reply_requirements.strip():
+            items.append(ContextItemBuilder().set_role(RoleType.User).add_text_content(reply_requirements).build())
+        return items

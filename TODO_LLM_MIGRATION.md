@@ -32,6 +32,12 @@
 
 ## External blockers
 
+- [x] Audit the 16 legacy Agent Tools against actual native providers and plugin registrations; see `docs/maibot-agent-tools-migration-20261029.md` for missing, partial and configuration-dependent capabilities.
+- [x] Port `manage_scheduled_reminder` into the independent `wechatbot.scheduled-reminder` SDK plugin with trusted requester scope, durable storage and native proactive dispatch. Isolated acceptance passed; production activation awaits the user's manual restart.
+- [x] Expose `minecraft_rcon_action` as the independent `wechatbot.restricted-rcon` SDK Tool, retaining existing whitelist/configuration and Host-only credentials with single-use request grants.
+- [x] Add `wechatbot.restricted-python` with an allowlisted AST interpreter and Windows child-process resource limits; install and WeChat-adapt upstream `github.erhan111119.mai-repost-shit` without enabling its configuration. See `docs/maibot-agent-tools-install-20261029.md`.
+- [ ] Migrate the remaining legacy tool gaps explicitly identified in that audit; preserving legacy source and shell commands alone does not expose them to the native Planner.
+
 - Remote `origin/dev` SHA cannot be confirmed until GitHub authentication/network access works.
 - Real WeChat receive/send verification requires a running WeFlow account; outbound tests remain intercepted until explicitly changed.
 - External model availability remains a deployment concern; the local native runtime was observed reaching MaiSaka planner and model selection, but configured free endpoints returned HTTP 429/503 during the test window.

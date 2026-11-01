@@ -689,6 +689,8 @@ class SummaryImporter:
                 limit_mode="latest",
             )
 
+            from src.common.learning_policy import is_learning_allowed
+            messages = [message for message in messages if is_learning_allowed(message)]
             if not messages:
                 return SummaryImportResult(False, "未找到有效的聊天记录进行总结")
 

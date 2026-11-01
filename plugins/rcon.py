@@ -47,6 +47,12 @@ def handle(content, context):
     return response or "发送成功，此命令无返回值"
 
 
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'host': {'type': 'str', 'default': '', 'max_length': 250, 'label': 'RCON 主机', 'config_path': 'rcon.host', 'reload': 'restart'},
+    'port': {'type': 'int', 'default': 25575, 'min': 1, 'max': 65535, 'label': 'RCON 端口', 'config_path': 'rcon.port', 'reload': 'restart'},
+    'password': {'type': 'str', 'default': '', 'secret': True, 'label': 'RCON 密码', 'config_path': 'rcon.password', 'reload': 'restart'},
+}}
+
 WEBUI_CONFIG_SCHEMA = {
     "title": "RCON",
     "fields": [

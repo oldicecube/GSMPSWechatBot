@@ -37,6 +37,16 @@ def register_send_listener(name, callback):
 
 
 def _notify_send_listeners(target, mode, content=None, file_path=None):
+    from src.common.message_provenance import plugin_execution
+    execution = plugin_execution.get() or {}
+    if execution:
+        execution['delivered'] = True
+    callback = execution.get('on_delivery')
+    if callable(callback):
+        try:
+            callback(execution, target=target, mode=mode, content=content, file_path=file_path)
+        except Exception as exc:
+            print(f'[PLUGIN DELIVERY RECORD ERROR] {type(exc).__name__}: {exc}')
     with _SEND_LISTENER_LOCK:
         listeners = list(_SEND_LISTENERS.values())
     for callback in listeners:
@@ -146,7 +156,7 @@ def _apply_send_delay(mode, delay_seconds=None):
 # =========================
 # 💬 统一发送入口
 # =========================
-def send(target, content=None, file_path=None, mode="wechat_text", rcon=None, delay_seconds=None, duration=None, voice_start=None, preserve_text=False):
+def send(target, content=None, file_path=None, mode="wechat_text", rcon=None, delay_seconds=None, duration=None, voice_start=None, preserve_text=False, resolve_mentions=False, group_id=None, native_segments=None, source_platform=None):
     """
     mode:
         wechat_text
@@ -155,6 +165,32 @@ def send(target, content=None, file_path=None, mode="wechat_text", rcon=None, de
         rcon
     """
 
+    from src.common.message_provenance import plugin_execution
+    execution = plugin_execution.get() or {}
+    if mode.startswith('wechat_'):
+        platform = source_platform or execution.get('platform') or ('qq' if str(target).startswith('qq:') else 'wechat')
+        if str(target).startswith('qq:') and platform != 'qq':
+            return False, 'Explicit QQ destination cannot use another platform sender'
+        if platform == 'qq':
+            from core.shell_platform_bridge import context_for_target, send_output_sync
+            context = execution.get('context')
+            if not context and str(target).startswith('qq:'):
+                try:
+                    context = context_for_target(target)
+                except ValueError:
+                    return False, 'Invalid explicit QQ target'
+            if not context:
+                return False, 'QQ shell output requires its original native context'
+            return send_output_sync(context, target=target, content=content, file_path=file_path,
+                                    mode=mode, native_segments=native_segments)
+        if platform != 'wechat' or (execution.get('platform') and execution['platform'] != platform):
+            return False, 'Source platform does not match shell sender'
+        if str(target).endswith('@chatroom'):
+            from src.platform_io.chat_features import context_override
+            context = {**(execution.get('context') or {}), 'platform':'wechat',
+                       'group_id':str(target), 'sessionId':str(target)}
+            if context_override(context, 'plugins_enabled' if execution.get('plugin_id') else 'llm_enabled') is False:
+                return False, 'Group feature is disabled in MaiBot WebUI'
     with _SEND_LOCK:
         try:
             if str(os.environ.get("MAIBOT_INTERCEPT_SEND", "")).strip().lower() in {"1", "true", "yes", "on"} and mode.startswith("wechat_"):
@@ -180,7 +216,7 @@ def send(target, content=None, file_path=None, mode="wechat_text", rcon=None, de
 
                 _apply_send_delay(mode, delay_seconds=delay_seconds)
                 result = (
-                    _send_wechat_text(target, content, preserve_text=True)
+                    _send_wechat_text(target, content, preserve_text=True, resolve_mentions=resolve_mentions, group_id=group_id, native_segments=native_segments)
                     if preserve_text else _send_wechat_text(target, content)
                 )
                 if result and result[0]:
@@ -251,10 +287,15 @@ def _post_wechat_hook(data, timeout):
     return True, None
 
 
-def _send_wechat_text(target, content, preserve_text=False):
+def _send_wechat_text(target, content, preserve_text=False, resolve_mentions=False, group_id=None, native_segments=None):
     payload = {"target": target, "content": content}
     if preserve_text:
         payload["preserve_text"] = True
+    if resolve_mentions:
+        payload["resolve_mentions"] = True
+        payload["group_id"] = group_id
+        if native_segments is not None:
+            payload["native_segments"] = native_segments
     return _post_wechat_hook(payload, timeout=120)
 
 

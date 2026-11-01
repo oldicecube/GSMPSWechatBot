@@ -8,6 +8,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 
 from .security import get_token_manager
+from src.webui.middleware.network_access import auth_enabled
 
 logger = get_logger("webui.auth")
 
@@ -48,6 +49,8 @@ def get_current_token(
     Raises:
         HTTPException: 认证失败时抛出 401 错误
     """
+    if not auth_enabled():
+        return "intranet-no-auth"
     if not is_token_valid(maibot_session):
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
 
@@ -57,6 +60,8 @@ def get_current_token(
 
 def is_token_valid(maibot_session: Optional[str]) -> bool:
     """判断认证 token 是否存在且有效。"""
+    if not auth_enabled():
+        return True
     if not maibot_session:
         return False
 

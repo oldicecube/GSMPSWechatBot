@@ -429,6 +429,9 @@ class ComponentQueryService:
                 invoke_args.update(action_data)
 
             stream_id = ComponentQueryService._extract_stream_id_from_action_kwargs(kwargs)
+            from src.platform_io.chat_features import session_override
+            if session_override(stream_id, 'plugins_enabled') is False:
+                return False
             invoke_args["action_data"] = action_data if isinstance(action_data, dict) else {}
             invoke_args["stream_id"] = stream_id
             invoke_args["chat_id"] = stream_id
@@ -509,6 +512,9 @@ class ComponentQueryService:
             message_info = getattr(message, "message_info", None)
             group_info = getattr(message_info, "group_info", None)
             user_info = getattr(message_info, "user_info", None)
+            from src.platform_io.chat_features import session_override
+            if session_override(str(getattr(message, 'session_id', '') or ''), 'plugins_enabled') is False:
+                return False, None, True
             message_is_local_operator = False
             if message is not None:
                 message_is_local_operator = is_local_operator(
@@ -532,13 +538,16 @@ class ComponentQueryService:
                 invoke_args["plugin_config"] = plugin_config
 
             try:
-                response = await supervisor.invoke_plugin(
-                    method="plugin.invoke_command",
-                    plugin_id=plugin_id,
-                    component_name=component_name,
-                    args=invoke_args,
-                    timeout_ms=rpc_timeout_ms,
-                )
+                from src.common.message_provenance import track_plugin_invocation
+                with track_plugin_invocation(plugin_id, invoke_args['stream_id'],
+                        trigger_message_id=getattr(message, 'message_id', '')):
+                    response = await supervisor.invoke_plugin(
+                        method="plugin.invoke_command",
+                        plugin_id=plugin_id,
+                        component_name=component_name,
+                        args=invoke_args,
+                        timeout_ms=rpc_timeout_ms,
+                    )
             except Exception as exc:
                 logger.error(f"运行时 Command {plugin_id}.{component_name} 执行失败: {exc}", exc_info=True)
                 return False, str(exc), True
@@ -590,6 +599,10 @@ class ComponentQueryService:
                 Any: 插件工具返回结果；若结果不是字典，则会包装为 ``{"content": ...}``。
             """
 
+            from src.platform_io.chat_features import session_override
+            sid = str(function_args.get('stream_id') or function_args.get('chat_id') or '')
+            if session_override(sid, 'plugins_enabled') is False:
+                return {'success': False, 'content': '本群插件已关闭'}
             try:
                 response = await supervisor.invoke_plugin(
                     method=invoke_method,
@@ -808,6 +821,26 @@ class ComponentQueryService:
 
         payload = dict(invocation.arguments)
         context_payload = ComponentQueryService._build_tool_context_payload(context)
+        if entry.plugin_id == 'wechatbot.owned-plugin-tools':
+            from src.plugin_runtime.owned_plugin_tools import issue_grant
+            payload['_host_grant'] = issue_grant(context)
+        if entry.plugin_id == "wechatbot.restricted-rcon":
+            from src.plugin_runtime.wechatbot_agent_tools import issue_rcon_grant
+            payload["_host_grant"] = issue_rcon_grant(context)
+        if entry.plugin_id in {"wechatbot.scheduled-reminder", "github.erhan111119.mai-repost-shit", "wechatbot.autonomous-life"}:
+            # Reserved Host-owned request scope, opt in only for this plugin so
+            # existing handlers with strict signatures keep their contract.
+            anchor = context.metadata.get("anchor_message") if context is not None else None
+            anchor_info = getattr(anchor, "message_info", None)
+            anchor_user = getattr(anchor_info, "user_info", None)
+            payload["_request_context"] = {
+                **context_payload,
+                "message_id": str(getattr(anchor, "message_id", "") or ""),
+                "user_name": str(getattr(anchor_user, "user_nickname", "") or ""),
+                "is_notify": bool(getattr(anchor, "is_notify", False)),
+                "account_id": str(getattr(anchor, "account_id", "") or ""),
+                "scope": str(getattr(anchor, "scope", "") or ""),
+            }
         if entry.invoke_method == "plugin.invoke_action":
             stream_id = str(
                 context_payload.get("stream_id")
@@ -966,13 +999,17 @@ class ComponentQueryService:
         invoke_payload = self._build_tool_invocation_payload(tool_entry, invocation, context)
 
         try:
-            response = await supervisor.invoke_plugin(
-                method=tool_entry.invoke_method,
-                plugin_id=tool_entry.plugin_id,
-                component_name=tool_entry.name,
-                args=invoke_payload,
-                timeout_ms=resolve_component_rpc_timeout_ms(tool_entry.timeout_ms),
-            )
+            from src.common.message_provenance import track_plugin_invocation
+            anchor = context.metadata.get('anchor_message') if context else None
+            with track_plugin_invocation(tool_entry.plugin_id, (context.stream_id or context.session_id) if context else invocation.stream_id,
+                    trigger_message_id=getattr(anchor, 'message_id', ''), invocation_id=invocation.call_id):
+                response = await supervisor.invoke_plugin(
+                    method=tool_entry.invoke_method,
+                    plugin_id=tool_entry.plugin_id,
+                    component_name=tool_entry.name,
+                    args=invoke_payload,
+                    timeout_ms=resolve_component_rpc_timeout_ms(tool_entry.timeout_ms),
+                )
         except Exception as exc:
             logger.error(f"运行时工具 {tool_entry.plugin_id}.{tool_entry.name} 执行失败: {exc}", exc_info=True)
             return ToolExecutionResult(
@@ -993,7 +1030,12 @@ class ComponentQueryService:
                 structured_content=result,
                 metadata={"plugin_id": tool_entry.plugin_id},
             )
-        return self._parse_tool_invoke_result(tool_entry, result)
+        parsed = self._parse_tool_invoke_result(tool_entry, result)
+        parsed.metadata['message_origin'] = dict(platform=context.platform if context else '',
+            account_id=str(getattr(anchor, 'account_id', '') or ''), scope=str(getattr(anchor, 'scope', '') or ''),
+            trigger_message_id=str(getattr(anchor, 'message_id', '') or ''), invocation_id=invocation.call_id,
+            kind='plugin_tool_result')
+        return parsed
 
     def get_llm_available_tools(self) -> Dict[str, ToolInfo]:
         """获取当前可供 LLM 选择的工具集合。

@@ -7,7 +7,7 @@ import queue as queue_lib
 from core.sender import preview_delay_seconds, send
 from llm.memory import LongTermMemory, MemoryManager
 from llm.learning import StyleLearner
-from llm.security import get_emoji_path
+from llm.core.maibot_emoji import get_native_emoji_path
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -23,6 +23,11 @@ class Worker:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._threads = []
+        if getattr(getattr(dispatcher, "llm_service", None), "native_ingress", False):
+            # Native ingestion owns storage and learning; avoid writing the same
+            # chat into the retired shell memory/learning pipeline as well.
+            self.memory_manager = self.long_term_memory = self.style_learner = None
+            return
         self.memory_manager = self._build_memory_manager()
         self.long_term_memory = self._build_long_term_memory()
         try:
@@ -71,6 +76,11 @@ class Worker:
                 continue
 
             self._task_local.active = True
+            from core.maibot_shell_registry import enabled, ADAPTER_ID
+            if not enabled(ADAPTER_ID):
+                self.queue.task_done()
+                self._task_local.active = False
+                continue
 
             print("[WORKER] 收到任务")
             self._listen_group_message(msg)
@@ -131,6 +141,9 @@ class Worker:
                     else bool(msg.get("prompt_visible", True))
                 )
                 context = {
+                    "platform": routing.get('platform') or 'wechat',
+                    "account_id": routing.get('account_id') or '',
+                    "scope": routing.get('scope') or '',
                     "user": item.get("user", "未知用户"),
                     "group": msg.get("group"),
                     "sessionId": msg.get("sessionId"),
@@ -201,6 +214,8 @@ class Worker:
                 # ⚙️ 执行 dispatcher
                 # =========================
                 result = self.dispatcher.dispatch(command, args, context)
+                self._task_local.plugin_context = context
+                self._task_local.plugin_id = result.get('_shell_plugin_id') if isinstance(result, dict) else None
 
                 print("[WORKER DEBUG] raw result =", result)
 
@@ -231,7 +246,7 @@ class Worker:
 
                     print(f"[WORKER] 发送结果: target={target}, content={content}")
 
-                    send(
+                    self._send_plugin_result(
                         target=target,
                         content=content,
                         mode=mode,
@@ -248,7 +263,7 @@ class Worker:
 
                     print(f"[WORKER] string result: {result}")
 
-                    send(
+                    self._send_plugin_result(
                         target=context.get("group") or context.get("user"),
                         content=result,
                         mode="wechat_text",
@@ -270,6 +285,15 @@ class Worker:
             self.queue.task_done()
         finally:
             self._task_local.active = False
+
+    def _send_plugin_result(self, **kwargs):
+        from core.plugin_activity import legacy_plugin_scope
+        plugin_id = getattr(self._task_local, 'plugin_id', None)
+        context = getattr(self._task_local, 'plugin_context', {})
+        if plugin_id:
+            with legacy_plugin_scope(self.dispatcher.llm_service, plugin_id, context):
+                return send(**kwargs)
+        return send(**kwargs)
 
     def _build_memory_manager(self):
         try:
@@ -446,6 +470,8 @@ class Worker:
         return bool(outcome), ""
 
     def _send_structured_result(self, target, result):
+        if result.get("native_delivery_owned"):
+            return bool(result.get("native_sent"))
         messages = result.get("messages") or []
         animation = result.get("animation")
         delay_seconds = result.get("delay_seconds")
@@ -459,7 +485,7 @@ class Worker:
                 if not content:
                     continue
 
-                ok, reason = self._send_succeeded(send(
+                ok, reason = self._send_succeeded(self._send_plugin_result(
                     target=target,
                     content=content,
                     mode="wechat_text",
@@ -472,11 +498,11 @@ class Worker:
                     print(f"[WORKER SEND FAILED] target={target} reason={reason}", flush=True)
 
             if animation:
-                file_path = get_emoji_path(animation)
+                file_path = get_native_emoji_path(animation)
                 if not file_path:
                     print(f"[WORKER] animation 未找到: {animation}", flush=True)
                 else:
-                    ok, reason = self._send_succeeded(send(
+                    ok, reason = self._send_succeeded(self._send_plugin_result(
                         target=target,
                         file_path=file_path,
                         mode="wechat_file",

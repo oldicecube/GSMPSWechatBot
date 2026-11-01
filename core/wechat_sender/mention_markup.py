@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import requests
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -47,7 +49,30 @@ def _validate_nickname(name: str, wxid: str) -> str:
 
 def _group_members(group_id: str) -> dict[str, str]:
     """Load the latest observed name per wxid once for the entire message."""
-    members = {}
+    members = _native_group_members(group_id)
+    # Observed history can contain a previous nickname after a group member
+    # renames themselves. Prefer WeFlow's current group membership snapshot.
+    if str(group_id).endswith("@chatroom"):
+        try:
+            from core import weflow_media
+            if weflow_media.TOKEN:
+                response = requests.get(
+                    f"{weflow_media.BASE_URL}/api/v1/group-members",
+                    params={"chatroomId": group_id}, headers=weflow_media._headers(), timeout=3,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("success") is True and isinstance(payload.get("members"), list):
+                    current = {}
+                    for row in payload["members"]:
+                        wxid = str(row.get("wxid") or "").strip()
+                        name = str(row.get("groupNickname") or row.get("displayName") or row.get("nickname") or "")
+                        if wxid:
+                            current[wxid] = name
+                    # A confirmed membership snapshot also rejects departed users.
+                    return current
+        except (OSError, ValueError, TypeError, requests.RequestException):
+            pass
     path = _safe_group_history_path(group_id)
     if path.is_file() and path.stat().st_size <= MAX_GROUP_HISTORY_BYTES:
         try:
@@ -80,6 +105,28 @@ def _group_members(group_id: str) -> dict[str, str]:
                 if wxid and name and wxid not in members:
                     members[wxid] = name
     return members
+
+
+def _native_group_members(group_id: str) -> dict[str, str]:
+    """Read identities actually observed by MaiBot after native ingestion."""
+    database = Path(os.environ.get("MAIBOT_INSTANCE_DIR") or BASE_DIR) / "data" / "MaiBot.db"
+    if not database.is_file():
+        return {}
+    try:
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2) as conn:
+            field = "group_id" if str(group_id).endswith("@chatroom") else "group_name"
+            # Display names can collide. Require a single canonical group.
+            groups = conn.execute(f"SELECT DISTINCT group_id FROM mai_messages WHERE platform='wechat' AND {field}=?", (group_id,)).fetchall()
+            if len(groups) != 1 or not groups[0][0]:
+                return {}
+            rows = conn.execute("SELECT user_id, user_cardname, user_nickname FROM mai_messages WHERE platform='wechat' AND group_id=? AND is_notify=0 ORDER BY id DESC LIMIT 5000", (groups[0][0],)).fetchall()
+        members = {}
+        for wxid, card, nickname in rows:
+            if wxid and wxid not in members:
+                members[wxid] = card or nickname or ""
+        return members
+    except (sqlite3.Error, OSError, ValueError):
+        return {}
 
 
 def _reminder_name(group_id: str, wxid: str) -> str:
@@ -208,4 +255,30 @@ def parse_and_resolve_mentions(message: str, group_id: str):
     return segments, "".join(display)
 
 
-__all__ = ["MentionMarkupError", "MARKER_RE", "parse_and_resolve_mentions", "resolve_group_member", "normalize_plain_mentions"]
+def resolve_native_segments(values, group_id: str, content: str):
+    """Resolve only explicit native At components, preserving literal marker text."""
+    if not isinstance(values, list) or not values or len(values) > 1000:
+        raise MentionMarkupError("invalid native message segments")
+    segments, display, wire = [], [], []
+    count = 0
+    for item in values:
+        if not isinstance(item, dict):
+            raise MentionMarkupError("invalid native message segment")
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
+            text = item["text"]
+            segments.append({"type": "text", "text": text}); display.append(text); wire.append(text)
+        elif item.get("type") == "mention" and isinstance(item.get("wxid"), str):
+            count += 1
+            marker = "[[WX_AT:" + item["wxid"] + "]]"
+            if count > MAX_MENTIONS_PER_MESSAGE or not MARKER_RE.fullmatch(marker):
+                raise MentionMarkupError("invalid native mention")
+            resolved, label = parse_and_resolve_mentions(marker, group_id)
+            segments.extend(resolved); display.append(label); wire.append(marker)
+        else:
+            raise MentionMarkupError("unsupported native message segment")
+    if "".join(wire) != content:
+        raise MentionMarkupError("native message segments do not match content")
+    return segments, "".join(display)
+
+
+__all__ = ["MentionMarkupError", "MARKER_RE", "parse_and_resolve_mentions", "resolve_native_segments", "resolve_group_member", "normalize_plain_mentions"]

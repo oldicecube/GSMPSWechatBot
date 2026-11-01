@@ -8,6 +8,7 @@ command composition, or a confirmation flow are not present here.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 from typing import Any
@@ -77,7 +78,7 @@ _FUN_ACTIONS = {
     "play_sound", "stop_sound", "spawn_particle", "show_title", "show_dialog",
     "emote", "private_message", "rotate_self", "random_roll",
 }
-_ALLOWED_TARGET = re.compile(r"^(?:@[apsre](?:\[[^\]\r\n]{0,180}\])?|[A-Za-z0-9_]{1,16})$")
+_ALLOWED_TARGET = re.compile(r"^(?:@[apsre]|[A-Za-z0-9_]{1,16})$")
 _ALLOWED_RESOURCE = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 _ALLOWED_OBJECTIVE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 _ALLOWED_GAMERULE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -93,7 +94,10 @@ _RCON_LOCK = threading.RLock()
 
 
 def _text(value: Any, limit: int = _MAX_TEXT) -> str:
-    return str(value or "").strip()[:limit]
+    text = str(value or "")
+    if any(ord(ch) < 32 for ch in text):
+        raise ValueError("control characters are not allowed")
+    return text.strip()[:limit]
 
 
 def _target(value: Any, default="@s") -> str:
@@ -125,6 +129,8 @@ def _bounded_number(value: Any, default: float, low: float, high: float) -> floa
         number = float(value)
     except (TypeError, ValueError):
         number = default
+    if not math.isfinite(number):
+        raise ValueError("numeric arguments must be finite")
     return max(low, min(high, number))
 
 
@@ -218,7 +224,10 @@ def execute_minecraft_rcon_action(payload: dict[str, Any], rcon_config: dict[str
         return {"ok": False, "error": "Minecraft RCON tools are not enabled for this group or operator"}
     if not isinstance(payload, dict):
         return {"ok": False, "error": "arguments must be a JSON object"}
-    action = _text(payload.get("action"), 64)
+    try:
+        action = _text(payload.get("action"), 64)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if action not in _READ_ACTIONS and action not in _FUN_ACTIONS:
         return {"ok": False, "error": "action is not approved"}
     cfg = rcon_config if isinstance(rcon_config, dict) else {}
@@ -243,7 +252,7 @@ def execute_minecraft_rcon_action(payload: dict[str, Any], rcon_config: dict[str
             "minecraft_version": "26.2",
             "action": action,
             "command": command.split(" ", 1)[0],
-            "result": _text(output, _MAX_OUTPUT),
+            "result": str(output or "")[:_MAX_OUTPUT],
         }
     except Exception as exc:
-        return {"ok": False, "action": action, "error": f"RCON request failed: {type(exc).__name__}: {str(exc)[:300]}"}
+        return {"ok": False, "action": action, "error": f"RCON request failed: {type(exc).__name__}"}

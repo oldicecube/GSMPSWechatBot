@@ -14,6 +14,10 @@
 锛?TEMP%\\WechatRobot\\voice锛夛紝鐢卞彂閫佺粍浠讹紙wechat_hook_server锛夊湪鍙戦€佸畬鎴愬悗鍒犻櫎銆?
 """
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import logging
 import threading
 

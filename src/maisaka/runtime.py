@@ -299,7 +299,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         recent_messages = select_messages_after_latest_clear_marker(recent_messages)
         history: List[LLMContextMessage] = []
         for message in recent_messages:
-            if message.is_notify:
+            if message.is_notify or message.message_info.additional_config.get("wechat", {}).get("prompt_visible") is False:
                 continue
             history_message = await self._reasoning_engine._build_history_message(
                 message,
@@ -330,7 +330,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         restored_user_messages: list[SessionMessage] = []
         restored_history: list[LLMContextMessage] = []
         for message in recent_messages:
-            if message.is_notify:
+            if message.is_notify or message.message_info.additional_config.get("wechat", {}).get("prompt_visible") is False:
                 continue
 
             self._quote_counter.record(message)
@@ -424,7 +424,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         }
         restored_history: list[LLMContextMessage] = []
         for message in recent_messages:
-            if message.is_notify or message.message_id in existing_message_ids:
+            if message.is_notify or message.message_info.additional_config.get("wechat", {}).get("prompt_visible") is False or message.message_id in existing_message_ids:
                 continue
             history_message = await self._reasoning_engine._build_history_message(message, source_kind="user")
             if history_message is not None:
@@ -517,6 +517,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
     def _resolve_restored_message_source_kind(message: SessionMessage) -> str:
         """根据发送者身份区分恢复消息来自用户还是麦麦自己。"""
 
+        from src.common.message_provenance import is_plugin_message
+        if is_plugin_message(message):
+            return str(message.message_info.additional_config['plugin_activity'].get('kind') or 'plugin_output')
         user_info = message.message_info.user_info
         if is_bot_self(message.platform, user_info.user_id):
             return "guided_reply"
@@ -577,23 +580,23 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             from src.maisaka.context.history import build_prefixed_message_sequence, build_session_message_visible_text
             from src.maisaka.context.messages import SessionBackedMessage
             from src.maisaka.context.planner_messages import (
-                build_planner_prefix,
-                extract_quote_ids_from_message_sequence,
+                build_planner_user_prefix_from_session_message,
             )
 
             user_info = message.message_info.user_info
             speaker_name = user_info.user_cardname or user_info.user_nickname or user_info.user_id
             include_chat_id = self._is_focus_mode_active_for_current_chat()
-            planner_prefix = build_planner_prefix(
-                timestamp=message.timestamp,
-                user_name=speaker_name,
-                group_card=user_info.user_cardname or "",
-                message_id=message.message_id,
-                chat_id=message.session_id,
-                quote_ids=extract_quote_ids_from_message_sequence(message.raw_message),
+            from src.common.message_provenance import is_plugin_message
+            if is_plugin_message(message):
+                source_kind = 'plugin_output'
+            if any(getattr(item, 'message_id', None) == message.message_id for item in self._chat_history):
+                return False
+            planner_prefix = build_planner_user_prefix_from_session_message(
+                message,
                 include_message_id=not message.is_notify and bool(message.message_id),
                 include_chat_id=include_chat_id,
-                is_self_message=source_kind == "guided_reply",
+                is_self_message=(source_kind == "guided_reply" or
+                                 str(message.message_info.user_info.user_id or '') == str(message.account_id or '')),
             )
             history_message = SessionBackedMessage.from_session_message(
                 message,
@@ -1111,6 +1114,14 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             if isinstance(history_message, SessionBackedMessage) and history_message.message_id == normalized_message_id:
                 return history_message.original_message
 
+        # The reply may finish after history compaction, while the received
+        # message still exists in the bounded runtime cache.
+        from src.maisaka.context.message_id_alias import to_display_message_id
+        matches = [m for m in self.message_cache if str(m.message_id) == normalized_message_id
+                   or to_display_message_id(m.message_id) == normalized_message_id]
+        if len({m.message_id for m in matches}) == 1:
+            return matches[-1]
+
         return None
 
     def get_reply_quote_context(self, target: SessionMessage) -> ReplyQuoteContext | None:
@@ -1191,12 +1202,14 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         if detected_mentioned:
             message.is_mentioned = True
 
+        adapter_forced = message.message_info.additional_config.get("force_reply") is True
         should_force_reply = (
-            reply_probability_boost >= 1.0
+            adapter_forced
+            or reply_probability_boost >= 1.0
             or (message.is_at and global_config.chat.reply_timing.inevitable_at_reply)
             or (message.is_mentioned and global_config.chat.reply_timing.mentioned_bot_reply)
         )
-        if not should_force_reply or (not message.is_at and not message.is_mentioned):
+        if not should_force_reply or (not adapter_forced and not message.is_at and not message.is_mentioned):
             return
 
         self._arm_forced_turn(

@@ -258,11 +258,18 @@ class AMemorixHostService:
 
             chat_id = str(payload.get("chat_id", "") or "").strip()
             config = self._read_config()
-            global_memory_sharing_enabled = bool(config.get("global_memory_sharing_enabled", False))
+            include_shared = payload.get('include_shared', True) is True
+            global_memory_sharing_enabled = include_shared and bool(config.get("global_memory_sharing_enabled", False))
             search_chat_id = "" if global_memory_sharing_enabled else chat_id
             shared_chat_ids = ()
-            if not global_memory_sharing_enabled:
+            if include_shared and not global_memory_sharing_enabled:
                 shared_chat_ids = tuple(AMemorixConfigUtils.get_shared_memory_session_ids(chat_id))
+                # Shared community knowledge, with distinct source session IDs.
+                # Private chats and blocked/inactive groups are never added here.
+                from core.community_streams import active_groups
+                admitted = {s.session_id for s in await active_groups()}
+                if chat_id in admitted:
+                    shared_chat_ids = tuple(sorted(set(shared_chat_ids) | admitted))
 
             return await kernel.search_memory(
                 KernelSearchRequest(

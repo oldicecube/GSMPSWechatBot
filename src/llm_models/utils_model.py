@@ -28,6 +28,7 @@ from src.llm_models.exceptions import (
     EmptyResponseException,
     LLMTaskTimeoutError,
     ModelAttemptFailed,
+    ModelCooldownError,
     NetworkConnectionError,
     ReqAbortException,
     RespNotOkException,
@@ -46,7 +47,9 @@ from src.llm_models.model_client.base_client import (
     client_registry,
 )
 from src.llm_models.generation_diagnostics import sanitize_diagnostic_url
+from src.llm_models.quota_cooldown import blocked_reason, explicit_quota_exhaustion, mark_exhausted, mark_rate_limited, remaining_seconds
 from src.llm_models.image_normalizer import normalize_context_images
+from src.llm_models.request_pacing import wait_for_request_slot
 from src.llm_models.request_snapshot import (
     attach_request_snapshot,
     format_request_snapshot_log_info,
@@ -159,6 +162,20 @@ class LLMOrchestrator:
             if self.task_name == "image_embedding":
                 raise ValueError("图片嵌入任务未配置模型，请在 image_embedding 中指定支持图片嵌入的模型")
             break
+        # Keep disabled provider profiles in the configured priority list (e.g.
+        # Gemini awaiting credentials), but never initialize or call them during
+        # automatic fallback. Preserve the source config for WebUI and hot enable.
+        model_config = config_manager.get_model_config()
+        models = {model.name: model for model in model_config.models}
+        providers = {provider.name: provider for provider in model_config.api_providers}
+        active_names = [
+            name for name in task_config.model_list
+            if name not in models
+            or models[name].api_provider not in providers
+            or providers[models[name].api_provider].enabled
+        ]
+        if active_names != task_config.model_list:
+            return task_config.model_copy(update={'model_list': active_names})
         return task_config
 
     def _refresh_task_config(self) -> TaskConfig:
@@ -1081,6 +1098,12 @@ class LLMOrchestrator:
             attach_request_snapshot(error, snapshot_path)
 
         while retry_remain > 0:
+            await wait_for_request_slot(api_provider, model_info, self.request_type)
+            # A different concurrent task may have received 429 while this
+            # request waited in the pacing queue. Recheck at dispatch time.
+            if reason := blocked_reason(api_provider, model_info):
+                raise ModelAttemptFailed(f"模型 '{model_info.name}' 暂在冷却: {reason}",
+                    original_exception=RespNotOkException(429, reason))
             if active_request.trace_context is not None:
                 active_request.trace_context.attempt += 1
                 active_request.trace_context.model_attempt += 1
@@ -1187,6 +1210,16 @@ class LLMOrchestrator:
                 await ensure_attempt_snapshot(e)
                 original_error_info = self._get_original_error_info(e)
                 task_display = self.request_type or "未知任务"
+
+                if explicit_quota_exhaustion(e):
+                    mark_exhausted(api_provider, model_info)
+                    logger.warning(f"模型 '{model_info.name}' 上游额度耗尽，跳过重复重试并冷却 10 分钟")
+                    raise ModelAttemptFailed(f"模型 '{model_info.name}' 上游额度耗尽", original_exception=e) from e
+
+                if e.status_code == 429:
+                    mark_rate_limited(api_provider, model_info, e)
+                    logger.warning(f"模型 '{model_info.name}' 上游限流，跨任务退避后再试")
+                    raise ModelAttemptFailed(f"模型 '{model_info.name}' 上游限流", original_exception=e) from e
 
                 # 可重试的HTTP错误
                 can_retry_with_compression = self._can_retry_with_compressed_images(
@@ -1373,9 +1406,11 @@ class LLMOrchestrator:
             LLMExecutionResult: 单次模型执行结果对象。
         """
         failed_models_this_request: Set[str] = set()
+        self._refresh_task_config()
         max_attempts = 1 if str(model_name or "").strip() else len(self.model_for_task.model_list)
         last_exception: Optional[Exception] = None
         last_model_name = ""
+        cooldown_delays: list[float] = []
         trace_context = RequestTraceContext(
             task_name=self.task_name,
             request_type=self.request_type,
@@ -1387,6 +1422,14 @@ class LLMOrchestrator:
                 exclude_models=failed_models_this_request,
                 model_name=model_name,
             )
+            quota_reason = blocked_reason(api_provider, model_info)
+            if quota_reason:
+                cooldown_delays.append(remaining_seconds(api_provider, model_info))
+                failed_models_this_request.add(model_info.name)
+                self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
+                last_model_name = model_info.name
+                last_exception = RespNotOkException(429, quota_reason)
+                continue
             if request_type == RequestType.RESPONSE and force_stream_mode:
                 # 请求级副本也覆盖重试及候选模型切换，避免改变其他任务的流式设置。
                 model_info = model_info.model_copy(update={"force_stream_mode": True})
@@ -1407,6 +1450,13 @@ class LLMOrchestrator:
                 if request_type == RequestType.RESPONSE and context_items:
                     # 图片解码、缩放及切图在线程池执行，避免阻塞 Bot 或 WebUI 事件循环。
                     context_items = await asyncio.to_thread(normalize_context_images, context_items)
+                    if api_provider.max_images_per_request:
+                        # 在切图之后执行端点硬上限，覆盖聊天历史及工具附图。
+                        from src.maisaka.visual.message_limiter import limit_latest_images_in_messages
+
+                        context_items = limit_latest_images_in_messages(
+                            context_items, max_image_num=api_provider.max_images_per_request
+                        )
                 request = self._build_client_request(
                     request_type=request_type,
                     model_info=model_info,
@@ -1456,6 +1506,8 @@ class LLMOrchestrator:
 
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
+                if delay := remaining_seconds(api_provider, model_info):
+                    cooldown_delays.append(delay)
                 if not has_request_snapshot(last_exception):
                     snapshot_path = await asyncio.to_thread(
                         save_failed_request_snapshot,
@@ -1479,6 +1531,11 @@ class LLMOrchestrator:
                     logger.warning("收到客户端错误 (400)，跳过当前模型并继续尝试其他模型。")
                     continue
 
+        if max_attempts and len(cooldown_delays) == max_attempts:
+            # 额度错误已有一次诊断记录；冷却期不再反复上报普通模型失败事件。
+            if last_exception:
+                await asyncio.to_thread(mark_request_final_failure, last_exception)
+            raise ModelCooldownError(min(cooldown_delays), self.task_name) from last_exception
         logger.error(f"所有 {max_attempts} 个模型均尝试失败。")
         if last_exception:
             await asyncio.to_thread(mark_request_final_failure, last_exception)

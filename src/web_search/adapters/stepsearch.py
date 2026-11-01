@@ -42,7 +42,7 @@ class StepSearchAdapter:
             self.context,
         )
         if not result.success:
-            raise WebSearchError("StepSearch MCP 调用失败，请检查该 MCP 连接的状态和日志")
+            raise WebSearchError("联网 MCP 调用失败，请检查该 MCP 连接的状态和日志")
         data = result.structured_content
         if data is None:
             # 较旧的 MCP 传输仅返回同一 JSON 的文本表示，不解析模型生成的文本。

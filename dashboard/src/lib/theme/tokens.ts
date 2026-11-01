@@ -1,0 +1,719 @@
+/**
+ * Design Token Schema 定义
+ * 集中管理所有设计令牌（颜色、排版、间距、阴影、动画等）
+ */
+
+// ============================================================================
+// Color Tokens 类型定义
+// ============================================================================
+
+export type ColorTokens = {
+  primary: string
+  'primary-foreground': string
+  'primary-gradient': string
+  secondary: string
+  'secondary-foreground': string
+  muted: string
+  'muted-foreground': string
+  accent: string
+  'accent-foreground': string
+  destructive: string
+  'destructive-foreground': string
+  background: string
+  foreground: string
+  card: string
+  'card-foreground': string
+  popover: string
+  'popover-foreground': string
+  border: string
+  input: string
+  ring: string
+  'chart-1': string
+  'chart-2': string
+  'chart-3': string
+  'chart-4': string
+  'chart-5': string
+}
+
+// ============================================================================
+// Typography Tokens 类型定义
+// ============================================================================
+
+export type TypographyTokens = {
+  'font-family-base': string
+  'font-family-code': string
+  'font-size-xs': string
+  'font-size-sm': string
+  'font-size-base': string
+  'font-size-lg': string
+  'font-size-xl': string
+  'font-size-2xl': string
+  'font-weight-normal': number
+  'font-weight-medium': number
+  'font-weight-semibold': number
+  'font-weight-bold': number
+  'line-height-tight': number
+  'line-height-normal': number
+  'line-height-relaxed': number
+  'letter-spacing-tight': string
+  'letter-spacing-normal': string
+  'letter-spacing-wide': string
+}
+
+// ============================================================================
+// Visual Tokens 类型定义
+// ============================================================================
+
+export type VisualTokens = {
+  'radius-sm': string
+  'radius-md': string
+  'radius-lg': string
+  'radius-xl': string
+  'radius-full': string
+  'shadow-sm': string
+  'shadow-md': string
+  'shadow-lg': string
+  'shadow-xl': string
+  'blur-sm': string
+  'blur-md': string
+  'blur-lg': string
+  'opacity-disabled': number
+  'opacity-hover': number
+  'opacity-overlay': number
+}
+
+// ============================================================================
+// Layout Tokens 类型定义
+// ============================================================================
+
+export type LayoutTokens = {
+  'space-xs': string
+  'space-sm': string
+  'space-md': string
+  'space-lg': string
+  'space-xl': string
+  'space-2xl': string
+  'sidebar-width': string
+  'sidebar-logo-height': string
+  'sidebar-logo-padding-x': string
+  'sidebar-nav-padding': string
+  'sidebar-nav-padding-collapsed': string
+  'sidebar-section-gap': string
+  'sidebar-section-title-height': string
+  'sidebar-section-title-margin-bottom': string
+  'sidebar-section-title-margin-bottom-collapsed': string
+  'sidebar-nav-item-gap': string
+  'sidebar-collapsed-width': string
+  'sidebar-nav-item-height': string
+  'sidebar-nav-item-padding-x': string
+  'sidebar-nav-item-collapsed-width': string
+  'header-height': string
+}
+
+// ============================================================================
+// Animation Tokens 类型定义
+// ============================================================================
+
+export type AnimationTokens = {
+  'anim-duration-fast': string
+  'anim-duration-normal': string
+  'anim-duration-slow': string
+  'anim-easing-default': string
+  'anim-easing-in': string
+  'anim-easing-out': string
+  'anim-easing-in-out': string
+  'transition-colors': string
+  'transition-transform': string
+  'transition-opacity': string
+}
+
+// ============================================================================
+// Aggregated Theme Tokens
+// ============================================================================
+
+export type ThemeTokens = {
+  color: ColorTokens
+  typography: TypographyTokens
+  visual: VisualTokens
+  layout: LayoutTokens
+  animation: AnimationTokens
+}
+
+// ============================================================================
+// Theme Preset & Config Types
+// ============================================================================
+
+export type ThemePreset = {
+  id: string
+  name: string
+  description: string
+  tokens: ThemeTokens
+  isDark: boolean
+}
+
+export type DashboardStyle = 'modern' | 'future-retro' | 'millennium'
+
+export const DASHBOARD_STYLES: readonly DashboardStyle[] = ['modern', 'future-retro', 'millennium']
+
+export type StyleTokenOverrides = Partial<Record<DashboardStyle, Partial<ThemeTokens>>>
+export type StyleCustomCSS = Partial<Record<DashboardStyle, string>>
+export type StyleBackgroundConfigMap = Partial<Record<DashboardStyle, BackgroundConfigMap>>
+
+export type FutureRetroTextureStyle = 'fine' | 'coarse' | 'dot-grid' | 'ruled' | 'none'
+
+export type FutureRetroStyleConfig = {
+  paperWarmth: number
+  textureStyle: FutureRetroTextureStyle
+  textureIntensity: number
+  panelDepth: number
+}
+
+export type DashboardStyleConfig = {
+  futureRetro: FutureRetroStyleConfig
+}
+
+export const DEFAULT_DASHBOARD_STYLE: DashboardStyle = 'millennium'
+
+export const DEFAULT_FUTURE_RETRO_STYLE_CONFIG: FutureRetroStyleConfig = {
+  paperWarmth: 89,
+  textureStyle: 'coarse',
+  textureIntensity: 64,
+  panelDepth: 100,
+}
+
+export const DEFAULT_DASHBOARD_STYLE_CONFIG: DashboardStyleConfig = {
+  futureRetro: DEFAULT_FUTURE_RETRO_STYLE_CONFIG,
+}
+
+export type UserThemeConfig = {
+  selectedPreset: string
+  accentColor: string
+  styleTokenOverrides: StyleTokenOverrides
+  styleCustomCSS: StyleCustomCSS
+  styleBackgroundConfig?: StyleBackgroundConfigMap
+  dashboardStyle: DashboardStyle
+  styleConfig: DashboardStyleConfig
+}
+
+// ============================================================================
+// Default Light Tokens (from index.css :root)
+// ============================================================================
+
+export const defaultLightTokens: ThemeTokens = {
+  color: {
+    primary: '28.9 94.8% 45.1%',
+    'primary-foreground': '210 40% 98%',
+    'primary-gradient': 'none',
+    secondary: '188.5 35% 96%',
+    'secondary-foreground': '222.2 47.4% 11.2%',
+    muted: '188.5 12% 96%',
+    'muted-foreground': '188.5 20% 46.9%',
+    accent: '112.7 40.2% 47.8%',
+    'accent-foreground': '210 40% 98%',
+    destructive: '0 84.2% 60.2%',
+    'destructive-foreground': '210 40% 98%',
+    background: '0 0% 100%',
+    foreground: '222.2 84% 4.9%',
+    card: '188.5 14% 98.6%',
+    'card-foreground': '222.2 84% 4.9%',
+    popover: '188.5 16% 99.3%',
+    'popover-foreground': '222.2 84% 4.9%',
+    border: '188.5 20% 91.4%',
+    input: '188.5 20% 91.4%',
+    ring: '28.9 94.8% 45.1%',
+    'chart-1': '28.9 94.8% 45.1%',
+    'chart-2': '160 60% 45%',
+    'chart-3': '30 80% 55%',
+    'chart-4': '280 65% 60%',
+    'chart-5': '340 75% 55%',
+  },
+  typography: {
+    'font-family-base':
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    'font-family-code': '"JetBrains Mono", "Monaco", "Courier New", monospace',
+    'font-size-xs': '0.75rem',
+    'font-size-sm': '0.875rem',
+    'font-size-base': '1rem',
+    'font-size-lg': '1.125rem',
+    'font-size-xl': '1.25rem',
+    'font-size-2xl': '1.5rem',
+    'font-weight-normal': 400,
+    'font-weight-medium': 500,
+    'font-weight-semibold': 600,
+    'font-weight-bold': 700,
+    'line-height-tight': 1.2,
+    'line-height-normal': 1.5,
+    'line-height-relaxed': 1.75,
+    'letter-spacing-tight': '-0.02em',
+    'letter-spacing-normal': '0em',
+    'letter-spacing-wide': '0.02em',
+  },
+  visual: {
+    'radius-sm': '0.25rem',
+    'radius-md': '0.375rem',
+    'radius-lg': '0.5rem',
+    'radius-xl': '0.75rem',
+    'radius-full': '9999px',
+    'shadow-sm': '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+    'shadow-md': '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+    'shadow-lg': '0 10px 15px -3px rgba(0, 0, 0, 0.1)',
+    'shadow-xl': '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+    'blur-sm': '4px',
+    'blur-md': '12px',
+    'blur-lg': '24px',
+    'opacity-disabled': 0.5,
+    'opacity-hover': 0.8,
+    'opacity-overlay': 0.75,
+  },
+  layout: {
+    'space-xs': '0.5rem',
+    'space-sm': '0.75rem',
+    'space-md': '1rem',
+    'space-lg': '1.5rem',
+    'space-xl': '2rem',
+    'space-2xl': '3rem',
+    'sidebar-width': '13rem',
+    'sidebar-logo-height': '5rem',
+    'sidebar-logo-padding-x': '1rem',
+    'sidebar-nav-padding': '1rem',
+    'sidebar-nav-padding-collapsed': '0.5rem',
+    'sidebar-section-gap': '0.75rem',
+    'sidebar-section-title-height': '1.25rem',
+    'sidebar-section-title-margin-bottom': '0.5rem',
+    'sidebar-section-title-margin-bottom-collapsed': '0.25rem',
+    'sidebar-nav-item-gap': '0.25rem',
+    'sidebar-collapsed-width': '4rem',
+    'sidebar-nav-item-height': '2.5rem',
+    'sidebar-nav-item-padding-x': '0.75rem',
+    'sidebar-nav-item-collapsed-width': '3rem',
+    'header-height': '3.5rem',
+  },
+  animation: {
+    'anim-duration-fast': '150ms',
+    'anim-duration-normal': '300ms',
+    'anim-duration-slow': '500ms',
+    'anim-easing-default': 'cubic-bezier(0.4, 0, 0.2, 1)',
+    'anim-easing-in': 'cubic-bezier(0.4, 0, 1, 1)',
+    'anim-easing-out': 'cubic-bezier(0, 0, 0.2, 1)',
+    'anim-easing-in-out': 'cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-colors': 'color 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-transform': 'transform 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-opacity': 'opacity 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+  },
+}
+
+// ============================================================================
+// Default Dark Tokens (from index.css .dark)
+// ============================================================================
+
+export const defaultDarkTokens: ThemeTokens = {
+  color: {
+    primary: '28.9 94.8% 45.1%',
+    'primary-foreground': '210 40% 98%',
+    'primary-gradient': 'none',
+    secondary: '188.5 35% 17.5%',
+    'secondary-foreground': '210 40% 98%',
+    muted: '188.5 12% 17.5%',
+    'muted-foreground': '188.5 20% 65.1%',
+    accent: '112.7 40.2% 34%',
+    'accent-foreground': '210 40% 98%',
+    destructive: '0 62.8% 30.6%',
+    'destructive-foreground': '210 40% 98%',
+    background: '222.2 84% 4.9%',
+    foreground: '210 40% 98%',
+    card: '188.5 18% 8.8%',
+    'card-foreground': '210 40% 98%',
+    popover: '188.5 21% 10.5%',
+    'popover-foreground': '210 40% 98%',
+    border: '188.5 20% 17.5%',
+    input: '188.5 20% 17.5%',
+    ring: '28.9 94.8% 45.1%',
+    'chart-1': '28.9 94.8% 45.1%',
+    'chart-2': '160 60% 50%',
+    'chart-3': '30 80% 60%',
+    'chart-4': '280 65% 65%',
+    'chart-5': '340 75% 60%',
+  },
+  typography: {
+    'font-family-base':
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    'font-family-code': '"JetBrains Mono", "Monaco", "Courier New", monospace',
+    'font-size-xs': '0.75rem',
+    'font-size-sm': '0.875rem',
+    'font-size-base': '1rem',
+    'font-size-lg': '1.125rem',
+    'font-size-xl': '1.25rem',
+    'font-size-2xl': '1.5rem',
+    'font-weight-normal': 400,
+    'font-weight-medium': 500,
+    'font-weight-semibold': 600,
+    'font-weight-bold': 700,
+    'line-height-tight': 1.2,
+    'line-height-normal': 1.5,
+    'line-height-relaxed': 1.75,
+    'letter-spacing-tight': '-0.02em',
+    'letter-spacing-normal': '0em',
+    'letter-spacing-wide': '0.02em',
+  },
+  visual: {
+    'radius-sm': '0.25rem',
+    'radius-md': '0.375rem',
+    'radius-lg': '0.5rem',
+    'radius-xl': '0.75rem',
+    'radius-full': '9999px',
+    'shadow-sm': '0 1px 2px 0 rgba(0, 0, 0, 0.25)',
+    'shadow-md': '0 4px 6px -1px rgba(0, 0, 0, 0.3)',
+    'shadow-lg': '0 10px 15px -3px rgba(0, 0, 0, 0.4)',
+    'shadow-xl': '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
+    'blur-sm': '4px',
+    'blur-md': '12px',
+    'blur-lg': '24px',
+    'opacity-disabled': 0.5,
+    'opacity-hover': 0.8,
+    'opacity-overlay': 0.75,
+  },
+  layout: {
+    'space-xs': '0.5rem',
+    'space-sm': '0.75rem',
+    'space-md': '1rem',
+    'space-lg': '1.5rem',
+    'space-xl': '2rem',
+    'space-2xl': '3rem',
+    'sidebar-width': '13rem',
+    'sidebar-logo-height': '5rem',
+    'sidebar-logo-padding-x': '1rem',
+    'sidebar-nav-padding': '1rem',
+    'sidebar-nav-padding-collapsed': '0.5rem',
+    'sidebar-section-gap': '0.75rem',
+    'sidebar-section-title-height': '1.25rem',
+    'sidebar-section-title-margin-bottom': '0.5rem',
+    'sidebar-section-title-margin-bottom-collapsed': '0.25rem',
+    'sidebar-nav-item-gap': '0.25rem',
+    'sidebar-collapsed-width': '4rem',
+    'sidebar-nav-item-height': '2.5rem',
+    'sidebar-nav-item-padding-x': '0.75rem',
+    'sidebar-nav-item-collapsed-width': '3rem',
+    'header-height': '3.5rem',
+  },
+  animation: {
+    'anim-duration-fast': '150ms',
+    'anim-duration-normal': '300ms',
+    'anim-duration-slow': '500ms',
+    'anim-easing-default': 'cubic-bezier(0.4, 0, 0.2, 1)',
+    'anim-easing-in': 'cubic-bezier(0.4, 0, 1, 1)',
+    'anim-easing-out': 'cubic-bezier(0, 0, 0.2, 1)',
+    'anim-easing-in-out': 'cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-colors': 'color 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-transform': 'transform 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+    'transition-opacity': 'opacity 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+  },
+}
+
+// ============================================================================
+// Future Retro Tokens (MaiBotOneKey shell inspired)
+// ============================================================================
+
+const futureRetroBaseTypography = {
+  'font-family-base': '"MaiRetroText", "Microsoft YaHei UI", system-ui, sans-serif',
+  'font-family-code': '"Agency FB", "Cascadia Mono", "JetBrains Mono", Consolas, monospace',
+  'font-weight-normal': 700,
+  'font-weight-medium': 700,
+  'font-weight-semibold': 800,
+  'font-weight-bold': 800,
+  'letter-spacing-tight': '0em',
+  'letter-spacing-normal': '0em',
+  'letter-spacing-wide': '0em',
+} satisfies Partial<TypographyTokens>
+
+const futureRetroBaseVisual = {
+  'radius-sm': '2px',
+  'radius-md': '3px',
+  'radius-lg': '4px',
+  'radius-xl': '4px',
+  'shadow-sm': 'none',
+  'shadow-md': 'none',
+  'shadow-lg': 'none',
+  'shadow-xl': 'none',
+} satisfies Partial<VisualTokens>
+
+const futureRetroBaseLayout = {
+  'sidebar-width': '11rem',
+  'sidebar-logo-height': '5rem',
+  'sidebar-logo-padding-x': '0.75rem',
+  'sidebar-nav-padding': '1rem',
+  'sidebar-nav-padding-collapsed': '0.5rem',
+  'sidebar-section-gap': '0.75rem',
+  'sidebar-section-title-height': '1.25rem',
+  'sidebar-section-title-margin-bottom': '0.5rem',
+  'sidebar-section-title-margin-bottom-collapsed': '0.25rem',
+  'sidebar-nav-item-gap': '0.25rem',
+  'sidebar-collapsed-width': '4rem',
+  'sidebar-nav-item-height': '2.4rem',
+  'sidebar-nav-item-padding-x': '0.75rem',
+  'sidebar-nav-item-collapsed-width': '3rem',
+} satisfies Partial<LayoutTokens>
+
+export const futureRetroLightTokens: Partial<ThemeTokens> = {
+  color: {
+    ...defaultLightTokens.color,
+    primary: '15.6 68.7% 45.1%',
+    'primary-foreground': '39.5 100% 92%',
+    'primary-gradient': 'none',
+    secondary: '34.1 54.8% 81.8%',
+    'secondary-foreground': '189.1 59.6% 17.5%',
+    muted: '34.9 48.3% 82.5%',
+    'muted-foreground': '39.1 11.6% 39%',
+    accent: '34.7 45.6% 75.5%',
+    'accent-foreground': '189 72% 18.2%',
+    background: '35.4 61.9% 87.6%',
+    foreground: '189 72% 18.2%',
+    card: '35.4 61.9% 87.6%',
+    'card-foreground': '189 72% 18.2%',
+    popover: '36 66% 89.6%',
+    'popover-foreground': '189 72% 18.2%',
+    border: '188.1 74% 19.6%',
+    input: '39.1 11.6% 43.5%',
+    ring: '15.6 68.7% 45.1%',
+    'chart-1': '15.6 68.7% 45.1%',
+    'chart-2': '189 72% 18.2%',
+    'chart-3': '39.7 56.3% 51.6%',
+    'chart-4': '39.1 11.6% 39%',
+    'chart-5': '34.1 54.8% 81.8%',
+  },
+  typography: {
+    ...defaultLightTokens.typography,
+    ...futureRetroBaseTypography,
+  },
+  visual: {
+    ...defaultLightTokens.visual,
+    ...futureRetroBaseVisual,
+  },
+  layout: {
+    ...defaultLightTokens.layout,
+    ...futureRetroBaseLayout,
+  },
+}
+
+export const futureRetroDarkTokens: Partial<ThemeTokens> = {
+  color: {
+    ...defaultDarkTokens.color,
+    primary: '19.2 44.7% 42.5%',
+    'primary-foreground': '34 40% 86%',
+    'primary-gradient': 'none',
+    secondary: '24 16% 18%',
+    'secondary-foreground': '34 28% 76%',
+    muted: '24 14% 17%',
+    'muted-foreground': '34 19% 58%',
+    accent: '40 24% 28%',
+    'accent-foreground': '34 30% 78%',
+    background: '17 25.9% 10.6%',
+    foreground: '34.3 31.8% 74.3%',
+    card: '20 21.3% 13.9%',
+    'card-foreground': '34.3 31.8% 74.3%',
+    popover: '24 20% 15%',
+    'popover-foreground': '34.3 31.8% 74.3%',
+    border: '31 18% 28%',
+    input: '31 16% 30%',
+    ring: '20 43% 45%',
+    'chart-1': '19.2 44.7% 42.5%',
+    'chart-2': '40.3 33.3% 46.9%',
+    'chart-3': '91 14% 42%',
+    'chart-4': '8 24% 43%',
+    'chart-5': '34.3 31.8% 74.3%',
+  },
+  typography: {
+    ...defaultDarkTokens.typography,
+    ...futureRetroBaseTypography,
+  },
+  visual: {
+    ...defaultDarkTokens.visual,
+    ...futureRetroBaseVisual,
+  },
+  layout: {
+    ...defaultDarkTokens.layout,
+    ...futureRetroBaseLayout,
+  },
+}
+
+// ============================================================================
+// Millennium Tokens (千禧：米黄机壳、键帽与下沉屏幕)
+// ============================================================================
+
+const millenniumBaseTypography = {
+  'font-family-base':
+    'var(--mil-font-pixel), system-ui, sans-serif',
+  'font-family-code': '"JetBrains Mono", "Cascadia Mono", Consolas, monospace',
+  'font-weight-normal': 500,
+  'font-weight-medium': 700,
+  'font-weight-semibold': 700,
+  'font-weight-bold': 800,
+  'letter-spacing-tight': '0em',
+  'letter-spacing-normal': '0em',
+  'letter-spacing-wide': '0.04em',
+} satisfies Partial<TypographyTokens>
+
+const millenniumBaseVisual = {
+  'radius-sm': '0px',
+  'radius-md': '0px',
+  'radius-lg': '0px',
+  'radius-xl': '0px',
+  'shadow-sm': 'none',
+  'shadow-md': 'none',
+  'shadow-lg': 'none',
+  'shadow-xl': 'none',
+} satisfies Partial<VisualTokens>
+
+const millenniumBaseLayout = {
+  'sidebar-logo-height': '52px',
+  'sidebar-nav-item-gap': '0.625rem',
+  'sidebar-nav-item-height': '2.875rem',
+  'sidebar-nav-item-collapsed-width': '2.875rem',
+} satisfies Partial<LayoutTokens>
+
+export const millenniumLightTokens: Partial<ThemeTokens> = {
+  color: {
+    ...defaultLightTokens.color,
+    primary: '134.4 46.4% 70%',
+    'primary-foreground': '104 14.9% 19.8%',
+    'primary-gradient': 'none',
+    secondary: '43.3 42.9% 91.8%',
+    'secondary-foreground': '37.5 12.1% 25.9%',
+    muted: '42.2 32.5% 83.7%',
+    'muted-foreground': '43.6 12.6% 34.1%',
+    accent: '44.2 51.4% 92.7%',
+    'accent-foreground': '36.9 12.6% 20.2%',
+    destructive: '9 61% 47.3%',
+    'destructive-foreground': '0 0% 100%',
+    background: '42 30.6% 80.8%',
+    foreground: '37.5 12.1% 25.9%',
+    card: '43.2 38.5% 87.3%',
+    'card-foreground': '37.5 12.1% 25.9%',
+    popover: '43.3 42.9% 91.8%',
+    'popover-foreground': '37.5 12.1% 25.9%',
+    border: '41.8 18.2% 64.5%',
+    input: '43.1 12.6% 49.8%',
+    ring: '136.4 29.6% 51.6%',
+    'chart-1': '15.1 67.7% 53.9%',
+    'chart-2': '147.6 46.8% 46.5%',
+    'chart-3': '39.1 66.7% 55.3%',
+    'chart-4': '211.2 29.6% 50.4%',
+    'chart-5': '39.2 10.4% 49%',
+  },
+  typography: {
+    ...defaultLightTokens.typography,
+    ...millenniumBaseTypography,
+  },
+  visual: {
+    ...defaultLightTokens.visual,
+    ...millenniumBaseVisual,
+  },
+  layout: {
+    ...defaultLightTokens.layout,
+    ...millenniumBaseLayout,
+  },
+}
+
+export const millenniumDarkTokens: Partial<ThemeTokens> = {
+  color: {
+    ...defaultDarkTokens.color,
+    primary: '134.4 46.4% 70%',
+    'primary-foreground': '125.5 15.1% 14.3%',
+    'primary-gradient': 'none',
+    secondary: '35 8.5% 27.8%',
+    'secondary-foreground': '43.2 38.5% 87.3%',
+    muted: '30 8.2% 19.2%',
+    'muted-foreground': '42.2 15.4% 65.7%',
+    accent: '35 8.5% 27.8%',
+    'accent-foreground': '43.3 42.9% 91.8%',
+    destructive: '9.6 67.4% 54.3%',
+    'destructive-foreground': '0 0% 100%',
+    background: '34.3 8% 17.1%',
+    foreground: '43.2 38.5% 87.3%',
+    card: '33.3 8.4% 21%',
+    'card-foreground': '43.2 38.5% 87.3%',
+    popover: '32.7 8.8% 24.5%',
+    'popover-foreground': '43.2 38.5% 87.3%',
+    border: '30 9.1% 12.9%',
+    input: '36 9.4% 10.4%',
+    ring: '134.4 46.4% 70%',
+    'chart-1': '18.4 83.1% 65.3%',
+    'chart-2': '134.4 46.4% 70%',
+    'chart-3': '42.4 73.3% 66.3%',
+    'chart-4': '210 49.3% 70.6%',
+    'chart-5': '42.2 15.4% 65.7%',
+  },
+  typography: {
+    ...defaultDarkTokens.typography,
+    ...millenniumBaseTypography,
+  },
+  visual: {
+    ...defaultDarkTokens.visual,
+    ...millenniumBaseVisual,
+  },
+  layout: {
+    ...defaultDarkTokens.layout,
+    ...millenniumBaseLayout,
+  },
+}
+
+// ============================================================================
+// Token Utility Functions
+// ============================================================================
+
+/**
+ * 将 Token 类别和 key 转换为 CSS 变量名
+ * @example tokenToCSSVarName('color', 'primary') => '--color-primary'
+ */
+export function tokenToCSSVarName(
+  category: keyof ThemeTokens | 'color' | 'typography' | 'visual' | 'layout' | 'animation',
+  key: string
+): string {
+  return `--${category}-${key}`
+}
+
+// ============================================================================
+// Background Config Types
+// ============================================================================
+
+export type BackgroundEffects = {
+  blur: number // px, 0-50
+  overlayColor: string // HSL string，如 '0 0% 0%'
+  overlayOpacity: number // 0-1
+  position: 'cover' | 'contain' | 'center' | 'stretch'
+  brightness: number // 0-200, default 100
+  contrast: number // 0-200, default 100
+  saturate: number // 0-200, default 100
+  gradientOverlay?: string // CSS gradient string（可选）
+}
+
+export type BackgroundConfig = {
+  type: 'none' | 'image' | 'video'
+  assetId?: string // IndexedDB asset ID
+  inherit?: boolean // true = 继承页面背景
+  effects: BackgroundEffects
+  customCSS: string // 组件级自定义 CSS
+}
+
+export type BackgroundConfigMap = {
+  page?: BackgroundConfig
+  sidebar?: BackgroundConfig
+  header?: BackgroundConfig
+  card?: BackgroundConfig
+  dialog?: BackgroundConfig
+}
+
+export const defaultBackgroundEffects: BackgroundEffects = {
+  blur: 0,
+  overlayColor: '0 0% 0%',
+  overlayOpacity: 0,
+  position: 'cover',
+  brightness: 100,
+  contrast: 100,
+  saturate: 100,
+}
+
+export const defaultBackgroundConfig: BackgroundConfig = {
+  type: 'none',
+  effects: defaultBackgroundEffects,
+  customCSS: '',
+}

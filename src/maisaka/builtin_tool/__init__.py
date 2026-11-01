@@ -16,6 +16,8 @@ from .query_image_memory import get_tool_spec as get_query_image_memory_tool_spe
 from .query_image_memory import handle_tool as handle_query_image_memory_tool
 from .query_person_profile import get_tool_spec as get_query_person_profile_tool_spec
 from .query_person_profile import handle_tool as handle_query_person_profile_tool
+from .query_language_learning import get_tool_spec as get_query_language_learning_tool_spec
+from .query_language_learning import handle_tool as handle_query_language_learning_tool
 from .read_tool_result import get_tool_spec as get_read_tool_result_tool_spec
 from .read_tool_result import handle_tool as handle_read_tool_result_tool
 from .reply import get_tool_spec as get_reply_tool_spec
@@ -109,6 +111,12 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
         "query_person_profile",
         _get_query_person_profile_tool_spec,
         handle_query_person_profile_tool,
+        stage="action",
+    ),
+    BuiltinToolEntry(
+        "query_language_learning",
+        get_query_language_learning_tool_spec,
+        handle_query_language_learning_tool,
         stage="action",
     ),
     BuiltinToolEntry("send_emoji", get_send_emoji_tool_spec, handle_send_emoji_tool, stage="action"),

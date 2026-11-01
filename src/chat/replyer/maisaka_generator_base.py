@@ -107,7 +107,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         try:
             bot_name = global_config.bot.nickname
             alias_names = global_config.bot.alias_names
-            bot_aliases = f"，也有人叫你{','.join(alias_names)}" if alias_names else ""
+            bot_aliases = f"；平台别名 {','.join(alias_names)} 均指同一个机器人身份" if alias_names else ""
 
             prompt_personality = global_config.personality.personality.strip()
             if not prompt_personality:
@@ -536,7 +536,6 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         expression_habits: str = "",
         stream_id: Optional[str] = None,
     ) -> str:
-        del reply_message
         del reply_reason
         del expression_habits
         session_id = self._resolve_session_id(stream_id)
@@ -555,6 +554,9 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
 
         if attention_drift := build_attention_drift_prompt_block():
             system_prompt += f"\n\n{attention_drift}"
+        from src.common.bot_interaction_policy import build_bot_interaction_prompt
+        if reply_message is not None and (bot_interaction := build_bot_interaction_prompt([reply_message])):
+            system_prompt += f"\n\n{bot_interaction}"
         return system_prompt
 
     def _build_reply_instruction(self) -> str:
@@ -564,13 +566,33 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         )
 
     @staticmethod
-    def _build_reply_reference_message(reply_reason: str, reply_reference: str) -> str:
+    def _build_reply_reference_message(
+        reply_reason: str,
+        reply_reference: str,
+        planner_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """有 reply reference 时只使用参考，否则使用 Planner 正文。"""
 
         normalized_reference = reply_reference.strip()
-        if normalized_reference:
-            return normalized_reference
-        return reply_reason.strip()
+        base = normalized_reference or reply_reason.strip()
+        if not isinstance(planner_context, dict) or not planner_context:
+            return base
+        lines = [base] if base else []
+        lines.append("【Planner 交接信息：仅供本次 replyer 使用】")
+        platform = str(planner_context.get("platform") or "").strip()
+        if platform:
+            lines.append(f"当前来源平台：{platform}")
+        tools = planner_context.get("available_tools")
+        if isinstance(tools, list) and tools:
+            lines.append("本轮实际可调用工具：" + ", ".join(str(item) for item in tools[:80]))
+        deferred = planner_context.get("deferred_tools")
+        if isinstance(deferred, list) and deferred:
+            lines.append("可通过 Planner tool_search 发现的工具：" + ", ".join(str(item) for item in deferred[:80]))
+        capabilities = planner_context.get("capabilities")
+        if isinstance(capabilities, list) and capabilities:
+            lines.append("当前平台能力提示：" + "；".join(str(item) for item in capabilities[:20]))
+        lines.append("这些是 Planner 已确认的事实和工具状态；不要把它们误写成用户发言，也不要声称没有这些能力。")
+        return "\n".join(lines)
 
     def _build_final_user_message(
         self,
@@ -717,6 +739,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         reply_reference_message = self._build_reply_reference_message(
             reply_reason,
             str((reply_tool_args or {}).get("reply_reference") or ""),
+            planner_context=(reply_tool_args or {}).get("_planner_context"),
         )
         requested_reply_style_message = self._build_requested_reply_style_message(
             str((reply_tool_args or {}).get("reply_style") or "")

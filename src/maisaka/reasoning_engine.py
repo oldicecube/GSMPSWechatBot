@@ -23,7 +23,7 @@ from src.common.data_models.message_component_data_model import (
     TextComponent,
 )
 from src.common.logger import get_logger
-from src.config.config import global_config
+from src.config.config import global_config, config_manager
 from src.core.tooling import (
     ToolAvailabilityContext,
     ToolContentItem,
@@ -32,7 +32,8 @@ from src.core.tooling import (
     ToolInvocation,
     ToolSpec,
 )
-from src.llm_models.exceptions import ReqAbortException, RespNotOkException
+from src.llm_models.exceptions import ModelCooldownError, ReqAbortException, RespNotOkException
+from src.llm_models.quota_cooldown import task_retry_after
 from src.llm_models.model_client.adapter_base import await_task_with_interrupt
 from src.llm_models.payload_content.context_item import (
     ContextImagePart,
@@ -160,6 +161,8 @@ class MaisakaReasoningEngine:
         self._active_logical_turn_id: str | None = None
         self._reply_options: Dict[str, Any] = {}
         self._turn_passive_replyer: Optional[bool] = None
+        self._model_cooldown_error: ModelCooldownError | None = None
+        self._tool_request_message: Optional[SessionMessage] = None
 
     @property
     def passive_replyer_enabled(self) -> bool:
@@ -286,6 +289,10 @@ class MaisakaReasoningEngine:
         """构造本轮 planner 的一次性注入消息。"""
 
         injected_messages: list[str] = []
+        from src.platform_io.message_capabilities import planner_transport_hint
+        transport_hint = planner_transport_hint(profile_message)
+        if transport_hint:
+            injected_messages.append(transport_hint)
         if deferred_tools_reminder:
             injected_messages.append(deferred_tools_reminder)
 
@@ -550,6 +557,7 @@ class MaisakaReasoningEngine:
     ) -> None:
         """准备上下文并执行一次 Planner 请求。"""
 
+        self._tool_request_message = trigger_message
         planner_started_at = time.time()
         state.planner_started_at = planner_started_at
         self._runtime._update_stage_status("组织上下文", "整理消息、参考信息与可用工具", round_text=round_text)
@@ -894,6 +902,26 @@ class MaisakaReasoningEngine:
         return cycle_end
 
     async def run_loop(self) -> None:
+        """额度耗尽时保留消费任务，配置更新或冷却到期后恢复。"""
+        while self._runtime._running:
+            try:
+                await self._run_loop()
+                return
+            except ModelCooldownError as exc:
+                self._model_cooldown_error = exc
+                self._runtime._update_stage_status("等待模型恢复", exc.message)
+                logger.warning(f"{self._runtime.log_prefix} 模型额度或频率受限，暂停思考；退避结束或认证配置更新后恢复")
+                try:
+                    while self._runtime._running:
+                        delay = task_retry_after(config_manager.get_model_config(), exc.task_name)
+                        if delay <= 0:
+                            break
+                        # 定期检查热更新；任务仍可取消，正常收信及其他平台任务不受阻塞。
+                        await asyncio.sleep(min(15.0, delay))
+                finally:
+                    self._model_cooldown_error = None
+
+    async def _run_loop(self) -> None:
         """独立消费消息批次，并执行对应的内部思考轮次。"""
         try:
             while self._runtime._running:
@@ -905,7 +933,11 @@ class MaisakaReasoningEngine:
                 cached_messages = turn_start_context.cached_messages
                 trigger_message = turn_start_context.trigger_message
 
-                if turn_start_context.silent_reply_frequency:
+                # A plugin proactive task is an explicit request to consider
+                # speaking.  Do not discard it through the ordinary chat
+                # frequency silence gate; that gate applies to passive turns
+                # only.
+                if turn_start_context.silent_reply_frequency and not turn_start_context.proactive_triggered:
                     await self._handle_silent_turn(
                         cached_messages=cached_messages,
                         timeout_triggered=turn_start_context.timeout_triggered,
@@ -1002,6 +1034,8 @@ class MaisakaReasoningEngine:
                             self._runtime._update_stage_status("空闲", "本轮处理结束")
         except asyncio.CancelledError:
             self._runtime._log_internal_loop_cancelled()
+            raise
+        except ModelCooldownError:
             raise
         except RespNotOkException as exc:
             self._runtime._update_stage_status(
@@ -1121,7 +1155,8 @@ class MaisakaReasoningEngine:
         planner_prefix = build_planner_user_prefix_from_session_message(
             message,
             include_chat_id=include_chat_id,
-            is_self_message=source_kind == "guided_reply",
+            is_self_message=(source_kind == "guided_reply" or
+                             str(message.message_info.user_info.user_id or '') == str(message.account_id or '')),
         )
         if contains_complex_message(source_sequence):
             return ComplexSessionMessage.from_session_message(
@@ -1471,6 +1506,7 @@ class MaisakaReasoningEngine:
             group_id=str(getattr(chat_stream, "group_id", "") or "").strip(),
             user_id=str(getattr(chat_stream, "user_id", "") or "").strip(),
             platform=str(getattr(chat_stream, "platform", "") or "").strip(),
+            metadata={"anchor_message": self._tool_request_message},
         )
 
     @staticmethod
@@ -1577,6 +1613,13 @@ class MaisakaReasoningEngine:
         )
         if not history_content:
             history_content = "工具执行成功。" if result.success else f"工具 {tool_call.func_name} 执行失败。"
+
+        if result.metadata.get('plugin_id'):
+            from html import escape
+            origin = result.metadata.get('message_origin') or {}
+            attrs = {'plugin_id': result.metadata['plugin_id'], 'kind': 'plugin_tool_result', **origin}
+            history_content = '<plugin_activity ' + ' '.join(
+                f'{key}="{escape(str(value), quote=True)}"' for key, value in attrs.items()) + '>\n' + history_content + '\n</plugin_activity>'
 
         normalized_metadata = normalize_tool_record_value(result.metadata)
         if not isinstance(normalized_metadata, dict):

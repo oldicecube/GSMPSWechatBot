@@ -28,7 +28,9 @@ from src.services import send_service
 from .context import BuiltinToolRuntimeContext, PostProcessedReplyMessage
 
 logger = get_logger("maisaka_builtin_reply")
-_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "_reply_id", "_plugin_reply_prompt"}
+_REPLY_TOOL_INTERNAL_ARGUMENTS = {
+    "msg_id", "_reply_id", "_plugin_reply_prompt", "messages",
+}
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (
     "你刚刚已经回复过这条消息，你刚刚的发言是：“{previous_reply}”\n"
@@ -138,6 +140,7 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
             "description": "可选。控制本次回复的篇幅和表达方式",
             "enum": ["简短表达", "正常回复", "长回复"],
         },
+
     }
     if _use_expression_intent():
         properties["expression_intent"] = {
@@ -207,7 +210,7 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
         properties["attach_emoji"] = {
             "type": "integer",
             "minimum": 0,
-            "description": "可选。从 show_emoji_list 的拼图选择一个表情包，填写图片序号，在文字后发送；0 或不填表示不发送表情包。",
+            "description": "可选。从 show_emoji_list 的拼图选择一个表情包；玩梗、吐槽、惊讶或活跃气氛时积极考虑填写，在文字后单独发送；0 或不填表示不发送。",
         }
     if config_module.global_config.chat.enable_reply_at:
         properties["attach_at"] = {
@@ -354,6 +357,32 @@ def _find_recent_reply_to_target(
     return ""
 
 
+def _duplicate_target_content_count(
+    chat_history: list[LLMContextMessage],
+    target_message: SessionMessage,
+) -> int:
+    """统计当前目标正文在最近历史中的重复入站次数。"""
+    target_text = " ".join(str(target_message.processed_plain_text or "").split()).strip()
+    target_user = str(target_message.message_info.user_info.user_id or "").strip()
+    if not target_text or not target_user:
+        return 0
+    count = 0
+    for item in reversed(chat_history):
+        if not isinstance(item, SessionBackedMessage):
+            continue
+        message = item.original_message
+        if message.session_id != target_message.session_id or message.is_notify:
+            continue
+        if str(message.message_info.user_info.user_id or "").strip() != target_user:
+            continue
+        text = " ".join(str(message.processed_plain_text or "").split()).strip()
+        if text == target_text:
+            count += 1
+        if count >= 3:
+            break
+    return count
+
+
 def _with_duplicate_target_reply_reminder(
     reply_tool_args: dict[str, Any],
     previous_reply: str,
@@ -404,6 +433,26 @@ async def execute_reply(
     """
 
     invocation_arguments = deepcopy(arguments)
+    runtime = tool_ctx.runtime
+    # Planner 已经完成了一轮工具可用性判断；把真实交接信息带入
+    # replyer，避免 replyer 只看到一句方向指导后自行缩减能力范围。
+    try:
+        chat_stream = runtime.chat_stream
+        active_names = sorted(getattr(runtime._chat_loop_service, "_active_tool_names", ()) or ())
+        deferred_names = sorted(getattr(runtime, "deferred_tool_specs_by_name", {}).keys())
+        capabilities = []
+        if str(chat_stream.platform or "") == "qq":
+            capabilities = ["QQ可@、引用、拍一拍和群管理；目标必须使用QQ号"]
+        elif str(chat_stream.platform or "") == "wechat":
+            capabilities = ["微信可发送文字、图片、文件和@；引用格式由发送端丢弃"]
+        invocation_arguments["_planner_context"] = {
+            "platform": str(chat_stream.platform or ""),
+            "available_tools": active_names,
+            "deferred_tools": deferred_names,
+            "capabilities": capabilities,
+        }
+    except Exception:
+        pass
     if type(invocation_arguments.get("attach_emoji")) is int and invocation_arguments["attach_emoji"] == 0:
         invocation_arguments.pop("attach_emoji")
     reply_reference = invocation_arguments.get("reply_reference")
@@ -443,6 +492,30 @@ async def execute_reply(
             "reply",
             f"未找到要回复的目标消息，msg_id={to_display_message_id(target_message_id)}",
         )
+
+    # 转发消息展开、重复投递或上游重试可能产生多个不同 msg_id、相同
+    # 正文的入站消息。它们不应让 Planner 对同一句话连续发几十次回复。
+    # 直接 @/强制回复仍允许正常处理。
+    if (
+        not target_message.is_at
+        and not target_message.is_mentioned
+        and target_message.message_info.additional_config.get("force_reply") is not True
+        and _duplicate_target_content_count(tool_ctx.runtime._chat_history, target_message) >= 3
+    ):
+        logger.info(
+            "%s 跳过重复目标回复: msg_id=%s",
+            tool_ctx.runtime.log_prefix,
+            target_message_id,
+        )
+        suppressed_result = tool_ctx.build_success_result(
+            "reply",
+            "检测到同一发送者的重复消息，已跳过重复回复。",
+            structured_content={"msg_id": target_message_id, "duplicate_suppressed": True},
+            metadata={"duplicate_suppressed": True},
+            post_history_messages=[],
+        )
+        suppressed_result.stop_after_execution = True
+        return suppressed_result
 
     extension_execution = ReplyExtensionExecution(
         context=ToolAvailabilityContext(
@@ -530,6 +603,12 @@ async def execute_reply(
         )
 
     reply_text = reply_result.completion.response_text.strip() if success else ""
+    # ``legacy`` is an internal migration marker from old Expression rows,
+    # never a user-facing expression.  Old selector/vector cache entries can
+    # still cause a model to echo it; replace standalone leakage before any
+    # send or history write.
+    if reply_text.casefold() in {"legacy", "legacy要吗", "legacy 要吗"}:
+        reply_text = "没绷住"
 
     if not reply_text:
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
@@ -579,6 +658,12 @@ async def execute_reply(
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
         reply_metadata = _build_monitor_metadata(reply_result, extension_execution.reply_id)
         logger.exception(f"{tool_ctx.runtime.log_prefix} 解析回复附件失败: {exc}")
+        from utils.runtime_trace import trace_runtime
+        trace_runtime("maibot_reply_attachment_error", session=tool_ctx.runtime.session_id,
+                      error_type=type(exc).__name__, error=str(exc),
+                      attach_at=invocation_arguments.get("attach_at"),
+                      attach_pic=invocation_arguments.get("attach_pic"),
+                      attach_emoji=invocation_arguments.get("attach_emoji"))
         return tool_ctx.build_failure_result(
             "reply",
             f"解析回复附件失败：{exc}",

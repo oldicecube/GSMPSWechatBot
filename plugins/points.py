@@ -1,3 +1,7 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 import re
 from utils.points_manager import get_points, add_points, set_points, get_all_wxids
 
@@ -21,6 +25,11 @@ def _is_admin(wxid):
 
 def handle(content, context):
     """处理 /points 命令"""
+    from utils.points_manager import binding_required
+    from utils.account_identity import bound_user
+    error = binding_required(context)
+    if error:
+        return error
     wxid = context.get("wxid") or context.get("raw", {}).get("wxid")
     
     if not wxid:
@@ -75,6 +84,14 @@ def handle(content, context):
     
     # 分割参数
     parts = content_str.split()
+    if len(parts) == 1 and not parts[0].startswith(('+', '-')) and parts[0] != 'modify':
+        target = wxid if parts[0] in {'me', '我的'} else parts[0]
+        if not bound_user(target):
+            return '该账号未绑定游戏账号，积分系统未启用'
+        return f'当前积分: {get_points(target):.1f}'
+    target = parts[2] if parts[0] == 'modify' and len(parts) >= 3 else parts[1] if len(parts) >= 2 else None
+    if target and not bound_user(target):
+        return '目标账号未绑定游戏账号，不能调整积分'
     
     # ===================================================
     # 情况2: /points modify <数值> <wxid> - 直接修改积分（仅管理员）

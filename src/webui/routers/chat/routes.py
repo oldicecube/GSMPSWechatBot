@@ -41,6 +41,7 @@ from src.platform_io import (
     get_platform_io_manager,
 )
 from src.webui.dependencies import require_auth
+from src.platform_io.chat_features import legacy_defaults
 from src.webui.utils.toml_utils import save_toml_with_format
 
 from .service import (
@@ -102,6 +103,7 @@ class AdapterHostPolicySectionRequest(BaseModel):
     default_action: Literal["inherit", "allow", "block"] = Field(default="inherit")
     allow_ids: List[str] = Field(default_factory=list)
     deny_ids: List[str] = Field(default_factory=list)
+    features: Optional[Dict[str, Dict[str, bool]]] = None
 
 
 class AdapterHostPolicyGroupRequest(BaseModel):
@@ -1064,7 +1066,7 @@ def _get_adapter_policy_details(chat_session: ChatSession) -> List[Dict[str, Any
     platform_io_manager = get_platform_io_manager()
     policy_manager = get_adapter_policy_manager()
     adapter_details: List[Dict[str, Any]] = []
-    for driver in platform_io_manager.driver_registry.list(kind=DriverKind.PLUGIN, platform=chat_route_key.platform):
+    for driver in platform_io_manager.driver_registry.list(platform=chat_route_key.platform):
         descriptor = driver.descriptor
         metadata = descriptor.metadata if isinstance(descriptor.metadata, dict) else {}
         if str(metadata.get("plugin_type") or "").strip().lower() != "adapter":
@@ -1695,6 +1697,8 @@ def get_adapter_plugin_policy(plugin_id: str) -> Dict[str, object]:
         "plugin_id": normalized_plugin_id,
         "global_defaults": manager.get_default_actions(),
         "policy": policy,
+        "group_feature_defaults": legacy_defaults(identity, policy['group']['allow_ids']),
+        "group_features_supported": True,
         # 当前激活身份换账号登录后实时变化
         **_build_adapter_account_status(manager, normalized_plugin_id, identity, running_identity),
     }
@@ -1724,9 +1728,9 @@ def update_adapter_plugin_policy(
     try:
         manager.set_adapter_policy(
             identity,
-            request.model_dump(),
+            request.model_dump(exclude_none=True),
             policy_groups=(
-                [group.model_dump() for group in request.policy_groups] if request.policy_groups is not None else None
+                [group.model_dump(exclude_none=True) for group in request.policy_groups] if request.policy_groups is not None else None
             ),
             active_group=request.active_group,
         )
@@ -1737,6 +1741,8 @@ def update_adapter_plugin_policy(
         "plugin_id": normalized_plugin_id,
         "global_defaults": manager.get_default_actions(),
         "policy": manager.get_adapter_policy(identity),
+        "group_feature_defaults": legacy_defaults(identity, manager.get_adapter_policy(identity)['group']['allow_ids']),
+        "group_features_supported": True,
         **_build_adapter_account_status(manager, normalized_plugin_id, identity, identity),
     }
 

@@ -1,3 +1,7 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 import random
 from datetime import date
 
@@ -13,6 +17,10 @@ COMMAND = "/sign"
 
 def handle(content, context):
     """处理签到命令"""
+    from utils.points_manager import binding_required, claim_sign
+    error = binding_required(context)
+    if error:
+        return error
     wxid = context.get("wxid") or context.get("raw", {}).get("wxid")
     
     if not wxid:
@@ -27,11 +35,9 @@ def handle(content, context):
     # 随机获取5-10积分
     points_gained = random.randint(5, 10)
     
-    # 记录签到时间
-    set_last_sign_at(wxid)
-    
-    # 增加积分
-    total_points = add_points(wxid, points_gained)
+    success, total_points = claim_sign(wxid, points_gained)
+    if not success:
+        return "你今日已签到过了，请明天再来"
     
     return (
         f"✅ 签到成功！\n"

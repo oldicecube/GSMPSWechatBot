@@ -1,0 +1,48 @@
+{
+  "manifest_version": 2,
+  "id": "papaya0481.forward-messages-auto",
+  "version": "0.2.12",
+  "name": "自主跨群转发插件",
+  "description": "MaiBot 在多个群聊中时，让其自主判断群聊中的消息是否值得分享，并转发到其他群。群聊由配置决定。",
+  "author": {
+    "name": "papaya0481",
+    "url": "https://github.com/papaya0481"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/papaya0481/maibot-ForwardMessagesAuto-plugin",
+    "homepage": "https://github.com/papaya0481/maibot-ForwardMessagesAuto-plugin",
+    "documentation": "https://github.com/papaya0481/maibot-ForwardMessagesAuto-plugin#readme",
+    "issues": "https://github.com/papaya0481/maibot-ForwardMessagesAuto-plugin/issues"
+  },
+  "host_application": {
+    "min_version": "1.2.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.7.1",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "plugin_type": "integration",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "share-2"
+    }
+  },
+  "capabilities": [
+    "send.forward",
+    "message.get_by_id",
+    "chat.get_group_streams",
+    "chat.get_stream_by_group_id",
+    "chat.open_session",
+    "maisaka.proactive.trigger"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}

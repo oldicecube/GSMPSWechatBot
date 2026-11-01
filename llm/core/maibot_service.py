@@ -44,6 +44,8 @@ class _ProactiveShim:
 class MaibotLLMService:
     """Dispatcher-compatible facade over MaiBot's ``LLMServiceClient``."""
 
+    native_ingress = True
+
     def __init__(self) -> None:
         self._native_config_summary = sync_native_config()
         self.config = self._load_legacy_llm_config()
@@ -64,9 +66,11 @@ class MaibotLLMService:
             import json
             from pathlib import Path
 
-            return json.loads((Path(__file__).resolve().parents[2] / "config.json").read_text(encoding="utf-8")).get("llm", {})
+            root = Path(os.environ.get("MAIBOT_INSTANCE_DIR") or Path(__file__).resolve().parents[2])
+            from llm.config import without_shell_persona
+            return without_shell_persona(json.loads((root / "config.json").read_text(encoding="utf-8")).get("llm", {}))
         except Exception:
-            return {"enabled": True, "assistant_nickname": "LLM", "identity": {}}
+            return {"enabled": True}
 
     def _get_client(self):
         if self._client is None:
@@ -77,33 +81,18 @@ class MaibotLLMService:
         return self._client
 
     def _build_prompt(self, nickname: str, content: str, group_id: str, message_context: Optional[Dict[str, Any]]) -> str:
-        identity = self.config.get("identity") or {}
-        persona = "。".join(str(identity.get(key) or "").strip() for key in ("name", "role", "style") if identity.get(key))
-        style = str(self.config.get("reply_style") or "").strip()
-        group_prompt = str(self.config.get("group_prompt") or "").strip()
-        private_prompt = str(self.config.get("private_prompt") or "").strip()
-        bot_nickname = ""
-        try:
-            from src.config.config import config_manager
-
-            native = config_manager.get_global_config()
-            persona_cfg = getattr(native, "personality", None)
-            bot_cfg = getattr(native, "bot", None)
-            chat_cfg = getattr(native, "chat", None)
-            persona = str(getattr(persona_cfg, "personality", persona) or persona)
-            style = str(getattr(persona_cfg, "reply_style", style) or style)
-            bot_nickname = str(getattr(bot_cfg, "nickname", "") or "")
-            if group_id:
-                group_prompt = str(getattr(getattr(chat_cfg, "reply_style", None), "group_chat_prompt", group_prompt) or group_prompt)
-            else:
-                group_prompt = str(getattr(getattr(chat_cfg, "reply_style", None), "private_chat_prompts", private_prompt) or private_prompt)
-        except Exception:
-            pass
+        from src.config.config import config_manager
+        native = config_manager.get_global_config()
+        persona = native.personality.personality
+        style = native.personality.reply_style
+        bot_nickname = native.bot.nickname
+        attention = (native.chat.reply_style.group_chat_prompt if group_id
+                     else native.chat.reply_style.private_chat_prompts)
         context = message_context or {}
         lines = [
             f"你是 MaiBot 驱动的 WeChat Bot。机器人名称：{bot_nickname or 'MaiBot'}。人格：{persona}",
             f"回复风格：{style}",
-            group_prompt if group_id else private_prompt,
+            attention,
             f"当前用户：{nickname}",
             f"当前群组：{group_id or '私聊'}",
             f"当前消息：{content}",
@@ -113,71 +102,60 @@ class MaibotLLMService:
         lines.append("只输出最终回复文本，不输出分析过程，不声称发送了消息。")
         return "\n".join(item for item in lines if item)
 
-    def handle_message(self, group_id, nickname, content, wxid="", session_id=None, message_context=None, force_reply=False):
-        del message_context, force_reply
+    def handle_message(self, group_id, nickname, content, wxid="", session_id=None, message_context=None, force_reply=False, wait_for_completion=True):
         if not self.config.get("enabled", True):
             self._log("request_skipped reason=disabled")
             return {"messages": [], "should_reply": False, "error": "LLM disabled"}
         try:
             self._log("native_request task=maisaka.planner mode=direct group=%s chars=%s", group_id or session_id or "unknown", len(str(content or "")))
             trace_runtime("maibot_native_request", task="maisaka.planner", mode="direct", group=str(group_id or session_id or "unknown"))
-            result = self._native_runtime.handle_message(str(group_id or ""), str(nickname or "未知用户"), str(content or ""), str(wxid or ""), str(session_id or "") or None)
-            self._log("native_response task=maisaka.planner mode=direct chars=%s", len(str((result.get("messages") or [{}])[0].get("content") or "")))
+            result = self._native_runtime.handle_message(str(group_id or ""), str(nickname or "未知用户"), str(content or ""), str(wxid or ""), str(session_id or "") or None,
+                message_context=message_context, force_reply=force_reply, wait_for_completion=wait_for_completion)
+            self._log("native_response task=maisaka.planner accepted=%s ok=%s", len(result.get("accepted", [])), result.get("_llm_ok", True))
             return result
         except Exception as exc:
             self._log("error task=planner mode=direct type=%s error=%s", type(exc).__name__, exc)
             trace_runtime("maibot_core_error", task="planner", mode="direct", error=f"{type(exc).__name__}: {exc}")
-            return {"messages": [], "should_reply": False, "error": f"MaiBot LLM failed: {type(exc).__name__}: {exc}"}
+            return {"messages": [], "should_reply": False, "_llm_ok": False, "error": f"MaiBot LLM failed: {type(exc).__name__}: {exc}"}
+
+    def ingest_context(self, context, *, observe_only=False):
+        """Admit transport messages immediately; native timing owns future replies."""
+        if not self.config.get("enabled", True):
+            return {"messages": [], "should_reply": False, "native_delivery_owned": True, "_llm_ok": False}
+        effective = self._effective_group_config(context.get("group") or context.get("sessionId"))
+        settings = effective.get("auto_reply") or {}
+        directed = any(context.get(k) for k in ("command", "force_reply", "prefix_used", "directed_to_bot", "reply_to_bot", "is_at", "is_mentioned", "is_private"))
+        allowed = settings.get("allowed_groups") or []
+        ordinary_allowed = settings.get("enabled", True) and (not allowed or context.get("group") in allowed or context.get("sessionId") in allowed)
+        from src.platform_io.chat_features import context_override
+        feature = context_override(context, 'llm_enabled')
+        if feature is True:
+            ordinary_allowed = True
+        observe_only = observe_only or feature is False
+        return self._native_runtime.handle_contexts([dict(context)], observe_only=observe_only or (not directed and not ordinary_allowed))
 
     def handle_batch_message(self, group_id, messages=None, **kwargs):
         """Convert Dispatcher batch records into one MaiBot-native request."""
         items = [item for item in (messages or []) if isinstance(item, dict)]
-        nickname = str((items[-1] if items else {}).get("nickname") or (items[-1] if items else {}).get("user") or "未知用户")
-        content = "\n".join(
-            f"{item.get('nickname') or item.get('user') or '用户'}: {item.get('content') or ''}" for item in items
-        ).strip()
-        context = dict(items[-1] if items else {})
-        context["batch_messages"] = items
-        self._log("request task=planner mode=batch group=%s count=%s chars=%s", group_id or "unknown", len(items), len(content))
+        contexts = [{**item, "group": item.get("group") or group_id,
+                     "user": item.get("nickname") or item.get("user"),
+                     "sessionId": item.get("sessionId") or kwargs.get("session_id"),
+                     "force_reply": bool(kwargs.get("force_reply"))} for item in items]
         trace_runtime("maibot_core_request", task="planner", mode="batch", group=str(group_id or "unknown"), count=len(items))
-        result = self.handle_message(
-            group_id,
-            nickname,
-            content,
-            session_id=kwargs.get("session_id") or group_id,
-            message_context=context,
-            force_reply=bool(kwargs.get("force_reply")),
-        )
-        result["_llm_ok"] = True
+        result = self._native_runtime.handle_contexts(contexts, wait_for_completion=kwargs.get("wait_for_completion", True))
         result["_delivery_batch_messages"] = items
         return result
 
     def _provider_call(self, messages, *, thinking=None, task_name="utils", **kwargs: Any):
         """Compatibility-shaped auxiliary call; execution remains MaiBot-native."""
-        del thinking, kwargs
-        prompt = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages or [])
-        from src.services.llm_service import LLMServiceClient
-
-        client = LLMServiceClient(task_name=task_name, request_type="wechat.auxiliary")
-        self._log("request task=%s mode=auxiliary chars=%s", task_name, len(prompt))
-        trace_runtime("maibot_core_request", task=task_name, mode="auxiliary")
-        result = self._generate_with_retry(prompt, "wechat-auxiliary", client=client)
-        text = self._extract_result_text(result)
-        self._log("response task=%s mode=auxiliary model=%s chars=%s", task_name, getattr(result, "model_name", "") or "unknown", len(text))
-        trace_runtime("maibot_core_response", task=task_name, mode="auxiliary", model=str(getattr(result, "model_name", "") or ""), chars=len(text))
-        return SimpleNamespace(content=text)
+        from .native_model_bridge import shell_generate
+        return shell_generate(messages, task_name=task_name, tools=kwargs.get('tools'), timeout=kwargs.get('timeout'))
 
     def _generate_with_retry(self, prompt: str, session_id: str, *, client=None):
         client = client or self._get_client()
-        last_error = None
-        for attempt in range(3):
-            try:
-                return asyncio.run(client.generate_response(prompt, session_id=session_id))
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
-        raise last_error
+        # The native orchestrator already retries/fails over. All clients stay on
+        # the owning event loop instead of retaining HTTP clients on closed loops.
+        return self._native_runtime.submit(client.generate_response(prompt, session_id=session_id), timeout=400)
 
     def _provider_call_low_priority(self, messages, **kwargs: Any):
         return self._provider_call(messages, task_name="utils", **kwargs)
@@ -208,7 +186,10 @@ class MaibotLLMService:
         return {"forward_to_llm": True, "trigger_source": "proactive", "messages": [], "should_reply": False, "animation": None}
 
     def handle_scheduled_event(self, *_args, **_kwargs):
-        return {"messages": [], "should_reply": False, "animation": None}
+        event = _args[0] if _args else _kwargs
+        return self.ingest_context({**event, "group": event.get("group_id"), "sessionId": event.get("session_id") or event.get("group_id"),
+            "wxid": event.get("wxid") or event.get("user_id"), "user": event.get("nickname") or "提醒任务",
+            "content": event.get("content") or event.get("message") or "提醒任务到期", "force_reply": True})
 
     def set_proactive_callback(self, callback):
         self._proactive_callback = callback
@@ -219,17 +200,42 @@ class MaibotLLMService:
     def commit_assistant_delivery(self, result, *_args, **_kwargs):
         return result
 
+    def record_plugin_delivery(self, execution, **delivery):
+        """Record successful shell sends on the native loop, without echo replay."""
+        coroutine = self._native_runtime.record_plugin_delivery(execution, delivery)
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._native_runtime._loop)
+        def completed(done):
+            try:
+                done.result()
+            except Exception as exc:
+                logger.error('Plugin delivery context recording failed: %s', exc)
+        future.add_done_callback(completed)
+
     def on_proactive_result(self, *_args, **_kwargs):
         return None
 
     def curate_cycle(self, *_args, **_kwargs):
-        return None
+        # The embedded native runtime owns transcript trimming and the native
+        # ExpressionLearner/JargonMiner path. The legacy facade used to return
+        # None here, which made the proactive cycle scheduler treat every cycle
+        # as a failed curation and retry forever. Acknowledge the boundary so
+        # it does not block/retry; actual learning is triggered by the native
+        # runtime's trim-learning path.
+        self._log("cycle_curation_acknowledged_native_learning_path")
+        return True
 
-    def _effective_group_config(self, *_args, **_kwargs):
-        return {}
+    def _effective_group_config(self, group_id):
+        effective = dict(self.config)
+        profiles = self.config.get("group_profiles") or {}
+        profile = profiles.get(str(group_id or ""), profiles.get("default", {}))
+        if isinstance(profile, dict):
+            effective.update(profile)
+            effective["auto_reply"] = {**(self.config.get("auto_reply") or {}), **(profile.get("auto_reply") or {})}
+        return effective
 
     def close(self):
         self._client = None
+        self._native_runtime.close()
 
     @staticmethod
     def _extract_result_text(result: Any) -> str:

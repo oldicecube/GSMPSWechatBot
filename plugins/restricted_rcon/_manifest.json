@@ -1,0 +1,33 @@
+{
+  "manifest_version": 2,
+  "id": "wechatbot.restricted-rcon",
+  "name": "Minecraft 受限 RCON",
+  "description": "将原有19个固定RCON动作接入原生Planner，保留Host侧密码与原有群和用户白名单。",
+  "version": "1.0.0",
+  "author": {
+    "name": "Wechat Bot",
+    "url": "https://github.com/oldicecube"
+  },
+  "urls": {
+    "repository": "https://github.com/oldicecube/GSMPSWechatBot"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "1.3.15",
+    "max_version": "1.9.99"
+  },
+  "sdk": {
+    "min_version": "2.16.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "wechatbot.minecraft_rcon"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}

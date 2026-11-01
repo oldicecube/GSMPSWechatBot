@@ -9,11 +9,14 @@ completes it and awards points. Sleep longer than 12 hours is settled as a
 """
 from __future__ import annotations
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from utils.points_manager import add_points
-from utils.sqlite_store import sleep_finish, sleep_get_active, sleep_recent, sleep_start
+from utils.sqlite_store import sleep_settle_once, sleep_get_active, sleep_recent, sleep_start_once
 
 MATCH_RAW_MESSAGE = True
 INTERCEPT_LLM = True
@@ -34,15 +37,14 @@ def init(config):
 
 
 def _wxid(context):
-    raw = context.get("raw") if isinstance(context, dict) else {}
-    raw = raw if isinstance(raw, dict) else {}
-    return str((context or {}).get("wxid") or raw.get("wxid") or "").strip()
+    from utils.account_identity import actor
+    return actor(context or {})
 
 
 def _group(context):
     raw = context.get("raw") if isinstance(context, dict) else {}
     raw = raw if isinstance(raw, dict) else {}
-    return str((context or {}).get("group") or raw.get("group") or "").strip()
+    return str((context or {}).get('sessionId') or (context or {}).get('group_id') or (context or {}).get("group") or raw.get("group") or "").strip()
 
 
 def _nickname(context):
@@ -203,8 +205,9 @@ def _record_text(wxid):
 def _invalidate(active, now):
     start = datetime.fromisoformat(str(active["start_at"]))
     seconds = max(0.0, (now - start).total_seconds())
-    sleep_finish(active["id"], "invalid", now.isoformat(), seconds, invalid_reason="message_within_four_hours")
-    add_points(active["wxid"], -WITHIN_FOUR_HOURS_PENALTY)
+    if not sleep_settle_once(active['id'], 'invalid', now.isoformat(), seconds,
+            invalid_reason='message_within_four_hours', points_delta=-WITHIN_FOUR_HOURS_PENALTY):
+        return None
     return f"\u4f60\u5728\u7761\u7720\u5f00\u59cb\u540e4\u5c0f\u65f6\u5185\u53d1\u4e86\u6d88\u606f\uff0c\u672c\u6b21\u7761\u7720\u65e0\u6548\uff0c\u5e76\u6263\u9664 {WITHIN_FOUR_HOURS_PENALTY} \u79ef\u5206\u3002"
 
 def _complete(active, now):
@@ -214,19 +217,25 @@ def _complete(active, now):
     seconds = OVERSLEEP_SETTLE_SECONDS if oversleep_settled else max(FOUR_HOURS, elapsed)
     score = _score(start, seconds)
     points = round(score / 10.0, 1)
-    sleep_finish(active["id"], "completed", now.isoformat(), seconds, score=score, points_awarded=points)
-    add_points(active["wxid"], points)
+    if not sleep_settle_once(active['id'], 'completed', now.isoformat(), seconds,
+            score=score, points_awarded=points, points_delta=points):
+        return None
     return _wake_message(start, seconds, score, points, oversleep_settled=oversleep_settled)
 
 def handle_auto(context):
     context = context if isinstance(context, dict) else {}
-    if context.get("is_bot"):
+    raw = context.get('raw') or {}
+    if (context.get("is_bot") or context.get('is_notify') or raw.get('is_bot') or raw.get('is_notify')
+            or context.get('source_kind') == 'system_event' or raw.get('source_kind') == 'system_event'):
         return None
     wxid = _wxid(context)
     if not wxid:
         return None
     text = _text(context)
     args = _sleep_args(text)
+    from utils.account_identity import bound_user
+    if not bound_user(wxid):
+        return '请先 /bind <游戏玩家名> 绑定游戏账号后使用睡眠积分功能' if args is not None else None
     active = sleep_get_active(wxid)
     now = datetime.now()
 
@@ -249,5 +258,8 @@ def handle_auto(context):
     if _has_sleep_in_current_period(wxid, now):
         return "\u672c\u4e2a\u7761\u7720\u65f6\u6bb5\u5df2\u7ecf\u7761\u8fc7\u4e00\u6b21\u4e86\uff0c\u4e0d\u80fd\u91cd\u590d\u6253\u5361\u3002"
 
-    sleep_start(wxid, _nickname(context), _group(context), now.isoformat())
+    period = _sleep_period_start(now)
+    if not sleep_start_once(wxid, _nickname(context), _group(context), now.isoformat(),
+                            period.isoformat(), (period+timedelta(hours=12)).isoformat()):
+        return '本个睡眠时段已经睡过一次了，不能重复打卡。'
     return "睡眠已打卡！晚安喵～手机放远一点，四小时后再见。"

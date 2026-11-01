@@ -51,6 +51,19 @@ def _resolve_llm_capability_route(
     return _DEFAULT_PLUGIN_LLM_TASK, model_alias or None
 
 
+def _config_rpc_value(value: Any) -> Any:
+    """Convert nested configuration models to values supported by Runner IPC."""
+    from pydantic import BaseModel
+
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {key: _config_rpc_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_config_rpc_value(item) for item in value]
+    return value
+
+
 def _get_nested_config_value(source: Any, key: str, default: Any = None) -> Any:
     """从嵌套对象或字典中读取配置值。
 
@@ -210,6 +223,14 @@ def _normalize_context_segments(raw_segments: Any) -> List[Dict[str, Any]]:
 
 class RuntimeCoreCapabilityMixin:
     """插件运行时的核心能力混入。"""
+
+    async def _cap_owned_plugin_tools(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+        from src.plugin_runtime.owned_plugin_tools import execute
+        return await execute(plugin_id, args)
+
+    async def _cap_wechatbot_rcon(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+        from src.plugin_runtime.wechatbot_agent_tools import execute_rcon
+        return await execute_rcon(plugin_id,args)
 
     async def _cap_maisaka_context_resolve_image(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
         """读取现有运行上下文中的图片，不创建会话或查询其他聊天流。"""
@@ -371,11 +392,15 @@ class RuntimeCoreCapabilityMixin:
         from src.chat.heart_flow.heartflow_manager import heartflow_manager
         from src.chat.message_receive.chat_manager import chat_manager
         from src.chat.replyer.document_generator import DocumentReplyGenerator
+        from src.chat.replyer.maisaka_generator import MaisakaReplyGenerator
 
         stream_id = args.get("stream_id")
         reference = args.get("reference")
         format_instruction = args.get("format_instruction", "")
         model_name = args.get("model_name", "")
+        reply_mode = args.get('reply_mode', 'document')
+        if reply_mode not in ('document', 'chat'):
+            return {'success': False, 'error': 'reply_mode must be document or chat'}
         if not isinstance(stream_id, str) or not stream_id.strip():
             return {"success": False, "error": "缺少必要参数 stream_id"}
         if not isinstance(reference, str) or not reference.strip() or len(reference) > 500000:
@@ -400,13 +425,13 @@ class RuntimeCoreCapabilityMixin:
                 return (response.content or "").strip()
 
             # 独立实例与材料避免后台写作混入正在进行的聊天回复；仍使用真实会话配置和完整 Replyer 链路。
-            replyer = DocumentReplyGenerator(
-                chat_stream=chat_session, request_type="plugin.replyer", model_name=model_name.strip(),
-            )
+            replyer = (MaisakaReplyGenerator(chat_stream=chat_session, request_type='maisaka.replyer.autonomous')
+                       if reply_mode == 'chat' else DocumentReplyGenerator(
+                           chat_stream=chat_session, request_type="plugin.replyer", model_name=model_name.strip()))
             success, result = await replyer.generate_reply_with_context(
-                stream_id=stream_id, chat_history=[], reply_message=None,
+                stream_id=stream_id, chat_history=list(runtime._chat_history)[-60:] if reply_mode == 'chat' else [], reply_message=None,
                 reply_tool_args={
-                    "reply_reference": reference, "reply_style": "长回复", "_plugin_reply_prompt": format_instruction,
+                    "reply_reference": reference, "reply_style": "" if reply_mode == 'chat' else "长回复", "_plugin_reply_prompt": format_instruction,
                 },
                 sub_agent_runner=select_expressions, log_reply=False,
             )
@@ -906,7 +931,7 @@ class RuntimeCoreCapabilityMixin:
             return {"success": False, "value": None, "error": "缺少必要参数 key"}
 
         try:
-            value = _get_nested_config_value(global_config, key, default)
+            value = _config_rpc_value(_get_nested_config_value(global_config, key, default))
             return {"success": True, "value": value}
         except Exception as exc:
             return {"success": False, "value": None, "error": str(exc)}

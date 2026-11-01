@@ -206,6 +206,17 @@ class HookDispatcher:
         normalized_hook_name = self._normalize_hook_name(hook_name)
         current_kwargs: Dict[str, Any] = dict(kwargs)
         dispatch_result = HookDispatchResult(hook_name=normalized_hook_name, kwargs=dict(current_kwargs))
+        from src.platform_io.chat_features import session_override, route_override
+        sid = str(kwargs.get('session_id') or kwargs.get('chat_id') or kwargs.get('stream_id') or '')
+        payload = kwargs.get('message')
+        if session_override(sid, 'plugins_enabled') is False:
+            return dispatch_result
+        if isinstance(payload,dict) and payload.get('platform'):
+            from src.platform_io.types import RouteKey
+            group = (payload.get('message_info') or {}).get('group_info') or {}
+            if route_override(RouteKey(payload['platform'],payload.get('account_id'),payload.get('scope')),
+                    group.get('group_id'), 'plugins_enabled') is False:
+                return dispatch_result
         if is_shutdown_requested():
             return dispatch_result
 

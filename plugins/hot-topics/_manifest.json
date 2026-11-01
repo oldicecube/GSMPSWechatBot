@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "id": "zhaocang.hot-topics",
+  "version": "0.7.6",
+  "name": "热点雷达 · 圈子资讯订阅感知",
+  "description": "让 MaiBot 像真人一样'泡在信息流里'：全网热榜、订阅话题全网搜索、随机'刷到'三路信息，经雷区过滤、人设兴趣加权、分群内容定制与新鲜度校验后，作为素材交给角色用自己的口吻自然聊起。支持按群/私聊定制关注面、表达约束、主动提起（由角色自主决定）。数据来自开源 60s API，多实例自动切换，零第三方依赖，开箱即用无需部署。",
+  "author": {
+    "name": "昭沧QWQ",
+    "url": "https://github.com/ZhaoCang-QWQ"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/ZhaoCang-QWQ/hot-topics"
+  },
+  "host_application": {
+    "min_version": "1.2.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "1.0.0",
+    "max_version": "2.99.99"
+  },
+  "capabilities": [
+    "send.text",
+    "llm.generate",
+    "maisaka.context.append",
+    "maisaka.proactive.trigger",
+    "chat.get_stream_by_group_id",
+    "config.get",
+    "chat.get_stream_by_user_id",
+    "chat.get_all_streams"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN"
+  },
+  "plugin_type": "tool",
+  "display": {
+    "icon": {
+      "type": "emoji",
+      "value": "🔥"
+    }
+  }
+}

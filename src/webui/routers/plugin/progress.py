@@ -120,7 +120,8 @@ async def websocket_plugin_progress(websocket: WebSocket, token: Optional[str] =
         websocket: FastAPI WebSocket 对象。
         token: 可选的一次性握手 Token。
     """
-    is_authenticated = False
+    from src.webui.middleware.network_access import auth_enabled
+    is_authenticated = not auth_enabled()
 
     if token and verify_ws_token(token):
         is_authenticated = True

@@ -1,0 +1,54 @@
+# 运行时配置由 Runner 生成，不要提交
+/config.toml
+
+# 冒烟测试仅在本地运行，不随插件上传（发布内容见 README 安装说明）
+/tests_smoke.py
+/tests/
+
+__pycache__/
+*.py[cod]
+
+# Issue 提交文档（本地使用，不随插件上传）
+/ISSUE_SUBMISSION.md
+
+# ---- 以下规则合并自 MaiBot插件开发文档v1.3.0/.gitignore 模板 ----
+
+# 流程 / 指导文档（禁止进仓库）
+UPLOAD_AGENT.md
+ISSUE_SUBMISSION.md
+
+# 运行期生成的配置与数据（宿主会在插件目录生成）
+/config_back/
+/data/
+*.log
+
+# 宿主安装回执与更新备份（发布安装模式写入，勿提交）
+.maibot-release.json
+.update_backups/
+
+# Python 缓存 / 构建产物 / 虚拟环境
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 测试 / 冒烟代码（发布内容不含测试，见 UPLOAD_AGENT.md §2.3）
+test_*.py
+*_test.py
+smoke_test*.py
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

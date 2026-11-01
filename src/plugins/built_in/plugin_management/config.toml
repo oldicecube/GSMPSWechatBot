@@ -1,6 +1,6 @@
 [plugin]
 config_version = "1.2.0"
-enabled = true
+enabled = false
 
 [aliases]
 management_prefixes = ["/插件管理"]

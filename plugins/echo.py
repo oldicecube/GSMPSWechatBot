@@ -1,3 +1,7 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 import json
 import os
 import random
@@ -124,6 +128,9 @@ def has_long_common_substring(text1, text2, min_length=20):
 
 
 def save_echo(text, user, group, wxid=None):
+    from utils.account_identity import bound_user
+    if not bound_user(wxid):
+        return '请先 /bind <游戏玩家名> 绑定游戏账号后使用积分功能'
     normalized_text = normalize_echo_text(text)
 
     if not normalized_text:

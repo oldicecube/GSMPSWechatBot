@@ -238,6 +238,9 @@ class PersonFactWritebackService:
 
     @staticmethod
     def _person_from_user_message(message: Any, *, fallback_platform: str = "") -> Optional[Person]:
+        from src.common.learning_policy import is_learning_allowed
+        if not is_learning_allowed(message):
+            return None
         platform = str(getattr(message, "platform", "") or fallback_platform or "").strip()
         user_info = getattr(getattr(message, "message_info", None), "user_info", None)
         user_id = str(getattr(user_info, "user_id", "") or getattr(message, "user_id", "") or "").strip()
@@ -317,6 +320,9 @@ class PersonFactWritebackService:
         filtered: List[Any] = []
         target_person_id = str(getattr(person, "person_id", "") or "").strip()
         for item in messages:
+            from src.common.learning_policy import is_learning_allowed
+            if not is_learning_allowed(item):
+                continue
             platform = str(getattr(item, "platform", "") or "").strip()
             user_info = getattr(getattr(item, "message_info", None), "user_info", None)
             user_id = str(getattr(user_info, "user_id", "") or getattr(item, "user_id", "") or "").strip()
@@ -370,6 +376,9 @@ class PersonFactWritebackService:
 
     @staticmethod
     def _format_evidence_message_line(item: Any, *, include_sender: bool, mark_target: bool = False) -> str:
+        from src.common.learning_policy import is_learning_allowed
+        if not is_learning_allowed(item):
+            return ""
         text = str(getattr(item, "processed_plain_text", "") or "").strip()
         if not text:
             return ""
@@ -920,6 +929,9 @@ class ImageMemoryWritebackService:
         return " ".join(part for part in parts if part)
 
     async def _handle_message(self, message: Any, *, component_paths: Optional[List[str]] = None) -> bool:
+        from src.common.learning_policy import is_learning_allowed
+        if not is_learning_allowed(message):
+            return True  # A policy exclusion completes persisted retry jobs too.
         raw_message = message.raw_message
         components = raw_message.components
         image_components = list(iter_message_image_components(components))
@@ -1005,6 +1017,9 @@ class MemoryAutomationService:
         self._started = False
 
     async def on_incoming_message(self, message: Any) -> None:
+        from src.common.learning_policy import is_learning_allowed
+        if not is_learning_allowed(message):
+            return
         if not self._started:
             await self.start()
         await self.image_writeback.enqueue(message)

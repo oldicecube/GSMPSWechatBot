@@ -4,6 +4,18 @@
 
 **安全提示**：`config.json` 可能包含 API Key、WeFlow 解密信息、RCON 密码和群成员 wxid，不能提交或公开。修改配置后重启 Bot。
 
+## 当前 MaiBot 部署的配置归属（2026-10-30）
+
+当前实例已设置 `llm.model_config_source = "maibot"`。模型端点、密钥、模型优先顺序和任务分配在 MaiBot WebUI 的模型管理或 `config/model_config.toml` 修改；人设、回复风格、聊天节奏、学习、记忆和表情包设置由 `config/bot_config.toml` 管理；原生插件使用各自目录下的 `config.toml`。
+
+人格、昵称、行为及表达始终只由 MaiBot 原生管理，不再随模型导入模式切回壳子。壳子的全局/群级 `identity`、`assistant_nickname`、风格及行为提示词均不再注入；`/persona` 仅提示原生管理入口。命令前缀属于路由配置，不是人格或昵称定义。
+
+`config.json` 中对应的旧 `llm.apis`、人设、上下文、学习、记忆、自主行为、表情包目录及聊天节奏配置已删除，旧 `webui` 段及其 JWT 也已删除。启动时不会再从壳子重建或覆盖原生配置，也不会额外启动旧 WebUI。下文涉及这些字段的说明仅用于旧版配置兼容，不适用于当前实例。需要新增端点或修改麦麦设置时直接使用 MaiBot WebUI。
+
+`config.json` 仍保留微信连接、消息路由、管理员权限、群开关、发送限制，以及 `mc`、`rcon`、`bilibili`、`lottery` 等壳子插件实际依赖的参数。壳子插件在 MaiBot WebUI 的管理项使用 `config/gsmps_management.json` 保存覆盖值，执行位置仍在壳子；声明配置项的方法见 `DEV_GUIDE.md` 第 2.9 节。
+
+清理脚本 `scripts/clean_adopted_shell_config.py` 默认只预览，使用 `--apply` 才写入，并先备份全部相关配置。为兼容尚未重启的旧进程，尚未进入模型池的端点暂存在 `config/gsmps_model_import_pending.json`；下次启动只合并一次，成功后删除该文件，不改变当前任务顺序。备份位于 `data/backups/adopted-config-cleanup-*`。代码改动需手动重启生效。
+
 ## 1. 配置约定
 
 - 路径可使用相对项目根目录的相对路径，也可使用绝对路径；Windows 反斜杠在 JSON 中写为 `\\`。

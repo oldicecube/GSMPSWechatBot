@@ -949,6 +949,10 @@ class ComponentRegistry:
         group_id: Optional[str] = None,
         platform: Optional[str] = None,
     ):
+        if session_id and not isinstance(component, MessageGatewayEntry):
+            from src.platform_io.chat_features import session_override
+            if session_override(session_id, 'plugins_enabled') is False:
+                return False
         # 无上下文的查询用于组件清单；有平台上下文时过滤 Tool 和回复扩展的适用平台。
         if isinstance(component, (ToolEntry, ReplyExtensionEntry)) and component.platforms and platform is not None:
             if platform.strip().lower() not in component.platforms:

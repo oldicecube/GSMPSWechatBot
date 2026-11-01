@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
@@ -11,6 +12,7 @@ from src.chat.replyer.expression_vector_index import ExpressionVectorIndexUpsert
 from src.chat.utils.utils import is_bot_self
 from src.common.data_models.expression_data_model import MaiExpression
 from src.common.data_models.llm_service_data_models import LLMResponseResult
+from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
 from src.common.database.database import get_db_session
 from src.common.database.database_model import Expression, ModifiedBy
 from src.common.logger import get_logger
@@ -25,6 +27,7 @@ from src.services.llm_service import LLMServiceClient
 from .expression_review_store import append_ai_review_log
 from .expression_style_utils import normalize_expression_style_for_learning
 from .expression_utils import check_expression_suitability, parse_expression_response
+from .learning_text import extract_learning_text
 from .pending_learning_buffer import PendingLearningBuffer
 
 if TYPE_CHECKING:
@@ -327,6 +330,9 @@ class ExpressionLearner:
                 continue
 
             original_message = context_message.original_message
+            from src.common.learning_policy import is_learning_allowed
+            if not is_learning_allowed(original_message):
+                continue
             message_id = context_message.message_id
             if message_id in seen_message_ids:
                 continue
@@ -344,6 +350,11 @@ class ExpressionLearner:
     ) -> bool:
         """对一批真实会话消息执行表达学习。"""
 
+        from src.common.learning_policy import is_learning_allowed
+        self.pending_messages.discard([message for message in pending_messages if not is_learning_allowed(message)])
+        pending_messages = [message for message in pending_messages if is_learning_allowed(message)]
+        if not pending_messages:
+            return True
         learning_session_id = self._resolve_learning_session_id(pending_messages)
         if learning_session_id is None:
             logger.warning(f"表达学习已跳过：无法解析到有效聊天流，learner_session_id={self.session_id}")
@@ -401,6 +412,7 @@ class ExpressionLearner:
         """执行已经获得并发闸门的表达学习批次。"""
 
         readable_message = "聊天记录将在后续多条 user message 中给出；请以每条消息中的 id 作为来源行编号。"
+        pending_messages = self._prepare_learning_messages(pending_messages)
         prompt_template = prompt_manager.get_prompt("learn_style")
         prompt_template.add_context("bot_name", global_config.bot.nickname)
         prompt_template.add_context("chat_str", readable_message)
@@ -408,6 +420,9 @@ class ExpressionLearner:
 
         try:
             learning_messages = await self._build_multi_learning_messages(pending_messages, prompt)
+            if len(learning_messages) == 2:
+                self.learning_status, self.learning_detail = "no_results", "娌℃湁鍙涔犵殑鏂囧瓧姝ｆ枃"
+                return False
             generation_result = await express_learn_model.generate_response_with_context(
                 lambda _client: learning_messages,
                 session_id=learning_session_id,
@@ -556,6 +571,24 @@ class ExpressionLearner:
         )
         return None
 
+    @staticmethod
+    def _prepare_learning_messages(messages: List["SessionMessage"]) -> List["SessionMessage"]:
+        """Create shallow message copies containing only top-level text.
+
+        Reply, forward, image and emoji components are not learning evidence.
+        The original message remains untouched for normal chat and source
+        validation.
+        """
+
+        learning_messages: List["SessionMessage"] = []
+        for message in messages:
+            text = extract_learning_text(message.raw_message)
+            learning_message = copy(message)
+            learning_message.raw_message = MessageSequence([TextComponent(text)] if text else [])
+            learning_message.processed_plain_text = text
+            learning_messages.append(learning_message)
+        return learning_messages
+
     async def _build_multi_learning_messages(
         self,
         messages: List["SessionMessage"],
@@ -575,13 +608,14 @@ class ExpressionLearner:
         ]
 
         for index, message in enumerate(messages, start=1):
-            await message.process()
             user_info = message.message_info.user_info
             speaker_name = user_info.user_cardname or user_info.user_nickname or "未知用户"
             speaker_kind = "SELF" if is_bot_self(message.platform, user_info.user_id) else "USER"
             content = (message.processed_plain_text or "").strip()
             if not content:
-                content = "[空消息]"
+                # Media-only rows keep their source index but are excluded
+                # from the learner request.
+                continue
             learning_messages.append(
                 ContextItemBuilder()
                 .set_role(RoleType.User)

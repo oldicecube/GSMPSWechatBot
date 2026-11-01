@@ -1,0 +1,74 @@
+/**
+ * Model 配置页面类型定义
+ */
+
+/** 每日重复的分时价格，时间按服务器本地时间解释。 */
+export interface ModelPricePeriod {
+  start_time: string
+  end_time: string
+  price_in: number
+  price_out: number
+  cache_price_in: number
+}
+
+/**
+ * 模型信息
+ */
+export interface ModelInfo {
+  model_type: 'llm' | 'embedding' | 'image_embedding' // 旧配置由升级钩子标注
+  model_identifier: string
+  name: string
+  api_provider: string
+  price_in: number | null
+  price_out: number | null
+  // cache 为后端遗留兼容字段，不再保存；是否启用缓存计价由 cache_price_in 是否填写决定
+  cache_price_in?: number | null
+  price_periods?: ModelPricePeriod[]
+  temperature?: number | null // 模型级别温度，覆盖任务配置中的温度
+  send_temperature?: boolean // 是否发送由 MaiBot 管理的 temperature 参数
+  max_tokens?: number | null // 模型级别最大token数，覆盖任务配置中的max_tokens
+  visual?: boolean
+  force_stream_mode?: boolean
+  extra_params?: Record<string, unknown>
+}
+
+/**
+ * 提供商完整配置接口
+ */
+export interface ProviderConfig {
+  enabled?: boolean
+  name: string
+  base_url: string
+  api_key: string
+  client_type: string
+  default_headers?: Record<string, string>
+  max_retry?: number
+  timeout?: number
+  retry_interval?: number
+}
+
+/**
+ * 单个任务配置
+ */
+export interface TaskConfig {
+  model_list: string[]
+  temperature?: number
+  max_tokens?: number
+  hard_timeout?: number
+  selection_strategy?: string
+}
+
+/**
+ * 所有模型任务配置（动态，由后端 schema 决定字段）
+ */
+export type ModelTaskConfig = Record<string, TaskConfig>
+
+/**
+ * 表单验证错误
+ */
+export interface FormErrors {
+  name?: string
+  api_provider?: string
+  model_identifier?: string
+  price_periods?: string
+}

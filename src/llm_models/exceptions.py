@@ -82,6 +82,15 @@ class RespNotOkException(Exception):
             return f"未知的异常响应代码：{self.status_code}"
 
 
+class ModelCooldownError(RespNotOkException):
+    """全部候选模型处于已确认的额度冷却期，不应重启消费循环。"""
+
+    def __init__(self, retry_after: float, task_name: str):
+        super().__init__(429, "所有候选模型暂受上游额度或频率限制，等待冷却或更新认证配置")
+        self.retry_after = max(0.0, float(retry_after))
+        self.task_name = task_name
+
+
 class ResponseContextException(Exception):
     """携带原始响应上下文的异常基类。"""
 

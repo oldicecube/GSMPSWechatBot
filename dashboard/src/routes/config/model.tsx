@@ -1,0 +1,2548 @@
+import { type CSSProperties, type MouseEvent, type UIEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useRouterState } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import { SplitDropdownSelect } from '@/components/ui/split-dropdown-select'
+import { Switch } from '@/components/ui/switch'
+import { Slider } from '@/components/ui/slider'
+import { Badge } from '@/components/ui/badge'
+import {
+  AlertTriangle,
+  Check,
+  ChevronsUpDown,
+  Copy,
+  GraduationCap,
+  History,
+  Info,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Save,
+  Search,
+  Settings,
+  Trash2,
+  Zap,
+} from 'lucide-react'
+import { resolveFieldLabel } from '@/lib/config-label'
+import {
+  getConfigSearchField,
+  getModelConfigTabForField,
+  scrollToConfigSearchField,
+} from '@/lib/config-search-navigation'
+import { cn } from '@/lib/utils'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { HelpTooltip } from '@/components/ui/help-tooltip'
+import { MobileAddMenu } from '@/components/layout/MobileAddMenu'
+import { MobileHeaderActions } from '@/components/layout/MobileHeaderActions'
+import { RestartOverlay } from '@/components/restart-overlay'
+import { RestartProvider, useRestart } from '@/lib/restart-context'
+import { ExtraParamsDialog } from '@/components/ui/extra-params-dialog'
+import { TaskConfigCard, ModelTable, ModelCardList } from './model/components'
+import type { ModelCreationType } from './model/components/AddModelMenu'
+import { EmbeddingBuildProgress } from './model/components/EmbeddingBuildProgress'
+import { TaskRuntimeSummary } from './model/components/TaskRuntimeSummary'
+import { TaskUsageStats } from './model/components/TaskUsageStats'
+import { TASK_CONFIGS } from './model/constants'
+import { useModelTour, useModelFetcher, useModelConfig } from './model/hooks'
+import {
+  getThinkingBudget,
+  getThinkingEffort,
+  isThinkingEnabled,
+  setThinkingBudget,
+  setThinkingEffort,
+  setThinkingEnabled,
+  validateThinkingParams,
+  type ThinkingFormatConfig,
+} from './model/thinkingFormats'
+import { resolveThinkingFormatForModel } from './providerTemplates'
+import {
+  getDeepSeekReasoningEffort,
+  isDeepSeekThinkingEnabled,
+  isDeepSeekWebSearchEnabled,
+  setDeepSeekReasoningEffort,
+  setDeepSeekThinkingEnabled,
+  setDeepSeekWebSearchEnabled,
+  validateDeepSeekExtraParams,
+  type DeepSeekClientType,
+  type DeepSeekReasoningEffort,
+} from './model/deepSeekExtraParams'
+import { ProviderForm } from './modelProvider/ProviderForm'
+import { ProviderSidebar } from './modelProvider/ProviderSidebar'
+import { WebSearchDialog } from './webSearch/WebSearchDialog'
+import { WebSearchTaskCard } from './webSearch/WebSearchTaskCard'
+import type { APIProvider } from './modelProvider/types'
+
+// 导入模块化的类型定义和组件
+import type { ModelInfo, ModelPricePeriod } from './model/types'
+
+const MODEL_CONFIG_TABS = ['configuration', 'tasks'] as const
+type ModelConfigTab = (typeof MODEL_CONFIG_TABS)[number]
+
+interface ModelIdentifierMarqueeProps {
+  text: string
+  className?: string
+  textClassName?: string
+}
+
+function ModelIdentifierMarquee({ text, className, textClassName }: ModelIdentifierMarqueeProps) {
+  const containerRef = useRef<HTMLSpanElement>(null)
+  const textRef = useRef<HTMLSpanElement>(null)
+  const [scrollDistance, setScrollDistance] = useState(0)
+
+  useEffect(() => {
+    const containerElement = containerRef.current
+    const textElement = textRef.current
+    if (!containerElement || !textElement) {
+      return
+    }
+
+    const updateOverflowState = () => {
+      setScrollDistance(Math.max(0, textElement.scrollWidth - containerElement.clientWidth))
+    }
+
+    updateOverflowState()
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateOverflowState)
+      return () => window.removeEventListener('resize', updateOverflowState)
+    }
+
+    const resizeObserver = new ResizeObserver(updateOverflowState)
+    resizeObserver.observe(containerElement)
+    resizeObserver.observe(textElement)
+    return () => resizeObserver.disconnect()
+  }, [text])
+
+  const shouldScroll = scrollDistance > 1
+  const durationMs = Math.min(Math.max(scrollDistance * 45, 1800), 6000)
+
+  return (
+    <span
+      ref={containerRef}
+      className={cn('group/model-marquee block min-w-0 overflow-hidden', className)}
+      title={text}
+    >
+      <span
+        ref={textRef}
+        className={cn(
+          'model-identifier-marquee-text block max-w-full overflow-hidden text-ellipsis whitespace-nowrap',
+          shouldScroll &&
+            'group-hover/model-marquee:w-max group-hover/model-marquee:max-w-none group-hover/model-marquee:animate-[model-identifier-marquee_var(--model-identifier-marquee-duration)_ease-in-out_infinite_alternate] group-hover/model-marquee:overflow-visible group-hover/model-option:w-max group-hover/model-option:max-w-none group-hover/model-option:animate-[model-identifier-marquee_var(--model-identifier-marquee-duration)_ease-in-out_infinite_alternate] group-hover/model-option:overflow-visible',
+          textClassName
+        )}
+        style={
+          shouldScroll
+            ? ({
+                '--model-identifier-marquee-distance': `-${scrollDistance}px`,
+                '--model-identifier-marquee-duration': `${durationMs}ms`,
+              } as CSSProperties)
+            : undefined
+        }
+      >
+        {text}
+      </span>
+    </span>
+  )
+}
+
+function getInitialModelConfigTab(): ModelConfigTab {
+  if (typeof window === 'undefined') {
+    return 'tasks'
+  }
+
+  const tab = new URLSearchParams(window.location.search).get('tab')
+  if (tab === 'configuration' || tab === 'models' || tab === 'providers') {
+    return 'configuration'
+  }
+  return 'tasks'
+}
+
+// 主导出组件：包装 RestartProvider
+export function ModelConfigPage() {
+  return (
+    <RestartProvider>
+      <ModelConfigPageContent />
+    </RestartProvider>
+  )
+}
+
+// 内部实现组件
+function ModelConfigPageContent() {
+  const { i18n } = useTranslation()
+  const { isRestarting } = useRestart()
+  const routeSearch = useRouterState({ select: (state) => state.location.searchStr })
+  const searchFieldPath = getConfigSearchField(routeSearch)
+  const scrolledSearchFieldRef = useRef('')
+  const modelConfigurationRef = useRef<HTMLDivElement>(null)
+
+  // 核心领域 hook：models / apiProviders / model_task_config 三份草稿及其全部编排
+  const mc = useModelConfig()
+  const [webSearchEditor, setWebSearchEditor] = useState<{ name: string | null } | null>(null)
+  const {
+    // 草稿态
+    models,
+    providers,
+    apiProviders,
+    modelNames,
+    taskConfig,
+    taskConfigSchema,
+    // 加载 / 保存
+    loading,
+    saving,
+    autoSaving,
+    hasUnsavedChanges,
+    activeConfigVersion,
+    configVersions,
+    versionsLoading,
+    switchingConfigVersion,
+    creatingConfigVersion,
+    saveConfig,
+    handleCreateConfigVersion,
+    handleSwitchConfigVersion,
+    handleDeleteConfigVersion,
+    // 任务配置问题
+    invalidModelRefs,
+    emptyTasks,
+    handleRemoveInvalidRefs,
+    // 模型编辑
+    editDialogOpen,
+    setEditDialogOpen,
+    editingModel,
+    setEditingModel,
+    editingIndex,
+    formErrors,
+    setFormErrors,
+    handleSaveEdit,
+    handleEditDialogClose,
+    deleteDialogOpen,
+    setDeleteDialogOpen,
+    deletingIndex,
+    openDeleteDialog,
+    handleConfirmDelete,
+    // 提供商编辑
+    providerDialogOpen,
+    setProviderDialogOpen,
+    editingProvider,
+    editingProviderIndex,
+    openProviderDialog: openProviderDialogBase,
+    handleSaveProviderEdit,
+    providerDeleteDialogOpen,
+    setProviderDeleteDialogOpen,
+    deletingProviderIndex,
+    openProviderDeleteDialog,
+    handleConfirmProviderDelete,
+    // 级联删除确认
+    deleteConfirmState,
+    handleConfirmDeleteProviderImpact,
+    handleCancelDeleteProviderImpact,
+    // 连接测试
+    testingProviders,
+    testResults,
+    handleTestProviderConnection,
+    testingModels,
+    modelTestResults,
+    selectedModelTestResult,
+    setSelectedModelTestResult,
+    handleTestModelCapability,
+    // 模型批量
+    selectedModels,
+    toggleModelSelection,
+    toggleSelectAll,
+    batchDeleteDialogOpen,
+    setBatchDeleteDialogOpen,
+    openBatchDeleteDialog,
+    handleConfirmBatchDelete,
+    // 任务配置
+    updateTaskConfig,
+    // 搜索 / 分页
+    searchQuery,
+    setSearchQuery,
+    modelProviderFilter,
+    setModelProviderFilter,
+    filteredModels,
+    isModelUsed,
+    getProviderConfig,
+    // embedding 警告
+    embeddingWarning,
+  } = mc
+
+  // 纯 UI 态（不属于配置草稿，留在渲染层）
+  const [activeTab, setActiveTab] = useState<ModelConfigTab>(getInitialModelConfigTab)
+  const [modelConfigurationHeight, setModelConfigurationHeight] = useState<number>()
+  const [visibleModelCount, setVisibleModelCount] = useState(20)
+  const visibleModels = useMemo(
+    () => filteredModels.slice(0, visibleModelCount),
+    [filteredModels, visibleModelCount]
+  )
+
+  const modelListFilterKey = `${modelProviderFilter}:${searchQuery}`
+  const [seenModelListFilterKey, setSeenModelListFilterKey] = useState(modelListFilterKey)
+  if (seenModelListFilterKey !== modelListFilterKey) {
+    setSeenModelListFilterKey(modelListFilterKey)
+    setVisibleModelCount(20)
+  }
+
+  const handleModelListScroll = (event: UIEvent<HTMLElement>) => {
+    const target = event.currentTarget
+    if (target.scrollHeight - target.scrollTop - target.clientHeight > 160) return
+
+    setVisibleModelCount((current) => Math.min(current + 20, filteredModels.length))
+  }
+
+  const [advancedModelSettingsVisible, setAdvancedModelSettingsVisible] = useState(false)
+  const [advancedTaskSettingsVisible, setAdvancedTaskSettingsVisible] = useState(false)
+  const [selectedTaskName, setSelectedTaskName] = useState('replyer')
+  const [extraParamsDialogOpen, setExtraParamsDialogOpen] = useState(false)
+  const [modelComboboxOpen, setModelComboboxOpen] = useState(false)
+  // 用户是否手动编辑过模型名称；编辑过后，名称不再跟随模型标识符自动填充
+  const [modelNameTouched, setModelNameTouched] = useState(false)
+  const [createVersionDialogOpen, setCreateVersionDialogOpen] = useState(false)
+  const [manageVersionsDialogOpen, setManageVersionsDialogOpen] = useState(false)
+  const reduceTaskMotion = useReducedMotion()
+  const visibleTaskFields = useMemo(
+    () =>
+      taskConfigSchema?.fields.filter(
+        (field) =>
+          field.type === 'object' &&
+          (advancedTaskSettingsVisible || !field.advanced || (taskConfig?.[field.name]?.model_list.length ?? 0) > 0)
+      ).sort((a, b) => Number(a.name === 'web_search') - Number(b.name === 'web_search')) ?? [],
+    [advancedTaskSettingsVisible, taskConfig, taskConfigSchema]
+  )
+  const selectedTaskField =
+    visibleTaskFields.find((field) => field.name === selectedTaskName) ?? visibleTaskFields[0]
+  const selectedTaskMetadata = TASK_CONFIGS.find((config) => config.key === selectedTaskField?.name)
+  const selectedTaskHideTemperature = Boolean(
+    selectedTaskMetadata && 'hideTemperature' in selectedTaskMetadata && selectedTaskMetadata.hideTemperature
+  )
+  const selectedTaskHideMaxTokens = Boolean(
+    selectedTaskMetadata && 'hideMaxTokens' in selectedTaskMetadata && selectedTaskMetadata.hideMaxTokens
+  )
+  const selectedTaskHideSelectionStrategy = Boolean(
+    selectedTaskMetadata &&
+      'hideSelectionStrategy' in selectedTaskMetadata &&
+      selectedTaskMetadata.hideSelectionStrategy
+  )
+  const selectedTaskSingleModel = Boolean(
+    selectedTaskMetadata && 'singleModel' in selectedTaskMetadata && selectedTaskMetadata.singleModel
+  )
+  const selectedTaskModelNames =
+    selectedTaskField?.name === 'embedding' || selectedTaskField?.name === 'image_embedding'
+      ? models
+          .filter((model) => model.model_type === 'embedding' || model.model_type === 'image_embedding')
+          .map((model) => model.name)
+      : modelNames
+
+  if (selectedTaskField && selectedTaskField.name !== selectedTaskName) {
+    setSelectedTaskName(selectedTaskField.name)
+  }
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(routeSearch.startsWith('?') ? routeSearch.slice(1) : routeSearch)
+    const tab = searchParams.get('tab')
+    const fieldTab = searchFieldPath ? getModelConfigTabForField(searchFieldPath) : ''
+    const searchedTaskName = searchFieldPath.match(/^model_task_config\.([^.]+)/)?.[1]
+    const nextTab: ModelConfigTab = fieldTab
+      ? fieldTab === 'tasks'
+        ? 'tasks'
+        : 'configuration'
+      : tab === 'configuration' || tab === 'models' || tab === 'providers'
+        ? 'configuration'
+        : 'tasks'
+
+    const frameId = window.requestAnimationFrame(() => {
+      setActiveTab(nextTab)
+      if (searchFieldPath) {
+        setAdvancedModelSettingsVisible(true)
+        setAdvancedTaskSettingsVisible(true)
+      }
+      if (searchedTaskName) {
+        setSelectedTaskName(searchedTaskName)
+      }
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [routeSearch, searchFieldPath])
+
+  const [seenSearchFieldPath, setSeenSearchFieldPath] = useState(searchFieldPath)
+  if (seenSearchFieldPath !== searchFieldPath) {
+    setSeenSearchFieldPath(searchFieldPath)
+    const searchedSchemaTaskName = searchFieldPath.match(/^model_task_config\.([^.]+)/)?.[1]
+    if (searchedSchemaTaskName && taskConfigSchema?.fields.some((field) => field.name === searchedSchemaTaskName)) {
+      setSelectedTaskName(searchedSchemaTaskName)
+    }
+  }
+
+  useEffect(() => {
+    if (
+      loading ||
+      !searchFieldPath ||
+      scrolledSearchFieldRef.current === searchFieldPath
+    ) {
+      return
+    }
+
+    let nestedFrameId = 0
+    const frameId = window.requestAnimationFrame(() => {
+      nestedFrameId = window.requestAnimationFrame(() => {
+        if (scrollToConfigSearchField(searchFieldPath)) {
+          scrolledSearchFieldRef.current = searchFieldPath
+        }
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      if (nestedFrameId) {
+        window.cancelAnimationFrame(nestedFrameId)
+      }
+    }
+  }, [activeTab, advancedModelSettingsVisible, advancedTaskSettingsVisible, loading, searchFieldPath, selectedTaskName])
+  const [newVersionLabel, setNewVersionLabel] = useState('')
+  const [deletingVersionId, setDeletingVersionId] = useState<string | null>(null)
+  const [tourEntryVisible, setTourEntryVisible] = useState(
+    () => localStorage.getItem('model-assignment-tour-entry-dismissed') !== 'true'
+  )
+
+  useLayoutEffect(() => {
+    const updateConfigurationHeight = () => {
+      if (!modelConfigurationRef.current) return
+      if (!window.matchMedia('(min-width: 1024px)').matches) {
+        setModelConfigurationHeight(undefined)
+        return
+      }
+
+      const top = modelConfigurationRef.current.getBoundingClientRect().top
+      const page = modelConfigurationRef.current.closest<HTMLElement>('[data-model-config-page="true"]')
+      if (!page) return
+
+      const pageBottom = page.getBoundingClientRect().bottom
+      const pageBottomPadding = parseFloat(window.getComputedStyle(page).paddingBottom) || 0
+      setModelConfigurationHeight(Math.max(pageBottom - pageBottomPadding - top, 0))
+    }
+
+    updateConfigurationHeight()
+    const frameId = window.requestAnimationFrame(updateConfigurationHeight)
+    window.addEventListener('resize', updateConfigurationHeight)
+    window.visualViewport?.addEventListener('resize', updateConfigurationHeight)
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('resize', updateConfigurationHeight)
+      window.visualViewport?.removeEventListener('resize', updateConfigurationHeight)
+    }
+  }, [activeTab, loading, tourEntryVisible])
+
+  const providerModelCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    models.forEach((model) => counts.set(model.api_provider, (counts.get(model.api_provider) ?? 0) + 1))
+    return counts
+  }, [models])
+  const selectedProviderInfo = apiProviders.find((provider) => provider.name === modelProviderFilter)
+  const selectedProviderIndex = selectedProviderInfo
+    ? apiProviders.findIndex((provider) => provider.name === selectedProviderInfo.name)
+    : -1
+
+  useEffect(() => {
+    if (modelProviderFilter && !apiProviders.some((provider) => provider.name === modelProviderFilter)) {
+      setModelProviderFilter('')
+    }
+  }, [apiProviders, modelProviderFilter, setModelProviderFilter])
+
+  // 模型列表获取 (使用 hook 封装的逻辑)
+  const {
+    availableModels,
+    fetchingModels,
+    modelFetchError,
+    matchedTemplate,
+    fetchModelsForProvider,
+    clearModels,
+  } = useModelFetcher({ getProviderConfig })
+
+  const selectedProviderConfig = editingModel?.api_provider
+    ? getProviderConfig(editingModel.api_provider)
+    : undefined
+  const selectedClientType = selectedProviderConfig?.client_type
+  const modelExtraParams = editingModel?.extra_params || {}
+  const editingModelType = editingModel?.model_type
+  const editingModelIsEmbedding = editingModelType === 'embedding' || editingModelType === 'image_embedding'
+  const deepSeekClientType: DeepSeekClientType | null =
+    !editingModelIsEmbedding && matchedTemplate?.id === 'deepseek' &&
+    (selectedClientType === 'openai' || selectedClientType === 'openai_responses')
+      ? selectedClientType
+      : null
+  // 思考开关格式由命中的服务商模板元数据决定，未命中则不显示思考开关
+  // DeepSeek 有专用段（含 Responses 客户端的 reasoning.effort 与联网搜索），不走通用开关
+  const thinkingFormatActive: ThinkingFormatConfig | null =
+    !editingModelIsEmbedding && matchedTemplate?.id !== 'deepseek'
+      ? resolveThinkingFormatForModel(matchedTemplate, editingModel?.model_identifier ?? '')
+      : null
+  const thinkingEnabled = thinkingFormatActive
+    ? isThinkingEnabled(modelExtraParams, thinkingFormatActive)
+    : false
+  // 思考力度仅在配置了力度参数时显示；思考关闭时置灰
+  const thinkingEffortOptions: string[] =
+    thinkingFormatActive?.kind === 'reasoning_effort'
+      ? (thinkingFormatActive.efforts ?? [])
+      : thinkingFormatActive?.kind === 'thinking_type' && thinkingFormatActive.effortParam
+        ? (thinkingFormatActive.efforts ?? [])
+        : []
+  const thinkingEffort = thinkingFormatActive ? getThinkingEffort(modelExtraParams, thinkingFormatActive) : ''
+  const thinkingCanDisable =
+    thinkingFormatActive?.kind === 'enable_thinking' ||
+    (thinkingFormatActive?.kind === 'thinking_type' && thinkingFormatActive.canDisable === true)
+  const thinkingSwitchInteractive = thinkingFormatActive !== null && (thinkingCanDisable || !thinkingEnabled)
+  const thinkingBudget = thinkingFormatActive ? getThinkingBudget(modelExtraParams, thinkingFormatActive) : null
+  const thinkingExtraParamsError = thinkingFormatActive
+    ? validateThinkingParams(modelExtraParams, thinkingFormatActive)
+    : null
+  const deepSeekWebSearchEnabled = deepSeekClientType === 'openai_responses'
+    ? isDeepSeekWebSearchEnabled(modelExtraParams)
+    : false
+  const deepSeekThinkingEnabled = deepSeekClientType
+    ? isDeepSeekThinkingEnabled(modelExtraParams, deepSeekClientType)
+    : false
+  const deepSeekReasoningEffort = deepSeekClientType
+    ? getDeepSeekReasoningEffort(modelExtraParams, deepSeekClientType)
+    : 'high'
+  const deepSeekExtraParamsError = deepSeekClientType
+    ? validateDeepSeekExtraParams(modelExtraParams, deepSeekClientType)
+    : null
+  const deepSeekToolsInvalid =
+    modelExtraParams.tools !== undefined && !Array.isArray(modelExtraParams.tools)
+
+  const updateModelExtraParams = (
+    updater: (params: Record<string, unknown>) => Record<string, unknown>
+  ) => {
+    setEditingModel((previousModel) => previousModel
+      ? {
+          ...previousModel,
+          extra_params: updater(previousModel.extra_params || {}),
+        }
+      : null
+    )
+  }
+
+  const updatePricePeriods = (updater: (periods: ModelPricePeriod[]) => ModelPricePeriod[]) => {
+    setEditingModel((previousModel) => previousModel
+      ? { ...previousModel, price_periods: updater(previousModel.price_periods ?? []) }
+      : null
+    )
+    setFormErrors((previous) => ({ ...previous, price_periods: undefined }))
+  }
+
+  // 打开模型编辑对话框：重置高级设置可见性后委托核心 hook
+  const openEditDialog = (
+    model: ModelInfo | null,
+    index: number | null,
+    preferredProvider?: string,
+    modelType: ModelInfo['model_type'] = 'llm'
+  ) => {
+    setModelNameTouched(false)
+    mc.openEditDialog(model, index, () => setAdvancedModelSettingsVisible(false), preferredProvider, modelType)
+  }
+
+  const openAddModelDialog = (type: ModelCreationType) => {
+    openEditDialog(null, null, modelProviderFilter || undefined, type)
+  }
+
+  const openProviderDialog = (provider: APIProvider | null, index: number | null) => {
+    openProviderDialogBase(provider, index)
+  }
+
+  const handleModelEditDialogOpenChange = (open: boolean) => {
+    // 移动端触摸嵌套弹窗时，Radix 可能把内层操作判定为外层的 outside-interaction。
+    // 额外参数弹窗打开期间只允许内层处理关闭，避免保存参数时连带退出模型编辑。
+    if (!open && extraParamsDialogOpen) return
+    handleEditDialogClose(open)
+  }
+
+  // 当选择的提供商变化时，获取模型列表
+  useEffect(() => {
+    if (editDialogOpen && editingModel?.api_provider) {
+      fetchModelsForProvider(editingModel.api_provider)
+    }
+  }, [editDialogOpen, editingModel?.api_provider, fetchModelsForProvider])
+
+  const dismissTourEntry = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    localStorage.setItem('model-assignment-tour-entry-dismissed', 'true')
+    setTourEntryVisible(false)
+  }
+
+  const handleActiveTabChange = (value: string) => {
+    const nextTab = MODEL_CONFIG_TABS.includes(value as ModelConfigTab)
+      ? (value as ModelConfigTab)
+      : 'tasks'
+    setActiveTab(nextTab)
+    const nextUrl = nextTab === 'tasks' ? '/config/model' : '/config/model?tab=configuration'
+    window.history.replaceState(null, '', nextUrl)
+  }
+
+  const formatVersionTime = (timestamp?: number) => {
+    if (!timestamp) {
+      return '-'
+    }
+    return new Date(timestamp * 1000).toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
+  const handleCreateVersion = async () => {
+    await handleCreateConfigVersion(newVersionLabel)
+    setNewVersionLabel('')
+    setCreateVersionDialogOpen(false)
+  }
+
+  const deletingVersion = deletingVersionId
+    ? configVersions.find((version) => version.id === deletingVersionId)
+    : null
+
+  // Tour 引导 (使用 hook 封装的逻辑)
+  const { startTour: handleStartTour, isRunning: tourIsRunning } = useModelTour({
+    onOpenEditDialog: () => openEditDialog(null, null),
+    onCloseEditDialog: () => setEditDialogOpen(false),
+    onOpenProviderDialog: () => openProviderDialog(null, null),
+    onCloseProviderDialog: () => setProviderDialogOpen(false),
+    onOpenProvidersTab: () => handleActiveTabChange('configuration'),
+    onOpenModelsTab: () => handleActiveTabChange('configuration'),
+    onOpenTasksTab: () => handleActiveTabChange('tasks'),
+  })
+
+  if (loading) {
+    return (
+      <ScrollArea className="h-full">
+        <div className="space-y-4 sm:space-y-6 p-4 sm:p-6">
+          <div className="flex items-center justify-center h-64">
+            <ThinkingIllustration size="lg" />
+          </div>
+        </div>
+      </ScrollArea>
+    )
+  }
+
+  return (
+    <div
+      className="h-full overflow-y-auto lg:overflow-hidden"
+      onScroll={(event) => {
+        // 小屏由整页滚动触发追加模型，桌面端仍由列表自身触发。
+        if (activeTab === 'configuration' && !window.matchMedia('(min-width: 1024px)').matches) {
+          handleModelListScroll(event)
+        }
+      }}
+    >
+      <div
+        data-model-config-page="true"
+        className="flex min-h-full flex-col gap-4 p-4 sm:gap-6 sm:p-6 lg:h-full lg:overflow-hidden"
+      >
+        {/* 无效模型引用警告 */}
+        {invalidModelRefs.length > 0 && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription className="flex items-start justify-between gap-4">
+              <div className="flex-1">
+                <strong>检测到无效的模型引用</strong>
+                <div className="mt-2 space-y-1">
+                  {invalidModelRefs.map(({ taskName, invalidModels }) => (
+                    <div key={taskName} className="text-sm">
+                      <strong>{taskName}</strong> 引用了不存在的模型: {invalidModels.join(', ')}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0 bg-background hover:bg-accent"
+                onClick={handleRemoveInvalidRefs}
+              >
+                一键清理
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+        
+        {/* 空任务警告 */}
+        {emptyTasks.length > 0 && (
+          <Alert variant="default" className="border-yellow-500/50 bg-yellow-500/10">
+            <AlertTriangle className="h-4 w-4 text-yellow-600" />
+            <AlertDescription>
+              <strong className="text-yellow-600">以下任务未配置模型</strong>
+              <div className="mt-2 text-sm">
+                {emptyTasks.join('、')} 还未分配模型，这些功能将无法正常工作。
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
+
+        {/* 新手引导入口 - 仅在桌面端显示，移动端隐藏 */}
+        {tourEntryVisible && (
+        <Alert className="hidden lg:flex border-primary/30 bg-primary/5 cursor-pointer hover:bg-primary/10 transition-colors" onClick={handleStartTour}>
+          <GraduationCap className="h-4 w-4 text-primary" />
+          <AlertDescription className="flex items-center justify-between">
+            <span>
+              <strong className="text-primary">新手引导：</strong>不知道如何配置模型？点击这里开始学习如何为麦麦的组件分配模型。
+            </span>
+            <div className="ml-4 flex shrink-0 items-center gap-2">
+            <Button variant="outline" size="sm">
+              开始引导
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={dismissTourEntry}>
+              关闭
+            </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+        )}
+
+        {/* 标签页 */}
+        <Tabs
+          value={activeTab}
+          onValueChange={handleActiveTabChange}
+          className="flex min-h-0 w-full flex-1 flex-col"
+        >
+          <div
+            data-model-config-tabs-bar="true"
+            className="sticky top-0 z-40 -mx-4 flex w-[calc(100%+2rem)] flex-wrap items-stretch gap-2 bg-background px-4 py-2 sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-6"
+          >
+            <TabsList
+              data-model-config-tabs-list="true"
+              className="grid h-9 min-w-[min(100%,22rem)] flex-1 grid-cols-2 bg-transparent shadow-none"
+            >
+              <TabsTrigger value="configuration" className="w-full" data-tour="providers-tab-trigger">模型设置</TabsTrigger>
+              <TabsTrigger value="tasks" className="w-full" data-tour="tasks-tab-trigger">功能分配</TabsTrigger>
+            </TabsList>
+            <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
+              <SplitDropdownSelect
+                value="active"
+                label="模型配置副本"
+                icon={<History />}
+                className="flex-1 sm:w-[190px] sm:flex-none"
+                disabled={versionsLoading || saving || autoSaving || Boolean(switchingConfigVersion)}
+                onValueChange={(value) => {
+                  if (value !== 'active') {
+                    void handleSwitchConfigVersion(value)
+                  }
+                }}
+                options={[
+                  { value: 'active', label: activeConfigVersion?.label || '默认配置' },
+                  ...configVersions.map((version) => ({
+                    value: version.id,
+                    label: version.label,
+                    description: formatVersionTime(version.modified_at),
+                    disabled: !version.valid,
+                  })),
+                ]}
+                actions={[
+                  {
+                    id: 'save',
+                    label: '保存副本',
+                    ariaLabel: '保存当前配置副本',
+                    icon: creatingConfigVersion ? <Loader2 className="animate-spin" /> : <Copy />,
+                    disabled: saving || autoSaving || creatingConfigVersion,
+                    onSelect: () => setCreateVersionDialogOpen(true),
+                  },
+                  {
+                    id: 'manage',
+                    label: '管理副本',
+                    ariaLabel: '管理配置副本',
+                    icon: <History />,
+                    onSelect: () => setManageVersionsDialogOpen(true),
+                  },
+                ]}
+              />
+            </div>
+          </div>
+          {/* 厂商与模型合并配置视图 */}
+          <TabsContent
+            value="configuration"
+            className="mt-0 min-h-0 flex-1 overflow-visible lg:overflow-hidden"
+          >
+            <div
+              ref={modelConfigurationRef}
+              data-model-config-layout="true"
+              className="grid min-h-0 gap-4 lg:grid-cols-4 lg:overflow-hidden"
+              style={
+                modelConfigurationHeight === undefined
+                  ? undefined
+                  : {
+                      height: modelConfigurationHeight,
+                      maxHeight: modelConfigurationHeight,
+                    }
+              }
+            >
+              <ProviderSidebar
+                providers={apiProviders}
+                modelCounts={providerModelCounts}
+                selectedProvider={modelProviderFilter}
+                testingProviders={testingProviders}
+                testResults={testResults}
+                onSelectProvider={setModelProviderFilter}
+                onAdd={() => openProviderDialog(null, null)}
+                onAddWebSearch={() => setWebSearchEditor({ name: null })}
+                onEditWebSearch={(name) => setWebSearchEditor({ name })}
+                webConfig={mc.webConfig}
+                assignedWebService={taskConfig?.web_search?.model_list[0] ?? ''}
+              />
+
+              <section
+                className="flex min-h-0 min-w-0 flex-col gap-4 lg:col-span-3 lg:h-full lg:overflow-hidden"
+                data-tour="models-tab-trigger"
+              >
+          {/* 搜索与模型操作 */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-1 sm:flex-row sm:items-center">
+              <div className="relative w-full sm:max-w-sm">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="搜索模型名称、标识符或提供商..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              {/* 桌面端添加模型按钮位于表格表头；手机上由页头右上角的「+」添加 */}
+              {searchQuery && (
+                <p className="text-sm text-muted-foreground whitespace-nowrap">
+                  找到 {filteredModels.length} 个结果
+                </p>
+              )}
+            </div>
+
+          {/* 模型列表 - 移动端卡片视图 */}
+            <div className="flex w-full flex-col gap-2 sm:ml-auto sm:w-auto sm:flex-row sm:items-center sm:justify-end">
+              <Button 
+                onClick={saveConfig} 
+                disabled={saving || autoSaving || !hasUnsavedChanges || isRestarting} 
+                size="icon"
+                variant="outline"
+                className="h-9 w-9 shrink-0"
+                title={saving ? '保存中' : autoSaving ? '自动保存中' : hasUnsavedChanges ? '保存配置' : '已保存'}
+                aria-label={saving ? '保存中' : autoSaving ? '自动保存中' : hasUnsavedChanges ? '保存配置' : '已保存'}
+              >
+                {saving || autoSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" strokeWidth={2} fill="none" />
+                )}
+              </Button>
+              {selectedModels.size > 0 && (
+                <Button
+                  onClick={openBatchDeleteDialog}
+                  size="sm"
+                  variant="destructive"
+                  className="w-full sm:w-auto"
+                >
+                  <Trash2 className="mr-2 h-4 w-4" strokeWidth={2} fill="none" />
+                  <span className="text-sm">批量删除 ({selectedModels.size})</span>
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div
+            className="min-h-0 pb-1 lg:h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
+            data-config-field-path="models"
+            onScroll={handleModelListScroll}
+          >
+            {selectedProviderInfo && (
+              <div className="mb-4 rounded-lg border px-4 py-3">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <h2 className="font-semibold">{selectedProviderInfo.name}</h2>
+                      <span className="text-muted-foreground text-xs">
+                        {providerModelCounts.get(selectedProviderInfo.name) ?? 0} 个模型
+                      </span>
+                      <span className="text-muted-foreground text-xs">
+                        客户端类型：{selectedProviderInfo.client_type}
+                      </span>
+                    </div>
+                    <p className="text-muted-foreground mt-1 truncate text-xs" title={selectedProviderInfo.base_url}>
+                      {selectedProviderInfo.base_url}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-sm"
+                      onClick={() => handleTestProviderConnection(selectedProviderInfo.name)}
+                      disabled={testingProviders.has(selectedProviderInfo.name)}
+                      title="测试连接"
+                      aria-label={`测试厂商 ${selectedProviderInfo.name} 连接`}
+                    >
+                      {testingProviders.has(selectedProviderInfo.name) ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Zap className="h-4 w-4" />
+                      )}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-sm"
+                      onClick={() => openProviderDialog(selectedProviderInfo, selectedProviderIndex)}
+                      title="编辑厂商"
+                      aria-label={`编辑厂商 ${selectedProviderInfo.name}`}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="icon-sm"
+                      onClick={() => openProviderDeleteDialog(selectedProviderIndex)}
+                      title="删除厂商"
+                      aria-label={`删除厂商 ${selectedProviderInfo.name}`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+            <ModelCardList
+              paginatedModels={visibleModels}
+              allModels={models}
+              onEdit={openEditDialog}
+              onDelete={openDeleteDialog}
+              onTest={handleTestModelCapability}
+              isModelUsed={isModelUsed}
+              testingModels={testingModels}
+              modelTestResults={modelTestResults}
+              searchQuery={searchQuery}
+            />
+
+            {/* 模型列表 - 桌面端表格视图 */}
+            <ModelTable
+              paginatedModels={visibleModels}
+              allModels={models}
+              filteredModels={filteredModels}
+              selectedModels={selectedModels}
+              onEdit={openEditDialog}
+              onDelete={openDeleteDialog}
+              onTest={handleTestModelCapability}
+              onToggleSelection={toggleModelSelection}
+              onToggleSelectAll={toggleSelectAll}
+              isModelUsed={isModelUsed}
+              testingModels={testingModels}
+              modelTestResults={modelTestResults}
+              searchQuery={searchQuery}
+              onAdd={openAddModelDialog}
+            />
+          </div>
+
+              </section>
+            </div>
+          </TabsContent>
+
+        {/* 模型任务配置标签页 */}
+        <TabsContent
+          value="tasks"
+          className="mt-0 flex min-h-0 flex-1 flex-col gap-3 overflow-visible lg:overflow-hidden"
+        >
+          {taskConfig && taskConfigSchema && selectedTaskField && (
+            <div className="grid min-h-0 gap-4 lg:flex-1 lg:grid-cols-4 lg:overflow-hidden">
+              <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border lg:h-full">
+                <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
+                  <h2 className="text-sm font-semibold">功能任务</h2>
+                  {taskConfigSchema.fields.some((field) => field.advanced) && (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Label htmlFor="advanced-task-settings" className="cursor-pointer whitespace-nowrap text-xs">
+                        高级
+                      </Label>
+                      <Switch
+                        id="advanced-task-settings"
+                        checked={advancedTaskSettingsVisible}
+                        onCheckedChange={setAdvancedTaskSettingsVisible}
+                      />
+                    </div>
+                  )}
+                </div>
+                {/* 移动端用紧凑选择器，避免类别列表占满屏幕并接管页面纵向滚动。 */}
+                <div className="min-w-0 p-2 lg:hidden">
+                  <Select value={selectedTaskField.name} onValueChange={setSelectedTaskName}>
+                    <SelectTrigger className="w-full min-w-0" aria-label="功能任务">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {visibleTaskFields.map((field) => {
+                        const assignedCount = taskConfig[field.name]?.model_list.length ?? 0
+
+                        return (
+                          <SelectItem key={field.name} value={field.name}>
+                            {TASK_CONFIGS.find((task) => task.key === field.name)?.title ?? resolveFieldLabel(field, i18n.language)}
+                            {field.advanced ? ' · 高级' : ''}
+                            {assignedCount > 0 ? ` · 已配置 ${assignedCount}` : ' · 未配置'}
+                          </SelectItem>
+                        )
+                      })}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="hidden min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-2 lg:block lg:h-0">
+                  <AnimatePresence initial={false}>
+                    {visibleTaskFields.map((field) => {
+                      const isSelected = field.name === selectedTaskField.name
+                      const assignedModels = taskConfig[field.name]?.model_list ?? []
+                      const isConfigured = assignedModels.length > 0
+                      const modelSummary = isConfigured ? assignedModels.join('、') : '未配置模型'
+
+                      return (
+                        <motion.button
+                          layout={!reduceTaskMotion}
+                          key={field.name}
+                          type="button"
+                          className={cn(
+                            'flex w-full min-w-0 items-center justify-between gap-3 overflow-hidden rounded-md px-3 py-2 text-left transition-colors',
+                            isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+                          )}
+                          initial={reduceTaskMotion ? false : { height: 0, opacity: 0, y: -6 }}
+                          animate={{ height: 'auto', opacity: 1, y: 0 }}
+                          exit={reduceTaskMotion ? undefined : { height: 0, opacity: 0, y: -6 }}
+                          transition={{ duration: reduceTaskMotion ? 0 : 0.18, ease: 'easeOut' }}
+                          onClick={() => setSelectedTaskName(field.name)}
+                          aria-pressed={isSelected}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate text-sm font-medium">
+                                {TASK_CONFIGS.find((task) => task.key === field.name)?.title ?? resolveFieldLabel(field, i18n.language)}
+                              </span>
+                              {field.advanced && (
+                                <span
+                                  className={cn(
+                                    'shrink-0 text-[10px]',
+                                    isSelected ? 'text-primary-foreground/70' : 'text-amber-600 dark:text-amber-400'
+                                  )}
+                                >
+                                  高级
+                                </span>
+                              )}
+                            </span>
+                            <ModelIdentifierMarquee
+                              text={modelSummary}
+                              className="mt-0.5"
+                              textClassName={cn(
+                                'text-xs',
+                                isSelected ? 'text-primary-foreground/70' : 'text-muted-foreground'
+                              )}
+                            />
+                          </span>
+                          <span
+                            className={cn(
+                              'shrink-0 text-xs',
+                              isSelected
+                                ? 'text-primary-foreground/75'
+                                : isConfigured
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-muted-foreground'
+                            )}
+                          >
+                            {isConfigured ? `已配置 · ${assignedModels.length}` : '未配置'}
+                          </span>
+                        </motion.button>
+                      )
+                    })}
+                  </AnimatePresence>
+                </div>
+              </aside>
+
+              <section className="min-h-0 min-w-0 overflow-x-clip lg:col-span-3 lg:h-full lg:overflow-hidden">
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div
+                    key={selectedTaskField.name}
+                    className="flex min-h-0 flex-col gap-3 p-1 lg:h-full lg:overflow-hidden"
+                    data-config-field-path={`model_task_config.${selectedTaskField.name}`}
+                    initial={reduceTaskMotion ? false : { opacity: 0, x: 12 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={reduceTaskMotion ? undefined : { opacity: 0, x: -8 }}
+                    transition={{ duration: reduceTaskMotion ? 0 : 0.16, ease: 'easeOut' }}
+                  >
+                    {selectedTaskField.name === 'web_search' ? (
+                      <WebSearchTaskCard
+                        config={mc.webConfig}
+                        selected={taskConfig.web_search?.model_list[0] ?? ''}
+                        onChange={(names) => updateTaskConfig('web_search', 'model_list', names)}
+                        onAdd={() => setWebSearchEditor({ name: null })}
+                      />
+                    ) : <TaskConfigCard
+                      title={selectedTaskMetadata?.title ?? resolveFieldLabel(selectedTaskField, i18n.language)}
+                      description={selectedTaskField.description}
+                      taskConfig={taskConfig[selectedTaskField.name] ?? { model_list: [] }}
+                      modelNames={selectedTaskModelNames}
+                      onChange={(field, value) => updateTaskConfig(selectedTaskField.name, field, value)}
+                      hideTemperature={selectedTaskHideTemperature}
+                      hideMaxTokens={selectedTaskHideMaxTokens}
+                      hideSelectionStrategy={selectedTaskHideSelectionStrategy}
+                      advanced={selectedTaskField.advanced}
+                      showAdvancedSettings={advancedTaskSettingsVisible}
+                      singleModel={selectedTaskSingleModel}
+                      dataTour="task-model-select"
+                      modelContent={selectedTaskField.name === 'embedding' && (
+                        <EmbeddingBuildProgress
+                          selectedEmbeddingModel={taskConfig.embedding?.model_list[0] ?? ''}
+                        />
+                      )}
+                    />}
+                    {selectedTaskField.name !== 'web_search' && (taskConfig[selectedTaskField.name]?.model_list.length ?? 0) > 0 && (
+                      <TaskUsageStats
+                        key={selectedTaskField.name}
+                        taskName={selectedTaskField.name}
+                        summary={
+                          (selectedTaskField.name === 'planner' || selectedTaskField.name === 'replyer') && (
+                            <TaskRuntimeSummary
+                              taskName={selectedTaskField.name}
+                              modelList={taskConfig[selectedTaskField.name]?.model_list ?? []}
+                              models={models}
+                            />
+                          )
+                        }
+                      />
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+              </section>
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
+
+      <Dialog open={createVersionDialogOpen} onOpenChange={setCreateVersionDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>保存模型配置副本</DialogTitle>
+            <DialogDescription>
+              当前启用的 model_config.toml 会复制到 config/versions/model，之后可随时切换回来。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="model_config_version_label">副本名称</Label>
+            <Input
+              id="model_config_version_label"
+              value={newVersionLabel}
+              onChange={(event) => setNewVersionLabel(event.target.value)}
+              placeholder="例如：生产环境模型配置副本"
+              maxLength={80}
+            />
+          </div>
+          <DialogFooter className="flex-row justify-end gap-2 space-x-0">
+            <Button
+              variant="outline"
+              className="flex-1 sm:flex-none"
+              onClick={() => setCreateVersionDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              data-dialog-action="confirm"
+              className="flex-1 sm:flex-none"
+              disabled={creatingConfigVersion}
+              onClick={handleCreateVersion}
+            >
+              {creatingConfigVersion ? '保存中...' : '保存副本'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={manageVersionsDialogOpen} onOpenChange={setManageVersionsDialogOpen}>
+        <DialogContent className="max-w-[95vw] sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>模型配置副本</DialogTitle>
+            <DialogDescription>
+              未启用副本保存在 config/versions/model，切换副本时当前配置会先自动归档。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody viewportClassName="max-h-[60vh] pr-3 sm:pr-4">
+            <div className="space-y-2 py-2">
+              <div className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">当前启用</p>
+                  <p className="text-xs text-muted-foreground">
+                    {activeConfigVersion?.label || '默认配置'}
+                  </p>
+                </div>
+                <Badge variant="secondary">启用中</Badge>
+              </div>
+
+              {configVersions.length === 0 ? (
+                <div className="rounded-md border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+                  暂无未启用副本
+                </div>
+              ) : (
+                configVersions.map((version) => (
+                  <div key={version.id} className="flex flex-col gap-3 rounded-md border px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <p className="truncate text-sm font-medium">{version.label}</p>
+                        {!version.valid && <Badge variant="destructive">无效</Badge>}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {formatVersionTime(version.modified_at)}
+                      </p>
+                      {version.error && (
+                        <p className="line-clamp-2 text-xs text-destructive">{version.error}</p>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={!version.valid || switchingConfigVersion === version.id}
+                        onClick={() => void handleSwitchConfigVersion(version.id)}
+                      >
+                        {switchingConfigVersion === version.id ? '切换中...' : '切换'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="icon"
+                        className="h-9 w-9"
+                        aria-label={`删除副本 ${version.label}`}
+                        onClick={() => setDeletingVersionId(version.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </DialogBody>
+          <DialogFooter className="flex-row justify-end gap-2 space-x-0">
+            <Button variant="outline" onClick={() => setManageVersionsDialogOpen(false)}>
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={selectedModelTestResult !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedModelTestResult(null)
+        }}
+      >
+        <DialogContent className="max-w-[95vw] gap-3 p-4 sm:gap-4 sm:p-6 sm:[--dialog-width:38rem]">
+          <DialogHeader>
+            <DialogTitle>模型测试详情</DialogTitle>
+            <DialogDescription>
+              {selectedModelTestResult?.model_name || '模型'} 的最近一次能力测试结果
+            </DialogDescription>
+          </DialogHeader>
+          {selectedModelTestResult && (
+            <DialogBody viewportClassName="max-h-[70vh] pr-3 sm:pr-4">
+              <div className="space-y-4 py-2 text-sm">
+                {(() => {
+                  const isEmbeddingTest =
+                    selectedModelTestResult.test_kind === 'text_embedding' ||
+                    selectedModelTestResult.test_kind === 'image_embedding' ||
+                    (selectedModelTestResult.embedding_pairs?.length ?? 0) > 0
+                  return (
+                    <>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div>
+                          <span className="text-muted-foreground">测试状态</span>
+                          <p className={selectedModelTestResult.success ? 'font-medium text-green-600' : 'font-medium text-destructive'}>
+                            {selectedModelTestResult.success ? '通过' : '未通过'}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">耗时</span>
+                          <p className="font-medium">
+                            {selectedModelTestResult.latency_ms != null ? `${(selectedModelTestResult.latency_ms / 1000).toFixed(2)}s` : '-'}
+                          </p>
+                        </div>
+                        {!isEmbeddingTest && (
+                          <>
+                            <div>
+                              <span className="text-muted-foreground">{selectedModelTestResult.test_kind === 'replyer' ? '测试方式' : '工具调用'}</span>
+                              <p className={selectedModelTestResult.test_kind === 'replyer' || selectedModelTestResult.tool_call_ok ? 'font-medium' : 'font-medium text-destructive'}>
+                                {selectedModelTestResult.test_kind === 'replyer' ? '模拟 replyer 任务（仅文本回复）' : selectedModelTestResult.tool_call_ok ? '已返回测试工具调用' : '未返回测试工具调用'}
+                              </p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">视觉测试</span>
+                              <p className="font-medium">
+                                {selectedModelTestResult.visual_tested ? '已附加测试图片' : '未附加图片'}
+                              </p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">Prompt tokens</span>
+                              <p className="font-medium tabular-nums">{selectedModelTestResult.prompt_tokens}</p>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">Completion tokens</span>
+                              <p className="font-medium tabular-nums">{selectedModelTestResult.completion_tokens}</p>
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {selectedModelTestResult.error && (
+                        <div>
+                          <h4 className="mb-2 text-sm font-semibold">完整错误信息</h4>
+                          <pre className="bg-muted overflow-auto rounded-md p-3 text-xs break-all whitespace-pre-wrap">
+                            {selectedModelTestResult.error}
+                          </pre>
+                        </div>
+                      )}
+
+                      {selectedModelTestResult.reasoning && (
+                        <div>
+                          <h4 className="mb-2 text-sm font-semibold">推理内容</h4>
+                          <pre className="bg-muted max-h-56 overflow-auto rounded-md p-3 text-xs whitespace-pre-wrap">
+                            {selectedModelTestResult.reasoning}
+                          </pre>
+                        </div>
+                      )}
+
+                      {isEmbeddingTest && (selectedModelTestResult.embedding_pairs?.length ?? 0) > 0 && (
+                        <div>
+                          <h4 className="mb-2 text-sm font-semibold">
+                            嵌入对比结果{selectedModelTestResult.embedding_dimension ? `（向量维度 ${selectedModelTestResult.embedding_dimension}）` : ''}
+                          </h4>
+                          <div className="space-y-1">
+                            {selectedModelTestResult.embedding_pairs!.map((pair) => (
+                              <div
+                                key={pair.label}
+                                className="bg-muted flex items-center justify-between gap-3 rounded-md px-3 py-2 text-xs"
+                              >
+                                <span className="min-w-0 truncate">{pair.label}</span>
+                                <span className="tabular-nums font-medium">{pair.similarity.toFixed(4)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {!isEmbeddingTest && selectedModelTestResult.tool_calls.length > 0 && (
+                        <div>
+                          <h4 className="mb-2 text-sm font-semibold">工具调用返回</h4>
+                          <pre className="bg-muted max-h-56 overflow-auto rounded-md p-3 text-xs whitespace-pre-wrap">
+                            {JSON.stringify(selectedModelTestResult.tool_calls, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+
+                      <div>
+                        <h4 className="mb-2 text-sm font-semibold">{isEmbeddingTest ? '测试结果' : '模型文本返回'}</h4>
+                        <pre className="bg-muted max-h-56 overflow-auto rounded-md p-3 text-xs whitespace-pre-wrap">
+                          {selectedModelTestResult.response || '（无文本返回）'}
+                        </pre>
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            </DialogBody>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setSelectedModelTestResult(null)}>
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ProviderForm
+        open={providerDialogOpen}
+        onOpenChange={setProviderDialogOpen}
+        editingProvider={editingProvider}
+        editingIndex={editingProviderIndex}
+        providers={apiProviders}
+        onSave={handleSaveProviderEdit}
+        tourState={{ isRunning: tourIsRunning }}
+      />
+
+      {/* 删除提供商确认对话框 */}
+      <AlertDialog open={providerDeleteDialogOpen} onOpenChange={setProviderDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除提供商</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除提供商"{deletingProviderIndex !== null ? apiProviders[deletingProviderIndex]?.name : ''}"吗？
+              如果该提供商下存在模型，确认时会提示一并处理关联模型。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmProviderDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 删除提供商影响确认对话框 */}
+      <AlertDialog open={deleteConfirmState.isOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              删除提供商会同时移除关联模型
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-sm">
+                <p>
+                  将删除 {deleteConfirmState.providersToDelete.length} 个提供商，并移除
+                  {' '}{deleteConfirmState.affectedModels.length} 个使用这些提供商的模型。
+                </p>
+                {deleteConfirmState.affectedModels.length > 0 && (
+                  <div className="rounded-md bg-muted p-3 text-muted-foreground">
+                    {deleteConfirmState.affectedModels.slice(0, 8).map((model) => (
+                      <div key={model.name}>
+                        {model.name} ({model.api_provider})
+                      </div>
+                    ))}
+                    {deleteConfirmState.affectedModels.length > 8 && (
+                      <div>还有 {deleteConfirmState.affectedModels.length - 8} 个模型...</div>
+                    )}
+                  </div>
+                )}
+                <p className="font-medium text-foreground">
+                  关联模型会从模型列表和任务分配中移除，此操作无法撤销。
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleCancelDeleteProviderImpact}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteProviderImpact}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              确认删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 编辑模型对话框 */}
+      <Dialog open={editDialogOpen} onOpenChange={handleModelEditDialogOpenChange}>
+        <DialogContent
+          className="max-w-[95vw] gap-3 p-4 sm:gap-4 sm:p-6 sm:[--dialog-width:64rem]"
+          data-tour="model-dialog"
+          // 模型编辑是数据录入弹窗，只通过关闭按钮和底部操作显式退出。
+          // 始终拦截 outside-interaction，避免内层弹窗关闭后的延迟触摸事件击穿外层。
+          preventOutsideClose
+          confirmOnEnter
+          // 无描述文案，显式置空避免 Radix 的 aria-describedby 缺失告警
+          aria-describedby={undefined}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {editingIndex !== null ? '编辑模型' : editingModelIsEmbedding ? '添加嵌入模型' : '添加 LLM 模型'}
+            </DialogTitle>
+            {/* 「高级」开关浮在右上角，与 DialogContent 内置的关闭按钮同行 */}
+            {!editingModelIsEmbedding && (
+            <Button
+              type="button"
+              variant={advancedModelSettingsVisible ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setAdvancedModelSettingsVisible((current) => !current)}
+              className="absolute top-3.5 right-12"
+            >
+              高级
+            </Button>
+            )}
+          </DialogHeader>
+
+          <DialogBody viewportClassName="min-h-0 flex-1 pr-3 sm:pr-4 [&>div]:!block">
+          <div className="grid gap-3 py-2 sm:gap-4 sm:py-4">
+            {editingModelIsEmbedding && (
+            <div className="grid gap-2">
+              <Label htmlFor="model_type">模型类型</Label>
+              <Select
+                value={editingModelType}
+                onValueChange={(value) => setEditingModel((model) => model
+                  ? { ...model, model_type: value as ModelInfo['model_type'] }
+                  : null
+                )}
+              >
+                <SelectTrigger id="model_type"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="embedding">文本嵌入模型</SelectItem>
+                  <SelectItem value="image_embedding">图片嵌入模型</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            )}
+            <div className="grid gap-3 md:grid-cols-2 md:gap-4">
+              <div className="grid gap-2" data-tour="model-name-input">
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
+                  <Label
+                    htmlFor="model_name"
+                    className={`sm:w-28 sm:flex-shrink-0 ${formErrors.name ? 'text-destructive' : ''}`}
+                  >
+                    模型名称 *
+                  </Label>
+                  <Input
+                    id="model_name"
+                    value={editingModel?.name || ''}
+                    onChange={(e) => {
+                      setModelNameTouched(true)
+                      setEditingModel((prev) =>
+                        prev ? { ...prev, name: e.target.value } : null
+                      )
+                      if (formErrors.name) {
+                        setFormErrors((prev) => ({ ...prev, name: undefined }))
+                      }
+                    }}
+                    placeholder={editingModelType === 'embedding'
+                      ? '例如: text-embedding-v4'
+                      : editingModelType === 'image_embedding'
+                        ? '例如: multimodal-embedding-v1'
+                        : '例如: qwen3-30b'}
+                    className={`sm:flex-1 ${formErrors.name ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+                  />
+                </div>
+                {formErrors.name ? (
+                  <p className="text-xs text-destructive sm:pl-28">{formErrors.name}</p>
+                ) : null}
+              </div>
+
+              <div className="grid gap-2" data-tour="model-provider-select">
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
+                  <Label
+                    htmlFor="api_provider"
+                    className={`sm:w-28 sm:flex-shrink-0 ${formErrors.api_provider ? 'text-destructive' : ''}`}
+                  >
+                    API 提供商 *
+                  </Label>
+                  <Select
+                    value={editingModel?.api_provider || ''}
+                    onValueChange={(value) => {
+                      setEditingModel((prev) =>
+                        prev
+                          ? { ...prev, api_provider: value }
+                          : null
+                      )
+                      // 清空模型列表和错误状态，等待 useEffect 重新获取
+                      clearModels()
+                      if (formErrors.api_provider) {
+                        setFormErrors((prev) => ({ ...prev, api_provider: undefined }))
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="api_provider" className={`sm:flex-1 ${formErrors.api_provider ? 'border-destructive focus-visible:ring-destructive' : ''}`}>
+                      <SelectValue placeholder="选择提供商" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providers.map((provider) => (
+                        <SelectItem key={provider} value={provider}>
+                          {provider}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {formErrors.api_provider && (
+                  <p className="text-xs text-destructive sm:pl-28">{formErrors.api_provider}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-2" data-tour="model-identifier-input">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="model_identifier" className={formErrors.model_identifier ? 'text-destructive' : ''}>模型标识符 *</Label>
+                {matchedTemplate?.modelFetcher && (
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary" className="text-xs">
+                      {matchedTemplate.display_name}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2"
+                      onClick={() => editingModel?.api_provider && fetchModelsForProvider(editingModel.api_provider, true)}
+                      disabled={fetchingModels}
+                    >
+                      {fetchingModels ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3 w-3" />
+                      )}
+                    </Button>
+                  </div>
+                )}
+              </div>
+              
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:gap-2">
+                {/* 模型标识符 Combobox */}
+                {matchedTemplate?.modelFetcher && (
+                  <Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="outline"
+                        role="combobox"
+                        aria-expanded={modelComboboxOpen}
+                        className="w-full justify-between font-normal sm:w-[46%]"
+                        disabled={fetchingModels || !!modelFetchError}
+                      >
+                        {fetchingModels ? (
+                          <span className="flex items-center gap-2 text-muted-foreground">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            正在获取模型列表...
+                          </span>
+                        ) : modelFetchError ? (
+                          <span className="text-muted-foreground text-sm">手动填写</span>
+                        ) : editingModel?.model_identifier ? (
+                          <ModelIdentifierMarquee
+                            text={editingModel.model_identifier}
+                            className="min-w-0 flex-1 text-left"
+                          />
+                        ) : (
+                          <span className="text-muted-foreground">搜索或选择模型...</span>
+                        )}
+                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="z-[60] p-0" align="start" style={{ width: 'var(--radix-popover-trigger-width)' }}>
+                      <Command>
+                        <CommandInput placeholder="搜索模型..." />
+                        <CommandList className="max-h-[300px]">
+                          <CommandEmpty>
+                            {modelFetchError ? (
+                              <div className="py-4 px-2 text-center space-y-2">
+                                <p className="text-sm text-destructive">{modelFetchError}</p>
+                                {!modelFetchError.includes('API Key') && (
+                                  <Button
+                                    variant="link"
+                                    size="sm"
+                                    onClick={() => editingModel?.api_provider && fetchModelsForProvider(editingModel.api_provider, true)}
+                                  >
+                                    重试
+                                  </Button>
+                                )}
+                              </div>
+                            ) : (
+                              '未找到匹配的模型'
+                            )}
+                          </CommandEmpty>
+                          <CommandGroup heading="可用模型">
+                            {availableModels.map((model) => (
+                              <CommandItem
+                                key={model.id}
+                                value={model.id}
+                                className="group/model-option pr-8"
+                                onSelect={() => {
+                                  setEditingModel((prev) => {
+                                    if (!prev) return null
+                                    // 名称留空且用户未手动编辑过时，名称跟随标识符自动填充
+                                    const shouldFillName = !prev.name && !modelNameTouched
+                                    return {
+                                      ...prev,
+                                      model_identifier: model.id,
+                                      ...(shouldFillName ? { name: model.id } : {}),
+                                    }
+                                  })
+                                  setModelComboboxOpen(false)
+                                }}
+                              >
+                                {editingModel?.model_identifier === model.id && (
+                                  <Check className="absolute right-2 h-4 w-4" />
+                                )}
+                                <div className="flex min-w-0 flex-1 flex-col">
+                                  <ModelIdentifierMarquee text={model.id} />
+                                  {model.name !== model.id && (
+                                    <ModelIdentifierMarquee
+                                      text={model.name}
+                                      textClassName="text-xs text-muted-foreground"
+                                    />
+                                  )}
+                                </div>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                )}
+
+                <Input
+                  id="model_identifier"
+                  value={editingModel?.model_identifier || ''}
+                  onChange={(e) => {
+                    setEditingModel((prev) => {
+                      if (!prev) return null
+                      // 名称留空且用户未手动编辑过时，名称跟随标识符自动填充
+                      const shouldFillName = !prev.name && !modelNameTouched
+                      return {
+                        ...prev,
+                        model_identifier: e.target.value,
+                        ...(shouldFillName ? { name: e.target.value } : {}),
+                      }
+                    })
+                    if (formErrors.model_identifier) {
+                      setFormErrors((prev) => ({ ...prev, model_identifier: undefined }))
+                    }
+                  }}
+                  placeholder={matchedTemplate?.modelFetcher ? '手动输入模型标识符' : 'Qwen/Qwen3-30B-A3B-Instruct-2507'}
+                  className={`${matchedTemplate?.modelFetcher ? 'sm:flex-1' : 'w-full'} ${formErrors.model_identifier ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+                />
+              </div>
+              
+              {/* 表单验证错误提示 */}
+              {formErrors.model_identifier && (
+                <p className="text-xs text-destructive">{formErrors.model_identifier}</p>
+              )}
+              
+              {/* 模型获取错误提示 */}
+              {modelFetchError && matchedTemplate?.modelFetcher && !formErrors.model_identifier && (
+                <Alert variant="destructive" className="mt-2 py-2">
+                  <Info className="h-4 w-4" />
+                  <AlertDescription className="text-xs">
+                    {modelFetchError}
+                  </AlertDescription>
+                </Alert>
+              )}
+              
+              {!formErrors.model_identifier && (modelFetchError || !matchedTemplate?.modelFetcher) && (
+                <p className="text-xs text-muted-foreground">
+                  {modelFetchError
+                    ? '请手动输入模型标识符，或前往"模型厂商设置"检查 API Key'
+                    : 'API 提供商提供的模型 ID'}
+                </p>
+              )}
+            </div>
+
+            {!editingModelIsEmbedding && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:gap-6">
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="model_visual"
+                  checked={editingModel?.visual || false}
+                  onCheckedChange={(checked) =>
+                    setEditingModel((prev) =>
+                      prev ? { ...prev, visual: checked } : null
+                    )
+                  }
+                />
+                <Label htmlFor="model_visual" className="cursor-pointer">
+                  启用视觉
+                </Label>
+              </div>
+            </div>
+            )}
+
+            <fieldset className={`grid min-w-0 grid-cols-1 gap-3 sm:gap-4 ${editingModelIsEmbedding ? '' : 'md:grid-cols-3'}`}>
+              <legend className="mb-2 text-sm font-medium">默认价格</legend>
+              <div className="grid gap-2">
+                <Label htmlFor="price_in">输入价格 (¥/M token)</Label>
+                <Input
+                  id="price_in"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={editingModel?.price_in ?? ''}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? null : parseFloat(e.target.value)
+                    setEditingModel((prev) => {
+                      if (!prev) return null
+                      // 缓存价格未被手动改过时（当前值仍等于修改前的输入价）跟随输入价格
+                      const cacheFollowsInput = (prev.cache_price_in ?? 0) === (prev.price_in ?? 0)
+                      return {
+                        ...prev,
+                        price_in: val,
+                        cache_price_in: cacheFollowsInput ? val : prev.cache_price_in,
+                      }
+                    })
+                  }}
+                  placeholder="默认: 0"
+                />
+              </div>
+
+              {!editingModelIsEmbedding && (
+              <>
+              <div className="grid gap-2">
+                <Label htmlFor="price_out">输出价格 (¥/M token)</Label>
+                <Input
+                  id="price_out"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={editingModel?.price_out ?? ''}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? null : parseFloat(e.target.value)
+                    setEditingModel((prev) =>
+                      prev
+                        ? { ...prev, price_out: val }
+                        : null
+                    )
+                  }}
+                  placeholder="默认: 0"
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="cache_price_in">缓存价格 (¥/M token)</Label>
+                <Input
+                  id="cache_price_in"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={editingModel?.cache_price_in ?? ''}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? null : parseFloat(e.target.value)
+                    setEditingModel((prev) =>
+                      prev
+                        ? { ...prev, cache_price_in: val }
+                        : null
+                    )
+                  }}
+                  placeholder="留空=与输入价一致"
+                />
+              </div>
+              </>
+              )}
+            </fieldset>
+
+            <section aria-labelledby="price-periods-heading" className="min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <h3
+                    id="price-periods-heading"
+                    className="text-sm font-medium"
+                    title="按成功请求尝试的开始时间计价；包含开始、不包含结束，支持跨午夜。无时段或时段外使用默认价格。"
+                  >
+                    分时价格
+                  </h3>
+                  <p className="text-xs text-muted-foreground">每日 · 服务器本地时间 · ¥/M token</p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0 gap-1"
+                  onClick={() => updatePricePeriods((periods) => [...periods, {
+                    start_time: '',
+                    end_time: '',
+                    price_in: editingModel?.price_in ?? 0,
+                    price_out: editingModel?.price_out ?? 0,
+                    cache_price_in: editingModel?.cache_price_in ?? 0,
+                  }])}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  添加时段
+                </Button>
+              </div>
+              {editingModel?.price_periods?.map((period, index) => (
+                <fieldset key={index} className="min-w-0 border-t pt-2">
+                  <legend className="sr-only">时段 {index + 1}</legend>
+                  <div className="flex items-end gap-2">
+                    <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-2">
+                      <div className="grid min-w-0 grid-cols-2 gap-2">
+                        {([
+                          ['start_time', '开始时间'],
+                          ['end_time', '结束时间'],
+                        ] as const).map(([field, label]) => (
+                          <div key={field} className="grid min-w-0 gap-1">
+                            <Label htmlFor={`price-period-${index}-${field}`} className="text-xs">
+                              {label}
+                              {field === 'end_time' && period.end_time && period.end_time < period.start_time && (
+                                <span className="ml-1 text-muted-foreground">次日</span>
+                              )}
+                            </Label>
+                            <Input
+                              id={`price-period-${index}-${field}`}
+                              aria-label={`时段 ${index + 1} ${label}`}
+                              aria-describedby={formErrors.price_periods ? 'price-periods-error' : undefined}
+                              type="time"
+                              step="60"
+                              required
+                              className="h-8 min-w-0 px-2 text-xs"
+                              value={period[field]}
+                              onChange={(event) => {
+                                const value = event.target.value
+                                updatePricePeriods((periods) => periods.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, [field]: value } : item
+                                ))
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <div className={`grid min-w-0 gap-2 ${editingModelIsEmbedding ? 'grid-cols-1' : 'grid-cols-3'}`}>
+                        {([
+                          ['price_in', '输入价格'],
+                          ['price_out', '输出价格'],
+                          ['cache_price_in', '缓存价格'],
+                        ] as const).filter(([field]) => !editingModelIsEmbedding || field === 'price_in').map(([field, label]) => (
+                          <div key={field} className="grid min-w-0 gap-1">
+                            <Label htmlFor={`price-period-${index}-${field}`} className="text-xs">{label}</Label>
+                            <Input
+                              id={`price-period-${index}-${field}`}
+                              aria-label={`时段 ${index + 1} ${label}`}
+                              aria-describedby={formErrors.price_periods ? 'price-periods-error' : undefined}
+                              type="number"
+                              min="0"
+                              step="any"
+                              required
+                              className="h-8 min-w-0 px-2 text-xs"
+                              value={Number.isFinite(period[field]) ? period[field] : ''}
+                              onChange={(event) => {
+                                const value = event.target.valueAsNumber
+                                updatePricePeriods((periods) => periods.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, [field]: value } : item
+                                ))
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="shrink-0 text-destructive hover:text-destructive"
+                      title={`删除时段 ${index + 1}`}
+                      aria-label={`删除时段 ${index + 1}`}
+                      onClick={() => updatePricePeriods((periods) => periods.filter((_, itemIndex) => itemIndex !== index))}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </fieldset>
+              ))}
+              {formErrors.price_periods && (
+                <p id="price-periods-error" role="alert" className="text-xs text-destructive">
+                  {formErrors.price_periods}
+                </p>
+              )}
+            </section>
+
+            {deepSeekClientType && (
+              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  <div className="flex items-center justify-between gap-4 rounded-md border bg-background/50 p-3">
+                    <div className="space-y-1">
+                      <Label htmlFor="deepseek_thinking" className="cursor-pointer">启用思考</Label>
+                      <p className="text-xs text-muted-foreground">
+                        {deepSeekClientType === 'openai_responses'
+                          ? '写入 reasoning.effort'
+                          : '写入 thinking.type'}
+                      </p>
+                    </div>
+                    <Switch
+                      id="deepseek_thinking"
+                      checked={deepSeekThinkingEnabled}
+                      onCheckedChange={(checked) => updateModelExtraParams((params) =>
+                        setDeepSeekThinkingEnabled(params, deepSeekClientType, checked)
+                      )}
+                    />
+                  </div>
+
+                  <div className="space-y-2 rounded-md border bg-background/50 p-3">
+                    <Label htmlFor="deepseek_reasoning_effort">思考力度</Label>
+                    <Select
+                      value={deepSeekReasoningEffort}
+                      disabled={!deepSeekThinkingEnabled}
+                      onValueChange={(value) => updateModelExtraParams((params) =>
+                        setDeepSeekReasoningEffort(
+                          params,
+                          deepSeekClientType,
+                          value as DeepSeekReasoningEffort
+                        )
+                      )}
+                    >
+                      <SelectTrigger id="deepseek_reasoning_effort">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="low">低</SelectItem>
+                        <SelectItem value="high">高（默认）</SelectItem>
+                        <SelectItem value="max">最高</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 rounded-md border bg-background/50 p-3 sm:col-span-2 md:col-span-1">
+                    <div className="space-y-1">
+                      <Label htmlFor="deepseek_web_search" className="cursor-pointer">启用联网搜索</Label>
+                      <p className="text-xs text-muted-foreground">
+                        {deepSeekClientType === 'openai_responses'
+                          ? '添加 DeepSeek 原生 web_search 工具，并保留其他工具配置'
+                          : '仅 DeepSeek Responses API 支持原生联网搜索'}
+                      </p>
+                    </div>
+                    <Switch
+                      id="deepseek_web_search"
+                      checked={deepSeekWebSearchEnabled}
+                      disabled={deepSeekClientType !== 'openai_responses' || deepSeekToolsInvalid}
+                      onCheckedChange={(checked) => updateModelExtraParams((params) =>
+                        setDeepSeekWebSearchEnabled(params, checked)
+                      )}
+                    />
+                  </div>
+                {deepSeekExtraParamsError && (
+                  <p role="alert" className="text-xs text-destructive sm:col-span-2 md:col-span-3">
+                    额外参数配置冲突：{deepSeekExtraParamsError}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {!deepSeekClientType && thinkingFormatActive && (
+              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                {/* 不支持关闭时将已开启的开关置灰；旧配置若为关闭状态，仍允许切回开启。 */}
+                <div className="flex items-center justify-between gap-4 rounded-md border bg-background/50 p-3">
+                  <div className="space-y-1">
+                    <Label
+                      htmlFor="model_thinking"
+                      className={thinkingSwitchInteractive ? 'cursor-pointer' : 'cursor-not-allowed'}
+                    >
+                      启用思考
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {thinkingFormatActive.kind === 'reasoning_effort'
+                        ? '推理模型思考常开，仅支持调整力度档位'
+                        : thinkingFormatActive.kind === 'enable_thinking'
+                          ? '写入 enable_thinking'
+                          : `写入 thinking.type（${thinkingFormatActive.onValue ?? 'enabled'}）`}
+                    </p>
+                    {thinkingFormatActive.kind === 'thinking_type' && thinkingFormatActive.disableNote && (
+                      <p className="text-xs text-muted-foreground">{thinkingFormatActive.disableNote}</p>
+                    )}
+                  </div>
+                  <Switch
+                    id="model_thinking"
+                    checked={thinkingEnabled}
+                    disabled={!thinkingSwitchInteractive}
+                    onCheckedChange={(checked) => updateModelExtraParams((params) =>
+                      setThinkingEnabled(params, thinkingFormatActive, checked)
+                    )}
+                  />
+                </div>
+
+                {/* 思考力度：配置了力度值域的格式显示 */}
+                {thinkingEffortOptions.length > 0 && (
+                  <div className="space-y-2 rounded-md border bg-background/50 p-3">
+                    <Label htmlFor="model_thinking_effort">思考力度</Label>
+                    <Select
+                      value={thinkingEffort}
+                      disabled={!thinkingEnabled}
+                      onValueChange={(value) => updateModelExtraParams((params) =>
+                        setThinkingEffort(params, thinkingFormatActive, value)
+                      )}
+                    >
+                      <SelectTrigger id="model_thinking_effort">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {thinkingEffortOptions.map((effort) => (
+                          <SelectItem key={effort} value={effort}>
+                            {effort}
+                            {effort === getThinkingEffort({}, thinkingFormatActive) ? '（默认）' : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                {/* 思考预算：配置了预算参数的格式显示 */}
+                {thinkingFormatActive.budgetParam && (
+                  <div className="space-y-2 rounded-md border bg-background/50 p-3">
+                    <Label htmlFor="model_thinking_budget">思考预算 (token)</Label>
+                    <Input
+                      id="model_thinking_budget"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={thinkingBudget ?? ''}
+                      onChange={(e) => {
+                        const value = e.target.value === '' ? null : Math.max(0, parseInt(e.target.value, 10))
+                        if (e.target.value === '' || Number.isFinite(value)) {
+                          updateModelExtraParams((params) => setThinkingBudget(params, thinkingFormatActive, value))
+                        }
+                      }}
+                      placeholder={thinkingFormatActive.budgetNote ?? '留空使用服务商默认'}
+                    />
+                  </div>
+                )}
+
+                {/* 附加提示：并入开关卡片说明，不再单独占卡 */}
+                {thinkingFormatActive.note && (
+                  <p className="text-xs text-muted-foreground sm:col-span-2 md:col-span-3">
+                    {thinkingFormatActive.note}
+                  </p>
+                )}
+
+                {thinkingExtraParamsError && (
+                  <p role="alert" className="text-xs text-destructive sm:col-span-2 md:col-span-3">
+                    思考参数配置有误：{thinkingExtraParamsError}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {!editingModelIsEmbedding && advancedModelSettingsVisible && (
+              <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50/50 p-3 dark:border-amber-500/40 dark:bg-amber-500/10 sm:space-y-4 sm:p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="force_stream_mode" className="cursor-pointer">强制流式输出模式</Label>
+                    <p className="text-xs text-muted-foreground">
+                      用于必须通过流式响应返回内容的模型
+                    </p>
+                  </div>
+                  <Switch
+                    id="force_stream_mode"
+                    checked={editingModel?.force_stream_mode || false}
+                    onCheckedChange={(checked) =>
+                      setEditingModel((prev) =>
+                        prev ? { ...prev, force_stream_mode: checked } : null
+                      )
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="send_temperature" className="cursor-pointer">
+                      发送 temperature 参数
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      关闭后不发送由 MaiBot 管理的模型温度和任务温度
+                    </p>
+                  </div>
+                  <Switch
+                    id="send_temperature"
+                    checked={editingModel?.send_temperature ?? true}
+                    onCheckedChange={(checked) =>
+                      setEditingModel((prev) =>
+                        prev ? { ...prev, send_temperature: checked } : null
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            )}
+
+            {!editingModelIsEmbedding && (
+            <div className="grid items-start gap-3 md:grid-cols-2 md:gap-4">
+              {/* 模型级别温度 */}
+              <div className="space-y-2 rounded-lg border p-3 sm:space-y-3 sm:p-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <Label htmlFor="enable_model_temperature" className="cursor-pointer">自定义模型温度</Label>
+                    <HelpTooltip
+                      content={
+                        <div className="space-y-2">
+                          <p className="font-medium">什么是温度（Temperature）？</p>
+                          <p>温度控制模型输出的随机性和创造性：</p>
+                          <ul className="list-disc list-inside space-y-1 text-xs">
+                            <li><strong>低温度（0.1-0.3）</strong>：更确定、更保守的输出，适合事实性任务</li>
+                            <li><strong>中温度（0.5-0.7）</strong>：平衡创造性与可控性</li>
+                            <li><strong>高温度（0.8-1.0）</strong>：更有创意、更多样化的输出</li>
+                            <li><strong>极高温度（1.0-2.0）</strong>：极度随机，可能产生不可预测的结果</li>
+                          </ul>
+                          <p className="text-xs text-muted-foreground">
+                            启用后覆盖「为模型分配功能」中该任务配置的温度。
+                          </p>
+                        </div>
+                      }
+                      side="right"
+                      maxWidth="400px"
+                    />
+                  </div>
+                  {editingModel?.send_temperature === false && (
+                    <p className="text-xs text-muted-foreground">
+                      已在高级设置中关闭 temperature 参数发送
+                    </p>
+                  )}
+                </div>
+                <Switch
+                  id="enable_model_temperature"
+                  checked={editingModel?.temperature != null}
+                  disabled={editingModel?.send_temperature === false}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      setEditingModel((prev) => prev ? { ...prev, temperature: 0.7 } : null)
+                    } else {
+                      setEditingModel((prev) => prev ? { ...prev, temperature: null } : null)
+                    }
+                  }}
+                />
+              </div>
+              
+              {editingModel?.temperature != null && editingModel.send_temperature !== false && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="flex items-center justify-between gap-3">
+                    <Label className="text-sm">温度值</Label>
+                    <Input
+                      type="number"
+                      value={editingModel.temperature}
+                      onChange={(e) => {
+                        const value = parseFloat(e.target.value)
+                        if (!isNaN(value) && value >= 0 && value <= 2) {
+                          setEditingModel((prev) => prev ? { ...prev, temperature: value } : null)
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = parseFloat(e.target.value)
+                        if (isNaN(value) || value < 0) {
+                          setEditingModel((prev) => prev ? { ...prev, temperature: 0 } : null)
+                        } else if (value > 2) {
+                          setEditingModel((prev) => prev ? { ...prev, temperature: 2 } : null)
+                        }
+                      }}
+                      step={0.01}
+                      min={0}
+                      max={2}
+                      className="h-8 w-24 text-right text-sm tabular-nums sm:w-20"
+                    />
+                  </div>
+                  <div className="hidden items-center gap-3 sm:flex">
+                    <span className="text-xs text-muted-foreground tabular-nums">0</span>
+                    <Slider
+                      value={[editingModel.temperature]}
+                      onValueChange={(values) =>
+                        setEditingModel((prev) =>
+                          prev ? { ...prev, temperature: values[0] } : null
+                        )
+                      }
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      className="flex-1"
+                    />
+                    <span className="text-xs text-muted-foreground tabular-nums">2</span>
+                  </div>
+                  {editingModel.temperature > 1 && (
+                    <Alert className="bg-amber-500/10 border-amber-500/20 [&>svg+div]:translate-y-0">
+                      <AlertTriangle className="h-4 w-4 text-amber-500" />
+                      <AlertDescription className="text-xs text-amber-600 dark:text-amber-400">
+                        温度 &gt; 1 会产生更随机、更不可预测的输出，请谨慎使用
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    较低（0.1-0.5）产生确定输出，中等（0.5-1.0）平衡创造性，较高（1.0-2.0）产生极度随机输出
+                  </p>
+                </div>
+              )}
+              </div>
+
+              {/* 模型级别最大 Token */}
+              <div className="space-y-2 rounded-lg border p-3 sm:space-y-3 sm:p-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <Label htmlFor="enable_model_max_tokens" className="cursor-pointer">自定义最大 Token</Label>
+                    <HelpTooltip
+                      content={
+                        <div className="space-y-2">
+                          <p className="font-medium">什么是最大 Token？</p>
+                          <p>控制模型单次回复的最大长度。1 token ≈ 0.75 个英文单词或 0.5 个中文字符。</p>
+                          <ul className="list-disc list-inside space-y-1 text-xs">
+                            <li><strong>较小值（512-1024）</strong>：简短回复，节省成本</li>
+                            <li><strong>中等值（2048-4096）</strong>：正常对话长度</li>
+                            <li><strong>较大值（8192+）</strong>：长文本生成，成本较高</li>
+                          </ul>
+                          <p className="text-xs text-muted-foreground">
+                            启用后覆盖「为模型分配功能」中该任务配置的最大 Token。
+                          </p>
+                        </div>
+                      }
+                      side="right"
+                      maxWidth="400px"
+                    />
+                  </div>
+                </div>
+                <Switch
+                  id="enable_model_max_tokens"
+                  checked={editingModel?.max_tokens != null}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      // 启用时设置默认值 2048
+                      setEditingModel((prev) => prev ? { ...prev, max_tokens: 2048 } : null)
+                    } else {
+                      // 禁用时清除
+                      setEditingModel((prev) => prev ? { ...prev, max_tokens: null } : null)
+                    }
+                  }}
+                />
+              </div>
+              
+              {editingModel?.max_tokens != null && (
+                <div className="space-y-2 pt-2 border-t">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">最大 Token 数</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="128000"
+                      value={editingModel.max_tokens}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value)
+                        if (!isNaN(val) && val >= 1) {
+                          setEditingModel((prev) => prev ? { ...prev, max_tokens: val } : null)
+                        }
+                      }}
+                      className="w-28 h-8 text-sm"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    限制模型单次输出的最大 token 数量，不同模型支持的上限不同
+                  </p>
+                </div>
+              )}
+              </div>
+            </div>
+
+            )}
+
+            {/* 额外参数 */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">额外参数</Label>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="flex-1 justify-start h-9"
+                  onClick={() => setExtraParamsDialogOpen(true)}
+                >
+                  <Settings className="h-4 w-4 mr-2" />
+                  {Object.keys(editingModel?.extra_params || {}).length > 0 ? (
+                    <span>
+                      已配置 {Object.keys(editingModel?.extra_params || {}).length} 个参数
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">未配置额外参数</span>
+                  )}
+                </Button>
+              </div>
+              {Object.keys(editingModel?.extra_params || {}).length > 0 && (
+                <div className="text-xs text-muted-foreground px-1">
+                  {Object.keys(editingModel?.extra_params || {})
+                    .slice(0, 3)
+                    .map((key) => (
+                      <span key={key} className="inline-block mr-2">
+                        <code className="px-1.5 py-0.5 bg-muted rounded">{key}</code>
+                      </span>
+                    ))}
+                  {Object.keys(editingModel?.extra_params || {}).length > 3 && (
+                    <span>...</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          </DialogBody>
+
+          <DialogFooter className="flex-row justify-end gap-2 space-x-0">
+            <Button
+              variant="outline"
+              className="flex-1 sm:flex-none"
+              onClick={() => setEditDialogOpen(false)}
+              data-tour="model-cancel-button"
+            >
+              取消
+            </Button>
+            <Button
+              data-dialog-action="confirm"
+              className="flex-1 sm:flex-none"
+              onClick={handleSaveEdit}
+              disabled={saving || Boolean(deepSeekExtraParamsError) || Boolean(thinkingExtraParamsError)}
+              data-tour="model-save-button"
+            >
+              {saving ? '保存中...' : '保存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认对话框 */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除模型 "{deletingIndex !== null ? models[deletingIndex]?.name : ''}" 吗？
+              此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDelete}>删除</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 批量删除确认对话框 */}
+      <AlertDialog open={batchDeleteDialogOpen} onOpenChange={setBatchDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认批量删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除选中的 {selectedModels.size} 个模型吗？
+              此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmBatchDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              批量删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 嵌入模型更换警告对话框 */}
+      <AlertDialog open={embeddingWarning.isOpen} onOpenChange={embeddingWarning.setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="sr-only">更换嵌入模型警告</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-sm">
+                <p>
+                  <strong className="text-foreground">注意：</strong>更换嵌入模型后，表达库会在后台自动补建；记忆向量若提示需要重建，请在长期记忆页处理。
+                </p>
+                <p className="text-foreground font-medium">
+                  确定要更换嵌入模型吗？
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={embeddingWarning.cancel}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void embeddingWarning.confirm()}
+              className="bg-amber-600 hover:bg-amber-700"
+            >
+              确认更换
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 额外参数编辑弹窗 */}
+      <ExtraParamsDialog
+        open={extraParamsDialogOpen}
+        onOpenChange={setExtraParamsDialogOpen}
+        value={editingModel?.extra_params || {}}
+        validate={
+          deepSeekClientType
+            ? (params) => validateDeepSeekExtraParams(params, deepSeekClientType)
+            : thinkingFormatActive
+              ? (params) => validateThinkingParams(params, thinkingFormatActive)
+              : undefined
+        }
+        onChange={(params) =>
+          setEditingModel((prev) =>
+            prev ? { ...prev, extra_params: params } : null
+          )
+        }
+      />
+
+      <AlertDialog open={deletingVersionId !== null} onOpenChange={(open) => !open && setDeletingVersionId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除模型配置副本</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除副本「{deletingVersion?.label || deletingVersionId}」吗？此操作不会影响当前启用配置，但无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deletingVersionId) {
+                  void handleDeleteConfigVersion(deletingVersionId)
+                }
+                setDeletingVersionId(null)
+              }}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 重启遮罩层 */}
+      {webSearchEditor && (
+        <WebSearchDialog
+          config={mc.webConfig}
+          providers={apiProviders}
+          models={models}
+          editingName={webSearchEditor.name}
+          assignedService={taskConfig?.web_search?.model_list[0] ?? ''}
+          onClose={() => setWebSearchEditor(null)}
+          onSave={mc.saveWebConfig}
+        />
+      )}
+      {/* 手机页头右上角的「+」：添加模型、厂商与联网服务 */}
+      <MobileHeaderActions>
+        <MobileAddMenu
+          label="添加"
+          items={[
+            { label: '添加 LLM 模型', onSelect: () => openAddModelDialog('llm') },
+            { label: '添加嵌入模型', onSelect: () => openAddModelDialog('embedding') },
+            { label: '添加 LLM 模型提供商', onSelect: () => openProviderDialog(null, null) },
+            { label: '添加联网搜索', onSelect: () => setWebSearchEditor({ name: null }) },
+          ]}
+        />
+      </MobileHeaderActions>
+      <RestartOverlay />
+      </div>
+    </div>
+  )
+}

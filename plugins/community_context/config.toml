@@ -1,0 +1,14 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[bridge]
+group_name = "GDUT SIE Minecraft Public Server"
+targets = ["47447788043@chatroom", "qq:3294652115:napcat-local:group:1020993873"]
+history_hours = 12
+message_limit = 8
+context_chars = 2400
+refresh_seconds = 300
+memory_limit = 3
+automatic_memory = true
+memory_timeout_seconds = 1.5

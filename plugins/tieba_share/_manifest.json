@@ -1,0 +1,56 @@
+{
+  "manifest_version": 2,
+  "id": "mizuku003.tieba-share",
+  "version": "1.1.8",
+  "name": "麦麦贴吧搬石",
+  "description": "把贴吧帖子搬进群：可选吧名，定时或手动，整帖渲染成长图，可打包成聊天记录，搬过的不会重复搬，也能让麦麦自己搬。",
+  "author": {
+    "name": "mizuku003",
+    "url": "https://github.com/mizuku003"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/mizuku003/maibot-tieba-share",
+    "homepage": "https://github.com/mizuku003/maibot-tieba-share",
+    "documentation": "https://github.com/mizuku003/maibot-tieba-share/blob/main/README.md",
+    "issues": "https://github.com/mizuku003/maibot-tieba-share/issues"
+  },
+  "host_application": {
+    "min_version": "1.2.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "httpx",
+      "version_spec": ">=0.26.0"
+    }
+  ],
+  "capabilities": [
+    "config.get",
+    "render.html2png",
+    "send.image",
+    "send.text",
+    "send.forward",
+    "send.custom",
+    "chat.get_all_streams"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "plugin_type": "tool",
+  "display": {
+    "icon": {
+      "type": "local",
+      "value": "assets/icon.png",
+      "fallback": "hammer"
+    }
+  }
+}

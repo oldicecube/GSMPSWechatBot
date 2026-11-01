@@ -1,0 +1,5 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+timezone = "Asia/Shanghai"
+poll_seconds = 5

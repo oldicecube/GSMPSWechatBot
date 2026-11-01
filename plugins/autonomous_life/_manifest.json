@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "id": "wechatbot.autonomous-life",
+  "name": "麦麦自主念头与项目生活",
+  "version": "1.3.2",
+  "description": "基于真实经历与兴趣的后台探索、隔离创作、项目连续性与统一主动分享；会话联网交由原生联网工具。",
+  "author": {"name": "Wechat Bot", "url": "https://github.com/oldicecube"},
+  "urls": {"repository": "https://github.com/oldicecube/GSMPSWechatBot"},
+  "license": "MIT",
+  "host_application": {"min_version": "1.3.15", "max_version": "1.9.99"},
+  "sdk": {"min_version": "2.16.0", "max_version": "2.99.99"},
+  "dependencies": [],
+  "capabilities": ["config.get", "chat.get_stream_by_group_id", "chat.get_all_streams", "message.get_recent", "message.get_by_id", "llm.generate", "api.call", "maisaka.reply.generate", "send.hybrid"],
+  "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]}
+}

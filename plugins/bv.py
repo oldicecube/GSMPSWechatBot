@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """Command plugin for downloading one Bilibili BV video.
 
-Usage: /bv <BVxxxxxxxxxx or a Bilibili URL containing it>
-The queue is FIFO with a hard capacity of five jobs. Every downloaded file is
+Usage: /bv <BVxxxxxxxxxx, Bilibili video URL or b23.tv share link>
+The queue is FIFO with a configurable capacity. Every downloaded file is
 written below the bot workspace temp directory and deleted in finally.
 """
 
 import os
+import hashlib
 import queue
+from contextvars import copy_context
 import re
 import threading
 import time
@@ -31,15 +33,17 @@ _INFLIGHT_LOCK = threading.RLock()
 
 
 def init(config):
-    global _CONFIG, _WORKER
+    global _CONFIG, _WORKER, QUEUE_LIMIT
     _CONFIG = config if isinstance(config, dict) else {}
+    QUEUE_LIMIT = max(1, min(20, int((_CONFIG.get('bilibili') or {}).get('queue_limit', 5))))
+    _QUEUE.maxsize = QUEUE_LIMIT
     bilibili.configure(_CONFIG)
     os.makedirs(TEMP_DIR, exist_ok=True)
     with _WORKER_LOCK:
         if _WORKER is None or not _WORKER.is_alive():
             _WORKER = threading.Thread(target=_worker_loop, daemon=True, name="bilibili-bv-worker")
             _WORKER.start()
-    print("[PLUGIN] /bv Bilibili FIFO worker ready (capacity=5)", flush=True)
+    print(f"[PLUGIN] /bv Bilibili FIFO worker ready (capacity={QUEUE_LIMIT})", flush=True)
 
 
 def _block():
@@ -83,48 +87,52 @@ def _failure_text(error):
 def handle(content, context):
     context = context if isinstance(context, dict) else {}
     text = str(content or "").strip()
-    bvid = _extract_bvid(text)
+    bvid = bilibili.extract_short_link(text) or _extract_bvid(text)
     if not bvid:
-        return "用法：/bv BVxxxxxxxxxx 或 /bv https://www.bilibili.com/video/BVxxxxxxxxxx/"
+        return "用法：/bv BVxxxxxxxxxx、B站视频链接或 https://b23.tv/短码（也可直接发送短链）"
 
     target = _target(context)
     if not target:
         return "找不到发送目标"
+    inflight_key = (target, bvid) if context.get('platform') == 'qq' else bvid
 
     with _INFLIGHT_LOCK:
-        if bvid in _INFLIGHT:
+        if inflight_key in _INFLIGHT:
             return f"{bvid} 已在队列中或正在处理，请勿重复提交"
         # Capacity includes the currently running job plus queued jobs.
         if len(_INFLIGHT) >= QUEUE_LIMIT or _QUEUE.full():
-            return "B站视频下载队列已满（上限 5），请稍后再试"
-        _INFLIGHT.add(bvid)
+            return f"B站视频下载队列已满（上限 {QUEUE_LIMIT}），请稍后再试"
+        _INFLIGHT.add(inflight_key)
         try:
             position = len(_INFLIGHT)
-            _QUEUE.put_nowait((target, text, bvid))
+            _QUEUE.put_nowait((target, text, bvid, copy_context(), inflight_key))
         except queue.Full:
-            _INFLIGHT.discard(bvid)
-            return "B站视频下载队列已满（上限 5），请稍后再试"
+            _INFLIGHT.discard(inflight_key)
+            return f"B站视频下载队列已满（上限 {QUEUE_LIMIT}），请稍后再试"
 
-    return f"已加入B站视频队列（第 {position}/5）：{bvid}"
+    return f"已加入B站视频队列（第 {position}/{QUEUE_LIMIT}）：{bvid}"
 
 
 def _worker_loop():
     while True:
-        target, text, bvid = _QUEUE.get()
+        job = _QUEUE.get()
+        target, text, bvid = job[:3]
+        job_context = job[3] if len(job) > 3 else copy_context()
         try:
-            _run_job(target, text, bvid)
+            job_context.run(_run_job, target, text, bvid)
         except Exception as exc:
             print(f"[BV] unexpected job error bvid={bvid}: {exc}", flush=True)
-            _send_text(target, _failure_text(exc))
+            job_context.run(_send_text, target, _failure_text(exc))
         finally:
             with _INFLIGHT_LOCK:
-                _INFLIGHT.discard(bvid)
+                _INFLIGHT.discard(job[4] if len(job)>4 else bvid)
             _QUEUE.task_done()
 
 
 def _run_job(target, text, bvid):
     os.makedirs(TEMP_DIR, exist_ok=True)
-    path = os.path.join(TEMP_DIR, f"{bvid}_{int(time.time() * 1000)}.mp4")
+    file_id = bvid if _BVID_RE.fullmatch(bvid) else 'short_' + hashlib.sha256(bvid.encode()).hexdigest()[:16]
+    path = os.path.join(TEMP_DIR, f"{file_id}_{int(time.time() * 1000)}.mp4")
     try:
         print(f"[BV] resolving bvid={bvid} target={target}", flush=True)
         plan = bilibili.resolve(text, max_bytes=_max_bytes())
@@ -149,6 +157,16 @@ def _run_job(target, text, bvid):
     finally:
         bilibili.delete_file(path)
         print(f"[BV] cleaned path={path}", flush=True)
+
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'enabled': {'type': 'bool', 'default': True, 'label': '允许下载视频', 'config_path': 'bilibili.enabled', 'reload': 'restart'},
+    'max_size_mb': {'type': 'float', 'default': 40, 'min': 1, 'max': 200, 'label': '文件大小上限（MB）', 'config_path': 'bilibili.max_size_mb', 'reload': 'restart'},
+    'max_duration_seconds': {'type': 'int', 'default': 300, 'min': 10, 'max': 3600, 'label': '视频时长上限（秒）', 'config_path': 'bilibili.max_duration_seconds', 'reload': 'restart'},
+    'prefer_quality': {'type': 'int', 'default': 64, 'choices': [6, 16, 32, 64, 80], 'label': '首选画质代码', 'config_path': 'bilibili.prefer_quality', 'reload': 'restart'},
+    'fallback_quality': {'type': 'int', 'default': 32, 'choices': [6, 16, 32, 64, 80], 'label': '回退画质代码', 'config_path': 'bilibili.fallback_quality', 'reload': 'restart'},
+    'timeout_seconds': {'type': 'float', 'default': 30, 'min': 5, 'max': 120, 'label': '请求超时（秒）', 'config_path': 'bilibili.timeout_seconds', 'reload': 'restart'},
+    'queue_limit': {'type': 'int', 'default': 5, 'min': 1, 'max': 20, 'label': '下载任务上限（含正在运行）', 'config_path': 'bilibili.queue_limit', 'reload': 'restart'},
+}}
 
 WEBUI_CONFIG_SCHEMA = {
     "title": "B站媒体",

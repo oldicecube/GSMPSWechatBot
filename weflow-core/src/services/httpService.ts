@@ -939,11 +939,18 @@ class HttpService {
         return
       }
 
+      // Export only this exact message, never a nearby message selected by time.
+      const mediaOptions = this.parseMediaOptions(url)
+      const mediaMap = mediaOptions.enabled
+        ? await this.exportMediaForMessages([message], talker, mediaOptions)
+        : new Map<number, ApiExportedMedia>()
+
       this.sendJson(res, {
         success: true,
         talker,
         lookup: localId > 0 ? { localId } : { serverId },
-        message
+        message: { ...message, ...this.toApiMessage(message, mediaMap.get(message.localId)),
+          serverId: this.getMessageServerId(message) || '0' }
       })
     } catch (error) {
       console.error('[HttpService] handleOriginalMessage error:', error)
@@ -1683,6 +1690,11 @@ class HttpService {
       sortSeq: msg.sortSeq,
       isSend: msg.isSend,
       senderUsername: msg.senderUsername,
+      senderWxid: msg.senderUsername,
+      msgSource: msg.msgSource,
+      atUsers: chatService.getMessageAtUserIds(msg),
+      baseLocalType: Number(msg.localType || 0) % 4294967296,
+      localSubtype: Math.floor(Number(msg.localType || 0) / 4294967296),
       content: this.getMessageContent(msg, quoteInfo),
       rawContent: msg.rawContent,
       parsedContent: msg.parsedContent,

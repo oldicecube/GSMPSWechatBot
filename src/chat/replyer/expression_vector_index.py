@@ -3118,6 +3118,11 @@ class ExpressionVectorIndex:
             return []
 
         indexed_candidates = self._filter_indexed_expressions(snapshot, scoped_candidates, current_profile)
+        scoped_by_id = {
+            int(item["id"]): item
+            for item in scoped_candidates
+            if isinstance(item, dict) and isinstance(item.get("id"), int)
+        }
         if len(indexed_candidates) < 10:
             logger.info(
                 f"表达向量召回已跳过：当前 profile 范围内可用索引候选不足 "
@@ -3167,6 +3172,12 @@ class ExpressionVectorIndex:
         scored_candidates: List[dict[str, Any]] = []
         total_weight = VECTOR_ITEM_WEIGHT + VECTOR_CLUSTER_WEIGHT
         for candidate in pool_candidates:
+            display = scoped_by_id.get(candidate.id) or {}
+            candidate_style = str(display.get("style") or candidate.style).strip()
+            if candidate_style.casefold() in {"legacy", "unknown"}:
+                continue
+            candidate_situation = str(display.get("situation") or candidate.situation).strip()
+            candidate_count = display.get("count", candidate.count)
             item_similarity = float(profile_vectors[candidate.index] @ query_vector)
             cluster_similarity = float(cluster_scores[candidate.cluster_id])
             score = (
@@ -3176,9 +3187,9 @@ class ExpressionVectorIndex:
             scored_candidates.append(
                 {
                     "id": candidate.id,
-                    "situation": candidate.situation,
-                    "style": candidate.style,
-                    "count": candidate.count,
+                    "situation": candidate_situation,
+                    "style": candidate_style,
+                    "count": candidate_count,
                     "selector_score": round(float(score), 4),
                     "item_similarity": round(item_similarity, 4),
                     "cluster_similarity": round(cluster_similarity, 4),

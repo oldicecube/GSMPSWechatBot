@@ -50,7 +50,8 @@ class MemorySearchResult:
             content = item.content.strip().replace("\n", " ")
             if truncate_content and len(content) > max_content_chars:
                 content = content[:max_content_chars] + "..."
-            lines.append(f"{index}. {content}")
+            origin = str(item.metadata.get('origin_label') or '来源未标注')
+            lines.append(f"{index}. [{origin}] {content}")
         return "\n".join(lines)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -214,6 +215,7 @@ class MemoryService:
         respect_filter: bool = True,
         user_id: str = "",
         group_id: str = "",
+        include_shared: bool = True,
     ) -> MemorySearchResult:
         clean_query = str(query or "").strip()
         normalized_time_start = None if time_start in {None, ""} else time_start
@@ -221,25 +223,66 @@ class MemoryService:
         if not clean_query and normalized_time_start is None and normalized_time_end is None:
             return MemorySearchResult()
         try:
-            payload = await self._invoke(
-                "search_memory",
-                {
+            from utils.account_identity import linked_person_ids
+            payloads = []
+            for alias in linked_person_ids(person_id):
+                try:
+                    payloads.append(await self._invoke(
+                    "search_memory",
+                    {
                     "query": clean_query,
                     "limit": max(1, int(limit)),
                     "mode": mode,
                     "chat_id": chat_id,
-                    "person_id": person_id,
+                    "person_id": alias,
                     "time_start": normalized_time_start,
                     "time_end": normalized_time_end,
                     "respect_filter": bool(respect_filter),
                     "user_id": str(user_id or "").strip(),
                     "group_id": str(group_id or "").strip(),
-                },
-            )
-            return self._coerce_search_result(payload)
+                    "include_shared": bool(include_shared),
+                    },
+                    ))
+                except Exception as exc:
+                    payloads.append({'success':False,'error':str(exc)})
+            results = [self._coerce_search_result(p) for p in payloads]
+            result = results[0]
+            if len(results)>1:
+                hits={}
+                for part in results:
+                    for hit in part.hits:
+                        key=hit.hash_value or (hit.hit_type,hit.content,hit.source)
+                        if key not in hits or hit.score>hits[key].score:
+                            hits[key]=hit
+                result.hits=sorted(hits.values(),key=lambda h:h.score,reverse=True)[:max(1,int(limit))]
+                result.success=any(r.success for r in results)
+                result.filtered=all(r.filtered for r in results)
+                if result.success:
+                    result.error=''
+            self._annotate_sources(result)
+            return result
         except Exception as exc:
             logger.warning(f"长期记忆搜索失败: {exc}")
             return MemorySearchResult(success=False, error=str(exc))
+
+    @staticmethod
+    def _annotate_sources(result):
+        from src.chat.message_receive.chat_manager import chat_manager
+        for hit in result.hits:
+            ids=set()
+            for key in ('chat_id','session_id','stream_id','chat_ids','session_ids','stream_ids'):
+                value=hit.metadata.get(key)
+                if isinstance(value,str) and value:
+                    ids.add(value)
+                elif isinstance(value,list):
+                    ids.update(str(v) for v in value if v)
+            if hit.source.startswith('chat:'):
+                ids.add(hit.source[5:])
+            labels=[]
+            for sid in sorted(ids):
+                session=chat_manager.get_existing_session_by_session_id(sid)
+                labels.append(f'{session.platform} | {session.group_name or session.group_id or "私聊"} | session={sid}' if session else f'session={sid}')
+            hit.metadata['origin_label']='; '.join(labels) if labels else '来源未标注，不能视为当前群经历'
 
     async def enqueue_feedback_task(
         self,
@@ -356,11 +399,23 @@ class MemoryService:
         if not clean_person_id:
             return PersonProfileResult()
         try:
-            payload = await self._invoke(
-                "get_person_profile",
-                {"person_id": clean_person_id, "chat_id": chat_id, "limit": max(1, int(limit))},
-            )
-            return self._coerce_profile_result(payload)
+            from utils.account_identity import linked_person_ids, linked_people
+            labels = {p['person_id']:p['platform']+':'+p['user_id'] for p in linked_people(clean_person_id)}
+            combined = PersonProfileResult()
+            aliases = linked_person_ids(clean_person_id)
+            for alias in aliases:
+                try:
+                    payload = await self._invoke('get_person_profile',
+                        {'person_id':alias,'chat_id':chat_id,'limit':max(1,int(limit))})
+                except Exception:
+                    continue
+                part = self._coerce_profile_result(payload)
+                if part.summary:
+                    origin = '['+labels.get(alias,alias)+'；同一人的不同平台经历，非本群即时对话]\n' if len(aliases)>1 else ''
+                    combined.summary += ('\n' if combined.summary else '') + origin + part.summary
+                combined.traits.extend(x for x in part.traits if x not in combined.traits)
+                combined.evidence.extend({**e,'identity_source':labels.get(alias,alias)} for e in part.evidence)
+            return combined
         except Exception as exc:
             logger.warning(f"获取人物画像失败: {exc}")
             return PersonProfileResult()
@@ -429,9 +484,27 @@ class MemoryService:
             logger.warning(f"Episode 管理调用失败: {exc}")
             return {"success": False, "error": str(exc)}
 
-    async def profile_admin(self, *, action: str, **kwargs) -> Dict[str, Any]:
+    async def profile_admin(self, *, action: str, include_linked: bool = True, **kwargs) -> Dict[str, Any]:
         try:
-            return await self._invoke_admin("memory_profile_admin", action=action, **kwargs)
+            payload = await self._invoke_admin("memory_profile_admin", action=action, **kwargs)
+            if action != 'query' or not include_linked or not isinstance(payload,dict):
+                return payload
+            from utils.account_identity import linked_people
+            person_id = str(kwargs.get('person_id') or payload.get('person_id') or '')
+            linked = []
+            for person in linked_people(person_id) if person_id else []:
+                if person['person_id'] == person_id:
+                    continue
+                try:
+                    result = await self._invoke_admin('memory_profile_admin',action='query',
+                        person_id=person['person_id'],limit=kwargs.get('limit',8),context_text=kwargs.get('context_text',''))
+                    if isinstance(result,dict) and result.get('success'):
+                        linked.append({**person,'profile_text':str(result.get('profile_text') or result.get('summary') or '')})
+                except Exception as exc:
+                    logger.debug('关联人物画像暂不可用: %s',type(exc).__name__)
+            # Keep structured profiles separate: concatenating their headings
+            # before parsing would overwrite sections and erase source labels.
+            return {**payload,'linked_profiles':linked,'same_person_across_platforms':bool(linked)}
         except Exception as exc:
             logger.warning(f"画像管理调用失败: {exc}")
             return {"success": False, "error": str(exc)}

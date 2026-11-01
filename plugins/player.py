@@ -2,9 +2,7 @@ import json
 import os
 import random
 from datetime import datetime
-from openai import OpenAI
-
-from llm.config import get_api_key, get_llm_config
+from llm.core.native_model_bridge import shell_generate
 from utils.points_manager import get_points, add_points
 from utils.sqlite_store import (
     load_document, player_stats_all, player_stats_get,
@@ -265,14 +263,7 @@ def build_life_template(player_name):
 
 
 def fetch_value_comment(template_text):
-    """绕过原有 LLM 机制，直接调用 API 获取村民锐评"""
-    try:
-        llm_config = get_llm_config()
-        api_key = get_api_key()
-        model = llm_config.get("model", "deepseek-chat")
-    except Exception as e:
-        print(f"[VALUE LLM ERROR] 获取 LLM 配置失败: {e}")
-        return "你的价值已经让我无言以对了"
+    """通过 MaiBot 模型池获取村民锐评。"""
 
     prompt = (
         "你是一个MC服内的投资村民NPC，请基于以下内容给出你的毒舌投资锐评，但是很值钱的时候该夸就夸，毒舌版（铁锭100%概率，绿宝石60%概率，钻石10%概率，腐肉有20%概率单独显示或80概率不显示，价值等同于破烂。随机数量（即价值上下限）为每类0-64个。为仅供价值参考）：\n"
@@ -285,15 +276,7 @@ def fetch_value_comment(template_text):
     ]
 
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com",
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-        )
-        comment = response.choices[0].message.content
+        comment = shell_generate(messages, task_name='utils').content
         return str(comment or "").strip()
     except Exception as e:
         print(f"[VALUE LLM ERROR] API 调用失败: {e}")
@@ -301,14 +284,7 @@ def fetch_value_comment(template_text):
 
 
 def fetch_life_comment(template_text):
-    """绕过原有 LLM 机制，直接调用 API 获取村民锐评"""
-    try:
-        llm_config = get_llm_config()
-        api_key = get_api_key()
-        model = llm_config.get("model", "deepseek-chat")
-    except Exception as e:
-        print(f"[LIFE LLM ERROR] 获取 LLM 配置失败: {e}")
-        return "你转生的结果连我都看不懂"
+    """通过 MaiBot 模型池获取转生锐评。"""
 
     prompt = (
         "你是Minecraft服务器里的毒舌村民。\n\n"
@@ -322,15 +298,7 @@ def fetch_life_comment(template_text):
     ]
 
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com",
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-        )
-        comment = response.choices[0].message.content
+        comment = shell_generate(messages, task_name='utils').content
         return str(comment or "").strip()
     except Exception as e:
         print(f"[LIFE LLM ERROR] API 调用失败: {e}")
@@ -343,7 +311,8 @@ def handle(content, context):
     if not wxid:
         return "无法获取用户信息"
 
-    wxid = str(wxid).strip()
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(str(wxid).strip())
     
     # 转换content为字符串
     if isinstance(content, list):
@@ -505,6 +474,11 @@ def handle(content, context):
         return f"玩家 {player} 无数据"
 
     return build_player_text(player, stats)
+
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'host': {'type': 'str', 'default': '', 'max_length': 250, 'label': 'Minecraft 服务器地址', 'config_path': 'mc.host', 'reload': 'restart'},
+    'fake_name': {'type': 'str', 'default': 'Anonymous Player', 'max_length': 100, 'label': '查询时排除的占位玩家名', 'config_path': 'mc.fake_name', 'reload': 'restart'},
+}}
 
 WEBUI_CONFIG_SCHEMA = {
     "title": "Minecraft 玩家",

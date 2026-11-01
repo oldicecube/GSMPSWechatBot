@@ -9,12 +9,14 @@ TOKEN = ""
 
 
 def configure(config=None):
-    global TOKEN
+    global TOKEN, BASE_URL
 
     if not isinstance(config, dict):
         return
 
     TOKEN = str(config.get("token") or "").strip()
+    weflow = config.get("weflow") or {}
+    BASE_URL = str(weflow.get("apiBase") or f"http://{weflow.get('apiHost') or '127.0.0.1'}:{weflow.get('apiPort') or 5031}").rstrip('/')
 
 
 def _headers():

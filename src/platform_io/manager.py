@@ -1,6 +1,7 @@
 """提供 Platform IO 层的中心 Broker 管理器。"""
 
 from datetime import datetime
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import asyncio
@@ -415,7 +416,7 @@ class PlatformIOManager:
         seen_driver_ids: set[str] = set()
         for binding in self._send_route_table.resolve_bindings(route_key):
             driver = self._driver_registry.get(binding.driver_id)
-            if driver is not None and driver.driver_id not in seen_driver_ids:
+            if driver is not None and driver.driver_id not in seen_driver_ids and self._driver_matches_route(driver, route_key):
                 drivers.append(driver)
                 seen_driver_ids.add(driver.driver_id)
 
@@ -425,13 +426,18 @@ class PlatformIOManager:
 
         fallback_driver = self._legacy_send_drivers.get(route_key.platform)
         if fallback_driver is not None:
-            descriptor = fallback_driver.descriptor
-            account_matches = descriptor.account_id is None or route_key.account_id in (None, descriptor.account_id)
-            scope_matches = descriptor.scope is None or route_key.scope in (None, descriptor.scope)
-            if account_matches and scope_matches and fallback_driver.driver_id not in seen_driver_ids:
+            if self._driver_matches_route(fallback_driver, route_key) and fallback_driver.driver_id not in seen_driver_ids:
                 drivers.append(fallback_driver)
 
         return drivers
+
+    @staticmethod
+    def _driver_matches_route(driver: PlatformIODriver, route_key: RouteKey) -> bool:
+        """A broad binding must never override a driver's declared identity."""
+        declared = driver.descriptor.route_key
+        return (declared.platform == route_key.platform
+                and (declared.account_id is None or declared.account_id == route_key.account_id)
+                and (declared.scope is None or declared.scope == route_key.scope))
 
     @staticmethod
     def build_route_key_from_message(message: "SessionMessage") -> RouteKey:
@@ -474,12 +480,34 @@ class PlatformIOManager:
         if envelope.session_message is not None:
             envelope.session_message.received_at = envelope.received_at
 
+        driver = self._driver_registry.get(envelope.driver_id)
+        if (driver is None or driver.descriptor.kind != envelope.driver_kind
+                or not self._driver_matches_route(driver, envelope.route_key)):
+            logger.warning('拒绝入站驱动身份与来源路由不一致的消息')
+            return False
+
         if not self._receive_route_table.has_binding_for_driver(envelope.route_key, envelope.driver_id):
             logger.info(
                 f"忽略未登记到接收路由表的入站消息: route={envelope.route_key} "
                 f"driver={envelope.driver_id}"
             )
             return False
+
+        if envelope.session_message is not None:
+            message = envelope.session_message
+            if self.build_route_key_from_message(message) != envelope.route_key:
+                logger.warning('拒绝消息来源与已登记路由不一致的入站消息')
+                return False
+            from src.common.message_provenance import stamp_message
+            stamp_message(message, direction='inbound', transport=envelope.driver_id)
+        elif envelope.payload is not None:
+            try:
+                if self.build_route_key_from_message_dict(envelope.payload) != envelope.route_key:
+                    raise ValueError('payload origin mismatch')
+            except (ValueError, TypeError, AttributeError):
+                # Validate before consuming a dedupe key or scheduling background work.
+                logger.warning('拒绝字典载荷来源与入站路由不一致的消息')
+                return False
 
         if self._inbound_dispatcher is None:
             logger.debug("PlatformIOManager 尚未配置 inbound dispatcher，暂不继续分发")
@@ -537,6 +565,10 @@ class PlatformIOManager:
         Returns:
             DeliveryBatch: 规范化后的批量出站回执。
         """
+        if self.build_route_key_from_message(message) != route_key:
+            raise ValueError('Outbound message origin does not match route')
+        from src.common.message_provenance import stamp_message
+        stamp_message(message, direction='outbound')
         drivers = self.resolve_drivers(route_key)
         if not drivers:
             return DeliveryBatch(internal_message_id=message.message_id, route_key=route_key)
@@ -553,6 +585,15 @@ class PlatformIOManager:
         )
         for driver in drivers:
             policy_result = await self.evaluate_target_policy(driver, route_key, chat_type, target_id)
+            if group_info is not None and policy_result.allowed:
+                from .chat_features import route_override
+                plugin = (additional_config.get('plugin_activity') or {}).get('plugin_id')
+                feature = 'plugins_enabled' if plugin else 'llm_enabled'
+                proactive = plugin in {'wechatbot.autonomous-life','xxxxx7258.idle-proactive-chat',
+                                       'mailife.mai-life','github.erhan111119.mai-repost-shit'}
+                if (route_override(route_key,target_id,feature) is False or
+                        (proactive and route_override(route_key,target_id,'llm_enabled') is False)):
+                    policy_result = replace(policy_result, allowed=False, reason='group_feature_disabled')
             if not policy_result.allowed:
                 logger.info(
                     f"适配器策略拒绝出站消息: driver={driver.driver_id} chat_type={chat_type} "
@@ -668,7 +709,9 @@ class PlatformIOManager:
         if not normalized_dedupe_key:
             return None
 
-        return f"{envelope.driver_id}:{normalized_dedupe_key}"
+        # A gateway may serve multiple accounts/connections with overlapping IDs.
+        return repr((envelope.driver_id, envelope.route_key.platform,
+                     envelope.route_key.account_id, envelope.route_key.scope, normalized_dedupe_key))
 
     @staticmethod
     def _validate_binding_against_driver(binding: RouteBinding, driver: PlatformIODriver) -> None:

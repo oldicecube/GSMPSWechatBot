@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+AGENTS.md
+CLAUDE.md
+_live_*.py
+_live_*.json
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+# 个人配置及其备份（保留公开 config.example.toml）
+config.toml
+config_back/
+config.toml.*
+config.toml-*
+config.toml~
+.config.toml.swp
+.config.toml.swo
+config.*.toml
+!config.example.toml
+config.example.toml.*
+
+# 插件运行数据、日志与环境秘密
+/data/
+life-*.json
+/logs/
+*.log
+*.log.*
+.env
+.env.*
+!.env.example
+
+*.egg-info/
+.DS_Store
+Thumbs.db

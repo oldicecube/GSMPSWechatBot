@@ -1,3 +1,7 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 try:
     from services.mc_api import player_list
 except Exception:

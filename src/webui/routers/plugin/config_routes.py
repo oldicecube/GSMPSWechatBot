@@ -243,6 +243,9 @@ async def get_plugin_config_bundle(plugin_id: str, maibot_session: Optional[str]
 
     require_plugin_token(maibot_session)
     logger.info(f"获取插件配置初始化数据: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle
+    if bundle := shell_bundle(plugin_id):
+        return bundle
 
     try:
         plugin_path = find_plugin_path_by_id(plugin_id)
@@ -294,6 +297,9 @@ async def get_plugin_config_schema(plugin_id: str, maibot_session: Optional[str]
 
     require_plugin_token(maibot_session)
     logger.info(f"获取插件配置 Schema: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle
+    if bundle := shell_bundle(plugin_id):
+        return {'success': True, 'schema': bundle['schema']}
 
     try:
         plugin_path = find_plugin_path_by_id(plugin_id)
@@ -327,6 +333,9 @@ def get_plugin_config_raw(plugin_id: str, maibot_session: Optional[str] = Cookie
 
     require_plugin_token(maibot_session)
     logger.info(f"获取插件原始配置: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle
+    if bundle := shell_bundle(plugin_id):
+        return {'success': True, 'config': bundle['raw_config'], 'raw_config': bundle['raw_config']}
 
     try:
         plugin_path = find_plugin_path_by_id(plugin_id)
@@ -365,6 +374,12 @@ async def update_plugin_config_raw(
 
     require_plugin_token(maibot_session)
     logger.info(f"更新插件原始配置: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle, save_shell_config
+    if shell_bundle(plugin_id):
+        try:
+            return save_shell_config(plugin_id, tomlkit.parse(request.config).unwrap())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     try:
         plugin_path = await asyncio.to_thread(find_plugin_path_by_id, plugin_id)
@@ -422,6 +437,9 @@ async def get_plugin_config(plugin_id: str, maibot_session: Optional[str] = Cook
 
     require_plugin_token(maibot_session)
     logger.info(f"获取插件配置: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle
+    if bundle := shell_bundle(plugin_id):
+        return {'success': True, 'config': bundle['config']}
 
     try:
         plugin_path = find_plugin_path_by_id(plugin_id)
@@ -458,6 +476,9 @@ async def update_plugin_config(
 
     require_plugin_token(maibot_session)
     logger.info(f"更新插件配置: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle, save_shell_config
+    if shell_bundle(plugin_id):
+        return save_shell_config(plugin_id, request.config)
 
     try:
         plugin_path = find_plugin_path_by_id(plugin_id)
@@ -507,6 +528,9 @@ def reset_plugin_config(plugin_id: str, maibot_session: Optional[str] = Cookie(N
     """
 
     require_plugin_token(maibot_session)
+    from src.webui.services.gsmps_management import shell_bundle, reset_shell_config
+    if shell_bundle(plugin_id):
+        return reset_shell_config(plugin_id)
     logger.info(f"重置插件配置: {plugin_id}")
 
     try:
@@ -542,6 +566,9 @@ async def toggle_plugin(plugin_id: str, maibot_session: Optional[str] = Cookie(N
 
     require_plugin_token(maibot_session)
     logger.info(f"切换插件状态: {plugin_id}")
+    from src.webui.services.gsmps_management import shell_bundle, save_shell_config
+    if bundle := shell_bundle(plugin_id):
+        return save_shell_config(plugin_id, {'plugin': {'enabled': not bundle['config']['plugin']['enabled']}})
 
     from src.plugin_runtime.integration import get_plugin_runtime_manager
 

@@ -1755,6 +1755,13 @@ class DeepSeekProvider:
     its normal priority.
     """
 
+    def __new__(cls, *args, **kwargs):
+        from llm.config import get_llm_config
+        if get_llm_config().get('model_config_source') == 'maibot':
+            from llm.core.native_model_bridge import NativePoolProvider
+            return NativePoolProvider(**kwargs)
+        return super().__new__(cls)
+
     @contextmanager
     def prompt_capture_kind(self, kind):
         """Classify the next provider request for local ``/prompt`` diagnostics."""

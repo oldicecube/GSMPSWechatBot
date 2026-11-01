@@ -14,6 +14,7 @@ from src.webui.core import (
     set_auth_cookie,
 )
 from src.webui.core.security import TOKEN_SOURCE_TEMPORARY
+from src.webui.middleware.network_access import auth_enabled
 from src.webui.dependencies import require_auth, verify_token_optional
 from src.webui.routers.agent import router as agent_router
 from src.webui.routers.avatar import router as avatar_router
@@ -204,6 +205,8 @@ async def verify_token(
     Returns:
         验证结果（包含首次配置状态）
     """
+    if not auth_enabled():
+        return TokenVerifyResponse(valid=True, message="内网免密访问", token_source="custom")
     try:
         token_manager = get_token_manager()
         rate_limiter = get_rate_limiter()
@@ -274,6 +277,9 @@ async def check_auth_status(
     Returns:
         认证状态
     """
+    if not auth_enabled():
+        return {"authenticated": True, "token_source": "custom", "requires_custom_token": False,
+                "auth_enabled": False}
     try:
         logger.debug(f"检查认证状态，结果: {authenticated}")
         if not authenticated:
@@ -361,6 +367,9 @@ async def get_setup_status():
     Returns:
         首次配置状态
     """
+    if not auth_enabled():
+        return FirstSetupStatusResponse(is_first_setup=False, token_source="custom",
+                                        requires_custom_token=False, message="内网免密访问")
     try:
         token_manager = get_token_manager()
 

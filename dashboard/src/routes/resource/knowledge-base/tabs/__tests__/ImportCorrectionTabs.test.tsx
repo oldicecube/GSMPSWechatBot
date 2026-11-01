@@ -1,0 +1,841 @@
+/**
+ * ImportTab / CorrectionTab：用 mock hook 结果锁定提交、校验、进度与错误 UI。
+ */
+import type { ReactElement } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+
+import { Tabs } from '@/components/ui/tabs'
+import type {
+  MemoryCorrectionCandidatePayload,
+  MemoryCorrectionOperationPayload,
+  MemoryCorrectionPlanPayload,
+  MemoryCorrectionRelationCascadePayload,
+  MemoryCorrectionStaleMarkRollbackPayload,
+  MemoryImportChatTargetPayload,
+  MemoryImportTaskPayload,
+} from '@/lib/memory-api'
+
+import type { UseImportFormResult } from '../../hooks/useImportForm'
+import type { UseImportQueueResult } from '../../hooks/useImportQueue'
+import type { UseMemoryCorrectionResult } from '../../hooks/useMemoryCorrection'
+import { CorrectionTab } from '../CorrectionTab'
+import { ImportTab } from '../ImportTab'
+
+vi.mock('../MemoryBundleCard', () => ({
+  MemoryBundleCard: () => <div>记忆包功能面板</div>,
+}))
+
+afterEach(() => {
+  cleanup()
+})
+
+/** makeCorrection 里 setter 实际是 vi.fn()，但对外类型是 React Dispatch */
+function pageUpdater(
+  setter: UseMemoryCorrectionResult['setPlanPage'],
+  callIndex: number,
+): (current: number) => number {
+  return (setter as unknown as Mock).mock.calls[callIndex][0] as (current: number) => number
+}
+
+beforeEach(() => {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {}
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {}
+  }
+})
+
+function makeChat(overrides: Partial<MemoryImportChatTargetPayload> = {}): MemoryImportChatTargetPayload {
+  return {
+    chat_id: 'chat-1',
+    chat_name: '测试群',
+    platform: 'qq',
+    group_id: '10001',
+    user_id: null,
+    is_group: true,
+    account_id: 'bot-1',
+    scope: 'group',
+    ...overrides,
+  }
+}
+
+function makeImportTask(overrides: Partial<MemoryImportTaskPayload> = {}): MemoryImportTaskPayload {
+  return {
+    task_id: 'task-run-1',
+    source: 'webui',
+    status: 'running',
+    current_step: 'extracting',
+    total_chunks: 120,
+    done_chunks: 36,
+    failed_chunks: 2,
+    cancelled_chunks: 1,
+    progress: 30,
+    error: '',
+    file_count: 2,
+    created_at: 1_710_000_000,
+    started_at: 1_710_000_001,
+    finished_at: null,
+    updated_at: 1_710_000_100,
+    task_kind: 'paste',
+    params: {},
+    files: [],
+    ...overrides,
+  }
+}
+
+function makeForm(overrides: Partial<UseImportFormResult> = {}): UseImportFormResult {
+  return {
+    importCreateMode: 'upload',
+    setImportCreateMode: vi.fn(),
+    unifiedImportMode: 'file',
+    setUnifiedImportMode: vi.fn(),
+    importSettings: {
+      max_file_concurrency: 8,
+      max_chunk_concurrency: 16,
+      default_narrative_window_size: 1600,
+      default_narrative_overlap: 400,
+      default_factual_target_size: 1200,
+      max_chunk_chars: 3200,
+    },
+    importChatTargets: [],
+    importCommonFileConcurrency: '2',
+    setImportCommonFileConcurrency: vi.fn(),
+    importCommonChunkConcurrency: '4',
+    setImportCommonChunkConcurrency: vi.fn(),
+    importCommonNarrativeWindowSize: '1600',
+    setImportCommonNarrativeWindowSize: vi.fn(),
+    importCommonNarrativeOverlap: '400',
+    setImportCommonNarrativeOverlap: vi.fn(),
+    importCommonFactualTargetSize: '1200',
+    setImportCommonFactualTargetSize: vi.fn(),
+    importCommonLlmEnabled: true,
+    setImportCommonLlmEnabled: vi.fn(),
+    importContentCategory: 'narrative',
+    setImportContentCategory: vi.fn(),
+    importContentCategoryMissing: false,
+    importCommonDedupePolicy: 'content_hash',
+    setImportCommonDedupePolicy: vi.fn(),
+    importCommonChatId: '',
+    setImportCommonChatId: vi.fn(),
+    importCommonChatReferenceTime: '',
+    setImportCommonChatReferenceTime: vi.fn(),
+    importCommonForce: false,
+    setImportCommonForce: vi.fn(),
+    importCommonClearManifest: false,
+    setImportCommonClearManifest: vi.fn(),
+    uploadInputMode: 'text',
+    setUploadInputMode: vi.fn(),
+    uploadFiles: [],
+    setUploadFiles: vi.fn(),
+    pasteName: '',
+    setPasteName: vi.fn(),
+    pasteMode: 'text',
+    setPasteMode: vi.fn(),
+    pasteContent: '',
+    setPasteContent: vi.fn(),
+    rawInputMode: 'text',
+    setRawInputMode: vi.fn(),
+    rawRelativePath: '',
+    setRawRelativePath: vi.fn(),
+    rawGlob: '**/*.{txt,md,json}',
+    setRawGlob: vi.fn(),
+    rawRecursive: true,
+    setRawRecursive: vi.fn(),
+    openieRelativePath: '',
+    setOpenieRelativePath: vi.fn(),
+    openieIncludeAllJson: false,
+    setOpenieIncludeAllJson: vi.fn(),
+    convertRelativePath: '',
+    setConvertRelativePath: vi.fn(),
+    convertTargetRelativePath: '',
+    setConvertTargetRelativePath: vi.fn(),
+    convertDimension: '1024',
+    setConvertDimension: vi.fn(),
+    convertBatchSize: '32',
+    setConvertBatchSize: vi.fn(),
+    submitImportByMode: vi.fn(async () => {}),
+    creatingImport: false,
+    buildCommonImportPayload: vi.fn(() => ({})),
+    checkImportPath: vi.fn(async () => '解析到 /data/lpmm/exports（目录，已存在）'),
+    ...overrides,
+  }
+}
+
+function makeQueue(overrides: Partial<UseImportQueueResult> = {}): UseImportQueueResult {
+  return {
+    refreshImportQueue: vi.fn(async () => {}),
+    runningImportTasks: [],
+    queuedImportTasks: [],
+    recentImportTasks: [],
+    selectedImportTaskId: '',
+    selectImportTask: vi.fn(async () => {}),
+    importPollInterval: 1000,
+    importErrorText: '',
+    cancelSelectedImportTask: vi.fn(async () => {}),
+    retrySelectedImportTask: vi.fn(async () => {}),
+    selectedImportTaskLoading: false,
+    selectedImportTaskResolved: null,
+    selectedImportRetrySummary: null,
+    selectedImportTaskErrorText: '',
+    selectedImportFiles: [],
+    selectedImportFileId: '',
+    selectImportFile: vi.fn(async () => {}),
+    importChunkTotal: 0,
+    importChunkOffset: 0,
+    moveImportChunkPage: vi.fn(async () => {}),
+    canImportChunkPrev: false,
+    canImportChunkNext: false,
+    importChunksLoading: false,
+    selectedImportChunks: [],
+    afterCreated: vi.fn(async () => {}),
+    invalidate: vi.fn(),
+    ...overrides,
+  }
+}
+
+function makeRelation(
+  overrides: Partial<MemoryCorrectionRelationCascadePayload> = {},
+): MemoryCorrectionRelationCascadePayload {
+  return {
+    paragraph_hash: 'para-1',
+    relation_hash: 'rel-1',
+    action: 'mark_inactive',
+    reason: 'superseded',
+    subject: '张三',
+    predicate: '住在',
+    object: '杭州',
+    ...overrides,
+  }
+}
+
+function makeStaleMark(
+  overrides: Partial<MemoryCorrectionStaleMarkRollbackPayload> = {},
+): MemoryCorrectionStaleMarkRollbackPayload {
+  return {
+    success: true,
+    action: 'deleted',
+    paragraph_hash: 'para-stale',
+    relation_hash: 'rel-stale',
+    ...overrides,
+  }
+}
+
+function makeCandidate(
+  overrides: Partial<MemoryCorrectionCandidatePayload> = {},
+): MemoryCorrectionCandidatePayload {
+  return {
+    candidate_id: 'cand-1',
+    target_type: 'paragraph',
+    evidence_type: 'profile',
+    hash: 'hash-cand-1',
+    content: '候选摘要',
+    source: 'chat:1',
+    metadata: {},
+    score: 0.9123,
+    ...overrides,
+  }
+}
+
+function makePlan(overrides: Partial<MemoryCorrectionPlanPayload> = {}): MemoryCorrectionPlanPayload {
+  return {
+    plan_id: 'plan-1',
+    request_text: '把张三的常住城市改为杭州',
+    scope: 'person_profile',
+    target_person_id: 'person-1',
+    target_chat_id: 'chat-1',
+    status: 'awaiting_confirmation',
+    confidence: 0.86,
+    plan: {
+      scope: 'person_profile',
+      request_text: '把张三的常住城市改为杭州',
+      person_id: 'person-1',
+      chat_id: 'chat-1',
+      confidence: 0.86,
+      risk_level: 'low',
+      reason: '用户明确修正',
+      operations: [],
+    },
+    preview: {
+      request_text: '把张三的常住城市改为杭州',
+      scope: 'person_profile',
+      person_id: 'person-1',
+      person_keyword: '张三',
+      chat_id: 'chat-1',
+      candidates: [],
+      operations: [],
+      requires_confirmation: true,
+      confirm_threshold: 0.5,
+      reason: '用户明确修正',
+    },
+    execution: {},
+    created_at: 1_710_000_000,
+    updated_at: 1_710_000_100,
+    requested_by: 'knowledge_base',
+    reason: '用户明确修正',
+    ...overrides,
+  }
+}
+
+function makeCorrection(overrides: Partial<UseMemoryCorrectionResult> = {}): UseMemoryCorrectionResult {
+  return {
+    requestText: '',
+    setRequestText: vi.fn(),
+    scope: 'person_profile',
+    setScope: vi.fn(),
+    personLookupMode: 'keyword',
+    setPersonLookupMode: vi.fn(),
+    personId: '',
+    setPersonId: vi.fn(),
+    personKeyword: '',
+    setPersonKeyword: vi.fn(),
+    chatId: '',
+    setChatId: vi.fn(),
+    candidateLimit: '12',
+    setCandidateLimit: vi.fn(),
+    candidateLimitMax: 12,
+    correctionReason: '',
+    setCorrectionReason: vi.fn(),
+    planSearch: '',
+    setPlanSearch: vi.fn(),
+    planStatusFilter: 'all',
+    setPlanStatusFilter: vi.fn(),
+    planScopeFilter: 'all',
+    setPlanScopeFilter: vi.fn(),
+    plans: [],
+    filteredPlans: [],
+    pagedPlans: [],
+    planPage: 1,
+    setPlanPage: vi.fn(),
+    planPageCount: 1,
+    selectedPlanId: '',
+    setSelectedPlanId: vi.fn(),
+    selectedPlan: null,
+    selectedPreview: null,
+    selectedPlanLoading: false,
+    selectedPlanError: '',
+    chatTargets: [],
+    chatTargetsLoading: false,
+    chatTargetsErrorText: '',
+    correctionErrorText: '',
+    previewPayload: null,
+    previewing: false,
+    executingPlanId: '',
+    rollingBackPlanId: '',
+    submitPreview: vi.fn(async () => {}),
+    executePlan: vi.fn(async () => {}),
+    rollbackPlan: vi.fn(async () => {}),
+    refreshPlans: vi.fn(async () => {}),
+    ...overrides,
+  }
+}
+
+function renderImport(options: {
+  form?: Partial<UseImportFormResult>
+  queue?: Partial<UseImportQueueResult>
+} = {}) {
+  const form = makeForm(options.form)
+  const queue = makeQueue(options.queue)
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Tabs defaultValue="import">
+        <ImportTab form={form} queue={queue} />
+      </Tabs>
+    </QueryClientProvider>,
+  )
+  // ImportTab 依赖 useQueryClient，rerender 时也要包上 Provider。
+  const rerender = (ui: ReactElement) =>
+    view.rerender(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+  return { ...view, form, queue, rerender }
+}
+
+function renderCorrection(overrides: Partial<UseMemoryCorrectionResult> = {}) {
+  const correction = makeCorrection(overrides)
+  const view = render(
+    <Tabs defaultValue="correction">
+      <CorrectionTab correction={correction} />
+    </Tabs>,
+  )
+  return { ...view, correction }
+}
+
+const manyChats: MemoryImportChatTargetPayload[] = [
+  makeChat({ chat_id: 'g-1', chat_name: '测试群', platform: 'qq', group_id: '10001', user_id: null }),
+  makeChat({
+    chat_id: 'u-qq',
+    chat_name: '小明私聊',
+    platform: 'qq',
+    group_id: null,
+    user_id: '20001',
+    is_group: false,
+    scope: 'private',
+  }),
+  makeChat({
+    chat_id: 'u-wx',
+    chat_name: '微信好友',
+    platform: 'wechat',
+    group_id: null,
+    user_id: 'wx-88',
+    is_group: false,
+    account_id: null,
+  }),
+  makeChat({
+    chat_id: 'u-wx2',
+    chat_name: '企微好友',
+    platform: 'wx',
+    group_id: null,
+    user_id: 'wx-99',
+    is_group: false,
+  }),
+  makeChat({
+    chat_id: 'u-tg',
+    chat_name: 'Telegram 私聊',
+    platform: 'telegram',
+    group_id: null,
+    user_id: 'tg-1',
+    is_group: false,
+  }),
+  makeChat({
+    chat_id: 'u-empty',
+    chat_name: '无名会话',
+    platform: '',
+    group_id: null,
+    user_id: '',
+    is_group: false,
+    account_id: null,
+  }),
+  makeChat({ chat_id: 'g-2', chat_name: '备用群 A', group_id: '20002' }),
+  makeChat({ chat_id: 'g-3', chat_name: '备用群 B', group_id: '20003' }),
+  makeChat({ chat_id: 'g-4', chat_name: '备用群 C', group_id: '20004' }),
+  makeChat({ chat_id: 'g-5', chat_name: '备用群 D', group_id: '20005' }),
+]
+
+describe('ImportTab', () => {
+  it('导入任务详情以弹窗呈现，切到记忆包页后随之关闭', async () => {
+    const user = userEvent.setup()
+    renderImport({
+      queue: {
+        runningImportTasks: [makeImportTask()],
+        selectedImportTaskId: 'task-run-1',
+        selectedImportTaskResolved: makeImportTask(),
+      },
+    })
+
+    // 默认不常驻，点队列卡片才打开
+    expect(screen.queryByText('任务详情')).not.toBeInTheDocument()
+    await user.click(screen.getByText('task-run-1'))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByText('任务详情')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: '记忆包导入导出' }))
+    expect(screen.getByText('记忆包功能面板')).toBeInTheDocument()
+  })
+
+  it('LPMM 转换两个路径输入框各自内联检查：源用 lpmm、目标用 converted 别名', async () => {
+    const user = userEvent.setup()
+    const { form } = renderImport({
+      form: {
+        importCreateMode: 'lpmm_convert',
+        convertRelativePath: 'raw_source',
+        convertTargetRelativePath: 'converted_target',
+        checkImportPath: vi.fn(async (alias: string) => `解析到 /data/${alias}（目录，已存在）`),
+      },
+    })
+
+    const checkButtons = screen.getAllByRole('button', { name: /^检查/ })
+    expect(checkButtons).toHaveLength(2)
+
+    await user.click(checkButtons[0])
+    expect(form.checkImportPath).toHaveBeenCalledWith('lpmm', 'raw_source', true)
+    expect(await screen.findByText('解析到 /data/lpmm（目录，已存在）')).toBeInTheDocument()
+
+    await user.click(checkButtons[1])
+    expect(form.checkImportPath).toHaveBeenCalledWith('converted', 'converted_target', false)
+    expect(await screen.findByText('解析到 /data/converted（目录，已存在）')).toBeInTheDocument()
+  })
+})
+
+
+describe('CorrectionTab', () => {
+
+  it('预览中与错误文案、聊天流加载/失败/筛选', async () => {
+    const user = userEvent.setup()
+    const { correction, rerender } = renderCorrection({
+      previewing: true,
+      correctionErrorText: '预览失败：请求为空',
+      chatTargets: manyChats,
+      chatId: 'u-qq',
+    })
+
+    expect(screen.getByRole('button', { name: '生成预览' })).toBeDisabled()
+    expect(screen.getByText('预览失败：请求为空')).toBeInTheDocument()
+    expect(screen.getByText('小明私聊 · 账号 bot-1 · 20001')).toBeInTheDocument()
+    expect(screen.getByText('u-qq')).toBeInTheDocument()
+    expect(screen.getByText(/QQ 20001/)).toBeInTheDocument()
+    expect(screen.queryByText('备用群 B')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '清空聊天流' }))
+    expect(correction.setChatId).toHaveBeenCalledWith('')
+    await user.click(screen.getByRole('button', { name: /小明私聊/ }))
+    expect(correction.setChatId).toHaveBeenCalledWith('u-qq')
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab
+          correction={makeCorrection({
+            chatTargetsLoading: true,
+            chatId: '',
+            chatTargets: manyChats,
+          })}
+        />
+      </Tabs>,
+    )
+    expect(screen.getByText('加载聊天流')).toBeInTheDocument()
+    expect(screen.getByText('可直接填写，名称会在后端尝试转换为真实 session_id')).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab correction={makeCorrection({ chatId: '', chatTargets: manyChats })} />
+      </Tabs>,
+    )
+    expect(screen.getByText('无名会话')).toBeInTheDocument()
+    expect(screen.queryByText('备用群 A')).not.toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab correction={makeCorrection({ chatId: '微信', chatTargets: manyChats })} />
+      </Tabs>,
+    )
+    expect(screen.getByText('微信好友')).toBeInTheDocument()
+    expect(screen.getByText(/微信 wx-88/)).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab correction={makeCorrection({ chatId: 'wx-99', chatTargets: manyChats })} />
+      </Tabs>,
+    )
+    expect(screen.getByText(/微信 wx-99/)).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab correction={makeCorrection({ chatId: 'tg-1', chatTargets: manyChats })} />
+      </Tabs>,
+    )
+    expect(screen.getByText(/用户 ID tg-1/)).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab correction={makeCorrection({ chatTargetsErrorText: '聊天流加载失败', chatId: 'nope' })} />
+      </Tabs>,
+    )
+    expect(screen.getByText('聊天流加载失败')).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab
+          correction={makeCorrection({
+            chatId: 'zzz-no-match',
+            chatTargets: [makeChat({ chat_name: '' })],
+            candidateLimitMax: null,
+            candidateLimit: '',
+          })}
+        />
+      </Tabs>,
+    )
+    expect(screen.getByText('未匹配到聊天流，可继续手动填写')).toBeInTheDocument()
+    expect(screen.getByLabelText('候选上限')).toHaveAttribute('placeholder', '按配置默认')
+  })
+
+  it('空计划时展示引导，执行/回滚保持禁用', () => {
+    renderCorrection({ selectedPlan: { ...makePlan(), plan_id: '' } })
+    expect(screen.getByText('尚未选择记忆修正计划')).toBeInTheDocument()
+    expect(screen.getByText('生成预览或从历史计划中选择一项')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '确认执行' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '回滚计划' })).toBeDisabled()
+  })
+
+  it('确认执行待确认计划，并渲染级联动作文案', async () => {
+    const user = userEvent.setup()
+    const operations: MemoryCorrectionOperationPayload[] = [
+      { action: 'mark_superseded', candidate_id: 'c1', target_type: 'paragraph', hash: 'h-old', reason: '过期' },
+      { action: 'ingest_text', text: '新记忆正文', source_type: 'manual', chat_id: 'chat-1', person_ids: [], participants: [], tags: [], relations: [], reason: '写入' },
+      { action: 'refresh_person_profile', person_id: 'person-1' },
+      { action: 'custom_op', reason: '自定义原因' },
+      { action: '', reason: '空动作' },
+      { action: 'mark_superseded', reason: '仅原因' },
+      { action: 'ingest_text', reason: '无正文' },
+      { action: 'refresh_person_profile' },
+    ]
+    const plan = makePlan({
+      status: 'awaiting_confirmation',
+      executed_at: 1_710_000_000_000,
+      confidence: Number.NaN,
+    })
+    const { correction } = renderCorrection({
+      selectedPlan: plan,
+      selectedPreview: {
+        ...plan.preview,
+        operations,
+        candidates: [
+          makeCandidate(),
+          makeCandidate({ candidate_id: 'cand-2', content: '', score: null, source: '', hash: 'h2', evidence_type: '' }),
+        ],
+        cascade_preview: {
+          counts: {
+            relations: 4,
+            relations_mark_inactive: 1,
+            relations_mark_stale_evidence: 1,
+            relations_skipped_protected: 1,
+            entities: 2,
+          },
+          relations: [
+            makeRelation({ action: 'mark_inactive', relation_hash: 'r-inactive' }),
+            makeRelation({ action: 'mark_stale_evidence', relation_hash: 'r-stale', subject: '李四', object: '上海' }),
+            makeRelation({ action: 'skipped_protected', relation_hash: 'r-skip' }),
+            makeRelation({
+              action: 'unknown_action' as MemoryCorrectionRelationCascadePayload['action'],
+              relation_hash: 'r-unknown',
+            }),
+            makeRelation({ relation_hash: 'r-extra-1' }),
+            makeRelation({ relation_hash: 'r-extra-2' }),
+            makeRelation({ relation_hash: 'r-extra-3' }),
+          ],
+          entities: [
+            {
+              paragraph_hash: 'para-1',
+              entity_hash: 'ent-1',
+              action: 'record_impact_only',
+              reason: 'impact',
+              name: '杭州',
+              type: 'city',
+            },
+            {
+              paragraph_hash: 'para-2',
+              entity_hash: 'ent-hash-only',
+              action: 'record_impact_only',
+              reason: 'impact',
+              name: '',
+              type: 'unknown',
+            },
+          ],
+        },
+      },
+    })
+
+    expect(screen.getByText('待确认')).toBeInTheDocument()
+    expect(screen.getByText('置信度 -')).toBeInTheDocument()
+    expect(screen.getAllByText('关系失效').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('标记旧证据').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('受保护跳过').length).toBeGreaterThan(0)
+    expect(screen.getByText('unknown_action')).toBeInTheDocument()
+    expect(screen.getByText(/受影响实体：杭州、ent-hash-only/)).toBeInTheDocument()
+    expect(screen.getAllByText('标记失效').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('写入新记忆').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('刷新画像').length).toBeGreaterThan(0)
+    expect(screen.getByText('custom_op')).toBeInTheDocument()
+    expect(screen.getByText('未知操作')).toBeInTheDocument()
+    expect(screen.getByText('paragraph:h-old')).toBeInTheDocument()
+    expect(screen.getByText('新记忆正文')).toBeInTheDocument()
+    expect(screen.getByText('0.912')).toBeInTheDocument()
+    expect(screen.getByText('无内容摘要')).toBeInTheDocument()
+    expect(screen.getByText('score -')).toBeInTheDocument()
+
+    expect(screen.getByRole('button', { name: '回滚计划' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('确认执行记忆修正')).toBeInTheDocument()
+    expect(within(dialog).getByText('操作 8 项')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '确认执行' }))
+    expect(correction.executePlan).toHaveBeenCalledWith('plan-1')
+  })
+
+  it('失败计划仍可执行；执行中禁用确认', async () => {
+    const user = userEvent.setup()
+    const plan = makePlan({ status: 'failed', execution: { error: '执行失败：写入冲突' } })
+    const { rerender } = renderCorrection({
+      selectedPlan: plan,
+      selectedPlanError: '计划详情加载失败',
+      selectedPlanLoading: true,
+    })
+
+    expect(screen.getByText('失败')).toBeInTheDocument()
+    expect(screen.getByText('执行失败：写入冲突')).toBeInTheDocument()
+    expect(screen.getByText('计划详情加载失败')).toBeInTheDocument()
+    expect(screen.getByText('当前计划没有操作')).toBeInTheDocument()
+    expect(screen.getByText('当前计划没有候选证据')).toBeInTheDocument()
+
+    rerender(
+      <Tabs defaultValue="correction">
+        <CorrectionTab
+          correction={makeCorrection({
+            selectedPlan: plan,
+            executingPlanId: 'plan-1',
+          })}
+        />
+      </Tabs>,
+    )
+    expect(screen.getByRole('button', { name: '确认执行' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+  })
+
+  it('已执行计划可回滚，并渲染级联与旧证据标记', async () => {
+    const user = userEvent.setup()
+    const cascade = {
+      relations_marked_inactive: [makeRelation()],
+      relations_marked_stale: [makeRelation({ action: 'mark_stale_evidence', relation_hash: 'stale' })],
+      relations_skipped: [makeRelation({ action: 'skipped_protected', relation_hash: 'skip' })],
+      impacted_entities: [
+        {
+          paragraph_hash: 'para-1',
+          entity_hash: 'ent-1',
+          action: 'record_impact_only' as const,
+          reason: 'impact',
+          name: '杭州',
+          type: 'city',
+        },
+      ],
+      stale_mark_snapshots: [],
+    }
+    const plan = makePlan({
+      status: 'executed',
+      scope: 'memory',
+      created_at: 0,
+      execution: {
+        superseded_targets: [
+          { target_type: 'paragraph', hash: 'h1', previous_metadata: {}, cascade },
+          { target_type: 'relation', hash: 'h2', previous_metadata: {} },
+        ],
+        rollback: {
+          success: true,
+          new_relations_deactivated: [],
+          restored_targets: [{ target_type: 'paragraph', hash: 'h1' }],
+          stale_marks_deleted: [
+            makeStaleMark({ paragraph_hash: 'd1', relation_hash: 'rd1' }),
+            makeStaleMark({ paragraph_hash: 'd2', relation_hash: 'rd2' }),
+            makeStaleMark({ paragraph_hash: 'd3', relation_hash: 'rd3' }),
+            makeStaleMark({ paragraph_hash: 'd4', relation_hash: 'rd4' }),
+            makeStaleMark({ paragraph_hash: 'd5', relation_hash: 'rd5' }),
+            makeStaleMark({ paragraph_hash: 'd6', relation_hash: 'rd6' }),
+          ],
+          stale_marks_restored: [makeStaleMark({ action: 'restored', paragraph_hash: 'rst1', relation_hash: 'rr1' })],
+          stale_marks_skipped: [],
+          items: [],
+          requested_by: 'knowledge_base',
+          reason: '回滚',
+        },
+      },
+    })
+    const { correction } = renderCorrection({ selectedPlan: plan, selectedPreview: null })
+
+    expect(screen.getByText('已执行')).toBeInTheDocument()
+    expect(screen.getByText('记忆段落')).toBeInTheDocument()
+    expect(screen.getByText('级联失效 1')).toBeInTheDocument()
+    expect(screen.getByText('旧证据 1')).toBeInTheDocument()
+    expect(screen.getByText('保护跳过 1')).toBeInTheDocument()
+    expect(screen.getByText('受影响实体 1')).toBeInTheDocument()
+    expect(screen.getByText('删除的旧证据标记')).toBeInTheDocument()
+    expect(screen.getByText('恢复的旧证据标记')).toBeInTheDocument()
+    expect(screen.queryByText('跳过的旧证据标记')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '确认执行' })).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: '回滚计划' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('确认回滚记忆修正')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '确认回滚' }))
+    expect(correction.rollbackPlan).toHaveBeenCalledWith('plan-1')
+  })
+
+  it('回滚中禁用回滚按钮，空级联预览不渲染联动区', () => {
+    const plan = makePlan({
+      status: 'executed',
+      preview: {
+        ...makePlan().preview,
+        cascade_preview: { relations: [], entities: [], counts: undefined as never },
+      },
+    })
+    renderCorrection({
+      selectedPlan: plan,
+      selectedPreview: plan.preview,
+      rollingBackPlanId: 'plan-1',
+    })
+    expect(screen.getByRole('button', { name: '回滚计划' })).toBeDisabled()
+    expect(screen.queryByText('联动影响')).not.toBeInTheDocument()
+  })
+
+  it('渲染多种计划状态并支持筛选、分页与刷新', async () => {
+    const user = userEvent.setup()
+    const plans = [
+      makePlan({ plan_id: 'p-exec', status: 'executing', request_text: '' }),
+      makePlan({ plan_id: 'p-rb', status: 'rolled_back', scope: 'weird_scope' as never }),
+      makePlan({ plan_id: 'p-rbf', status: 'rollback_failed' }),
+      makePlan({ plan_id: 'p-unknown', status: 'mystery' as never }),
+      makePlan({ plan_id: 'p-empty', status: '' as never, scope: '' as never }),
+    ]
+    const { correction } = renderCorrection({
+      plans,
+      filteredPlans: plans,
+      pagedPlans: plans,
+      planPage: 2,
+      planPageCount: 3,
+      selectedPlan: plans[0],
+    })
+
+    expect(screen.getAllByText('执行中').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('已回滚').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('回滚失败').length).toBeGreaterThan(0)
+    expect(screen.getByText('mystery')).toBeInTheDocument()
+    expect(screen.getAllByText('未知').length).toBeGreaterThan(0)
+    expect(screen.getByText('weird_scope')).toBeInTheDocument()
+    expect(screen.getByText('无修正内容')).toBeInTheDocument()
+    expect(screen.getByText('当前命中 5 条记录')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('搜索计划 / 人物 / 聊天流 / 原因'), { target: { value: '杭州' } })
+    expect(correction.setPlanSearch).toHaveBeenCalledWith('杭州')
+
+    const comboboxes = screen.getAllByRole('combobox')
+    await user.click(comboboxes[1])
+    await user.click(screen.getByRole('option', { name: '已执行' }))
+    expect(correction.setPlanStatusFilter).toHaveBeenCalledWith('executed')
+    await user.click(comboboxes[2])
+    await user.click(screen.getByRole('option', { name: '人物画像' }))
+    expect(correction.setPlanScopeFilter).toHaveBeenCalledWith('person_profile')
+
+    await user.click(screen.getByRole('button', { name: '上一页' }))
+    const prev = pageUpdater(correction.setPlanPage, 0)
+    expect(prev(2)).toBe(1)
+    expect(prev(1)).toBe(1)
+    await user.click(screen.getByRole('button', { name: '下一页' }))
+    const next = pageUpdater(correction.setPlanPage, 1)
+    expect(next(2)).toBe(3)
+    expect(next(3)).toBe(3)
+
+    await user.click(screen.getByText('p-rb'))
+    expect(correction.setSelectedPlanId).toHaveBeenCalledWith('p-rb')
+    await user.click(screen.getByRole('button', { name: '刷新' }))
+    expect(correction.refreshPlans).toHaveBeenCalledOnce()
+  })
+
+  it('空筛选结果与首页/末页分页按钮禁用', () => {
+    renderCorrection({
+      plans: [makePlan()],
+      filteredPlans: [],
+      pagedPlans: [],
+      planPage: 1,
+      planPageCount: 1,
+    })
+    expect(screen.getByText('当前筛选条件下没有记忆修正计划')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled()
+  })
+})

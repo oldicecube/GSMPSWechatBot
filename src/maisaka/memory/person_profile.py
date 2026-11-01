@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 from typing import Sequence
 
 from src.chat.message_receive.message import SessionMessage
@@ -65,8 +66,11 @@ def _resolve_candidate(
                 platform=clean_platform,
                 user_id=clean_user_id,
             )
-        elif clean_person_name:
-            person_id = resolve_person_id_for_memory(person_name=clean_person_name)
+        elif clean_person_name and clean_platform != "qq":
+            person_id = resolve_person_id_for_memory(
+                person_name=clean_person_name,
+                platform=clean_platform,
+            )
         else:
             person_id = ""
     except Exception as exc:
@@ -245,18 +249,41 @@ async def build_person_profile_injection_messages(
     )[:1000]
     blocks: list[str] = []
     for candidate in candidates:
+        payload = {}
         try:
-            payload = await memory_service.profile_admin(
+            payload = await asyncio.wait_for(memory_service.profile_admin(
                 action="query",
                 person_id=candidate.person_id,
                 limit=PROFILE_QUERY_LIMIT,
                 context_text=context_text,
-            )
+                include_linked=False,
+                timeout_ms=1800,
+            ), timeout=2.2)
         except Exception as exc:
-            logger.debug(f"查询人物画像注入内容失败: person_id={candidate.person_id!r} err={exc}")
-            continue
+            logger.debug(f"查询本端人物画像失败: person_id={candidate.person_id!r} err={exc}")
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            from utils.account_identity import memory_aliases
+            aliases = memory_aliases(anchor_message.platform,candidate.user_id) if candidate.user_id else []
+        except Exception as exc:
+            logger.debug(f"查询关联身份失败，保留本端画像: person_id={candidate.person_id!r} err={exc}")
+            aliases = []
+        extra=[]
+        for platform, user_id, person_id in aliases:
+            if person_id==candidate.person_id:
+                continue
+            try:
+                linked = await asyncio.wait_for(memory_service.profile_admin(action='query',person_id=person_id,include_linked=False,
+                    limit=PROFILE_QUERY_LIMIT,context_text=context_text,timeout_ms=1200), timeout=1.6)
+                if isinstance(linked,dict) and linked.get('success') and _extract_profile_text(linked):
+                    compact = build_profile_injection_text(_extract_profile_text(linked),include_uncertain_fallback=False)
+                    if compact:
+                        extra.append(f'[已验证与当前用户为同一人；关联账号 {platform}:{user_id} 的人物记忆；非本群即时对话]\n'+compact[:300])
+            except Exception as exc:
+                logger.debug(f"查询关联画像失败，保留其余可用画像: person_id={person_id!r} err={exc}")
 
-        if not isinstance(payload, dict) or not bool(payload.get("success")):
+        if not isinstance(payload, dict) or (not bool(payload.get("success")) and not extra):
             error = payload.get("error") if isinstance(payload, dict) else "invalid_payload"
             logger.debug(f"人物画像注入跳过: person_id={candidate.person_id!r} error={error}")
             continue
@@ -269,12 +296,20 @@ async def build_person_profile_injection_messages(
             uncertain_candidates=uncertain_candidates,
             include_uncertain_fallback=False,
         )
+        if extra:
+            # A long local profile must not push the linked identity and all of
+            # its facts beyond the final per-person truncation boundary.
+            profile_text = profile_text[:300]
+        profile_text = '\n\n'.join([*([profile_text] if profile_text else []),*extra])
         if not profile_text:
             logger.debug(f"人物画像注入跳过空画像: person_id={candidate.person_id!r}")
             continue
 
         display_name = _profile_display_name(candidate, payload)
-        blocks.append(_format_profile_person_block(display_name, profile_text))
+        identity = f"身份ID：{anchor_message.platform}:{candidate.user_id}；person_id={candidate.person_id}"
+        if candidate.person_name and candidate.person_name != display_name:
+            identity += f"；本次显示名：{candidate.person_name}"
+        blocks.append(_format_profile_person_block(display_name, identity + '\n' + profile_text))
 
     reference_block = _format_profile_reference_block(blocks)
     return [reference_block] if reference_block else []

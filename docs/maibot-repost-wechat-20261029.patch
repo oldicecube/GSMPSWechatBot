@@ -1,0 +1,246 @@
+--- upstream/_manifest.json
++++ wechat-port/_manifest.json
+@@ -24,7 +24,13 @@
+     "min_version": "2.0.0",
+     "max_version": "2.99.99"
+   },
+-  "dependencies": [],
++  "dependencies": [
++    {
++      "type": "python_package",
++      "name": "httpx",
++      "version_spec": ">=0.27,<1.0"
++    }
++  ],
+   "plugin_type": "media",
+   "capabilities": [
+     "send.text",
+@@ -35,7 +41,8 @@
+     "maisaka.context.append",
+     "config.get",
+     "chat.get_all_streams",
+-    "message.get_recent"
++    "message.get_recent",
++    "send.hybrid"
+   ],
+   "i18n": {
+     "default_locale": "zh-CN",
+@@ -43,4 +50,4 @@
+       "zh-CN"
+     ]
+   }
+-}
++}--- upstream/core/deliver.py
++++ wechat-port/core/deliver.py
+@@ -73,6 +73,24 @@
+ 
+     async def send(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any) -> Dict[str, Any]:
+         """发送一条候选；返回 {"sent": bool, "method": "forward", ...}。"""
++        # wxSend cannot send QQ merged-forward or VideoComponent messages.
++        # One SDK call preserves native text/file fields and prevalidation.
++        # Local paths also avoid base64 overflowing the Runner RPC frame.
++        segments = []
++        if cfg.include_header_text:
++            segments.append({'type':'text','data':candidate.header_text()})
++        segments.append({'type':'file','data':{'name':video_path.name,'mime_type':'video/mp4',
++                                             'url':str(video_path.resolve())}})
++        try:
++            result = await self._ctx.send.hybrid(segments,stream_id,return_details=True)
++        except Exception as exc:
++            self._logger.error(f'微信视频投递失败: {type(exc).__name__}')
++            return {'sent':False,'method':'wechat_file','error':type(exc).__name__}
++        return {'sent':bool(isinstance(result,dict) and result.get('sent')),
++                'method':'wechat_file','detail':result}
++
++    async def _send_upstream_forward(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any) -> Dict[str, Any]:
++        """Original upstream QQ delivery retained for reference; unused by this port."""
+         bot_qq = str(await self._ctx.config.get("bot.qq_account", "") or "")
+         bot_name = str(await self._ctx.config.get("bot.nickname", "") or "麦麦")
+         try:
+--- upstream/core/pipeline.py
++++ wechat-port/core/pipeline.py
+@@ -324,7 +324,7 @@
+         )
+         for kind, getter in lookups:
+             try:
+-                stream = await getter(str(target), platform="qq")
++                stream = await getter(str(target), platform="wechat")
+             except Exception as exc:  # noqa: BLE001
+                 self._logger.warning(f"解析目标 {target}（按{kind}）异常: {exc!r}")
+                 continue
+@@ -341,7 +341,7 @@
+         会返回过期的那条（发送路由落到 legacy 旧链、必然失败）。这里用"有没有最近消息"来区分。
+         """
+         try:
+-            payload = await self._ctx.chat.get_all_streams(platform="qq")
++            payload = await self._ctx.chat.get_all_streams(platform="wechat")
+         except Exception as exc:  # noqa: BLE001
+             self._logger.warning(f"列举聊天流失败（回退到宿主查询）: {exc!r}")
+             return None
+--- upstream/core/speaker.py
++++ wechat-port/core/speaker.py
+@@ -72,8 +72,10 @@
+ 
+ 
+ def normalize_qq(value: Any) -> str:
+-    """提取纯数字 QQ 号；空、全 0、非数字一律返回空串。"""
++    """Wechat port: accept exact wxid identifiers and legacy numeric IDs."""
+     text = str(value or "").strip()
+-    if not text.isdigit() or text.strip("0") == "":
++    import re
++    if not (re.fullmatch(r'wxid_[A-Za-z0-9_-]{1,100}',text) or
++            text.isdigit() and text.strip('0')):
+         return ""
+     return text
+--- upstream/plugin.py
++++ wechat-port/plugin.py
+@@ -73,7 +73,7 @@
+     __ui_icon__ = "send"
+     __ui_order__ = 1
+ 
+-    groups: List[str] = Field(default_factory=list, description="目标群号列表（填群号，不是流 ID）")
++    groups: List[str] = Field(default_factory=list, description="目标微信 chatroom ID 列表（不是内部流 ID）")
+     daily_times: int = Field(default=3, description="每天搬几次")
+     active_hours: List[int] = Field(default_factory=lambda: [9, 23], description="允许发送的时间范围 [起, 止]（24 小时制）")
+     catch_up_minutes: int = Field(default=30, description="错过计划时刻后多久内仍补发，超时则跳过")
+@@ -330,6 +330,7 @@
+         self._speakers: Optional[SpeakerCache] = None
+         # 会话 -> 吞回话的截止时间：点播后这段时间内的第一条回复会被取消
+         self._reply_suppress: Dict[str, float] = {}
++        self._reply_suppress_source: Dict[str, str] = {}
+ 
+     # ===== 生命周期 =====
+ 
+@@ -359,7 +360,7 @@
+             f"搬史机已装载：目标群 {self.config.target.groups or '（未配置）'}，"
+             f"每天 {self.config.target.daily_times} 次，播放区间 "
+             f"{self.config.source.play_min}~{self.config.source.play_max}，"
+-            f"投递方式 聊天记录（合并转发）"
++            f"投递方式 微信说明文字与 MP4 文件"
+         )
+         self.ctx.logger.info(f"自然语言点播权限：{self._describe_permission(mode)}")
+         self.ctx.logger.info(
+@@ -544,8 +545,12 @@
+                 return {"action": "continue"}
+             if time.time() > deadline:
+                 self._reply_suppress.pop(session_id, None)
++                self._reply_suppress_source.pop(session_id, None)
+                 return {"action": "continue"}
++            if str(kwargs.get('reply_message_id') or '') != self._reply_suppress_source.get(session_id):
++                return {'action':'continue'}
+             self._reply_suppress.pop(session_id, None)
++            self._reply_suppress_source.pop(session_id, None)
+             self.ctx.logger.info("点播搬史后吞掉本次回话（只发视频，不在群里多说话）")
+             modified = dict(kwargs)
+             modified["response"] = ""
+@@ -749,9 +754,9 @@
+         TOOL_REPOST,
+         brief_description=(
+             "从B站搬一条「史」到当前群：专挑评论区艾特率超过 50% 的抽象视频，"
+-            "下载成 720p 后以聊天记录的形式发出来。"
++            "下载成 720p 后以说明文字和 MP4 文件的形式发出来。"
+             "当有人想搬史、要来点抽象的、想看乐子、点名要某类整活/鬼畜视频时调用。"
+-            "调用后立刻返回，视频会在后台下载并自动以聊天记录形式发出。"
++            "调用后立刻返回，视频会在后台下载并自动以说明文字和 MP4 文件发出。"
+             "**调用之后不要再调用 reply、也不要回任何文字**——群里只会看到搬出来的视频；"
+             "不要追问「要不要」「确定吗」，也不要应一声「搬着呢」，插件会吞掉这次回话。"
+         ),
+@@ -775,7 +780,8 @@
+     )
+     async def tool_repost(self, topic: str = "", count: int = 1, **kwargs: Any) -> Dict[str, Any]:
+         """群友用自然语言点播一条（或几条）史。"""
+-        stream_id = str(kwargs.get("stream_id") or "")
++        request = kwargs.get('_request_context') or {}
++        stream_id = str(request.get('stream_id') or '') if request.get('platform') == 'wechat' else ''
+         if not stream_id:
+             return self._tool_result("拿不到当前会话，没法搬。")
+         if not self.config.plugin.enabled:
+@@ -783,7 +789,7 @@
+         if not self.config.tool.enabled:
+             return self._tool_result("自然语言点播被关掉了，要用的话让管理员开 [tool].enabled。")
+         # 权限：命令是 operator 专属，工具默认全员可用但可收紧成白名单
+-        denied = self._permission_denied_reason(stream_id)
++        denied = self._permission_denied_for_user(str(request.get('user_id') or ''))
+         if denied:
+             return self._tool_result(f"先不搬：{denied}。管理员可以用 /搬史 指令搬。")
+         if self._store is None:
+@@ -806,11 +812,12 @@
+         task.add_done_callback(self._on_manual_done)
+         # 点播后吞掉机器人这一次的回话：只把视频发出去，不在群里多说话
+         if self.config.tool.suppress_reply:
++            self._reply_suppress_source[stream_id] = str(request.get('message_id') or '')
+             self._reply_suppress[stream_id] = time.time() + max(
+                 10, self.config.tool.suppress_reply_window_seconds
+             )
+         return self._tool_result(
+-            "已提交搬运，视频会在后台下载并以聊天记录形式自动发到这个群，约一两分钟。"
++            "已提交搬运，视频会在后台下载并以说明文字和 MP4 文件自动发到这个群，约一两分钟。"
+             "不要再调用 reply，也不要回复任何文字。"
+         )
+ 
+@@ -844,14 +851,15 @@
+     async def tool_pretty(self, topic: str = "", count: int = 1, **kwargs: Any) -> Dict[str, Any]:
+         """用自然语言点播「好看的」二次元视频。"""
+         tunnel = "pretty"
+-        stream_id = str(kwargs.get("stream_id") or "")
++        request = kwargs.get('_request_context') or {}
++        stream_id = str(request.get('stream_id') or '') if request.get('platform') == 'wechat' else ''
+         if not stream_id:
+             return self._tool_result("拿不到当前会话，没法找。", tunnel)
+         if not self.config.plugin.enabled:
+             return self._tool_result("搬视频功能没开（插件配置里 [plugin].enabled 还是 false）。", tunnel)
+         if not self.config.pretty.enabled:
+             return self._tool_result("「好看的」频道被关掉了，要用的话让管理员开 [pretty].enabled。", tunnel)
+-        denied = self._permission_denied_reason(stream_id)
++        denied = self._permission_denied_for_user(str(request.get('user_id') or ''))
+         if denied:
+             return self._tool_result(f"先不搬：{denied}。管理员可以用 /搬好看 指令。", tunnel)
+         if self._store is None:
+@@ -878,11 +886,12 @@
+         )
+         task.add_done_callback(self._on_manual_done)
+         if self.config.tool.suppress_reply:
++            self._reply_suppress_source[stream_id] = str(request.get('message_id') or '')
+             self._reply_suppress[stream_id] = time.time() + max(
+                 10, self.config.tool.suppress_reply_window_seconds
+             )
+         return self._tool_result(
+-            "已提交，视频会在后台下载并以聊天记录形式自动发到这个群。"
++            "已提交，视频会在后台下载并以说明文字和 MP4 文件自动发到这个群。"
+             "不要再调用 reply，也不要回复任何文字。",
+             tunnel,
+         )
+--- upstream/WECHAT_PORT.md
++++ wechat-port/WECHAT_PORT.md
+@@ -0,0 +1,31 @@
++# Wechat Bot 本地适配说明
++
++上游：https://github.com/erhan111119/mai-repost-shit
++
++版本 1.2.2，固定提交 `c0b9e0d06ee1ffc9331bf093469793536be0fcb1`，GPL-v3.0-or-later。
++来自 Mai-with-u/plugin-repo 的条目 `github.erhan111119.mai-repost-shit`。
++保留上游 LICENSE、源文件和说明；本文件记录本地改动，更新上游时应重新合并。
++
++“搬屎/搬史”在该插件中指寻找抽象、整活视频转发进群。
++它按 B 站评论含 @ 的比例筛选候选：默认至少 30 条评论、含 @ 比例至少 50%；
++按配置检索、判定、去重、下载，提供 `repost_shi` 和上游的 `repost_pretty` 工具、命令及定时巡检。
++这是一种筛选信号，不保证内容质量。
++
++本地改动：
++
++- 查询聊天流使用 `wechat`，用户白名单支持 `wxid_...`。
++- 工具采用当前 Planner 请求由 Host 覆盖注入的身份/会话，避免最近发言者缓存错位，
++  也不采用模型指定的 stream_id。保留缓存供诊断及旧命令路径使用。
++- wxSend 无法发送 QQ 合并转发：改为一次 SDK `send.hybrid`，包含标题/链接文本及原生 MP4 文件。
++  文字中的 @ 保持文字，不自动转换成群友提醒；不添加引用格式。视频通过本地文件路径传递，
++  避免大体积 base64 超过 Runner RPC 帧限制。需 Host/Runner 共享本机文件系统。
++- 点播后的回复抑制只针对原请求 message_id，不吞掉另一个群友或另一个插件的回复。
++- 补全 httpx Python 包依赖和 send.hybrid capability 声明。
++
++**未改上游配置默认值**：`plugin.enabled=false`，`target.groups=[]`。
++已安装不代表已开始自动搬运；此次未替用户开启或指定群。默认开启的原生工具可能被首次注册，
++调用会明确返回功能未开。后续启动按 Host 的 enabled 开关跳过已禁用插件。
++开启后定时每天 3 次；上游还有二次元视频频道、口语命令和权限/最小间隔配置，详见 README 和模板。
++
++完整集成测试仅在独立实例开启插件，B 站 API、视频内容和 RCON 使用测试桩，
++微信物理发送被拦截。没有向真实群搬运视频，外网 B 站接口可能仍受风控影响。

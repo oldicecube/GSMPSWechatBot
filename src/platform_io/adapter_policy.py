@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from functools import wraps
+from threading import RLock
+import tomllib
 from typing import Any, Dict, List, Mapping, Optional
 
 import tomlkit
@@ -20,6 +23,15 @@ _SUPPORTED_LIST_TYPES = {"whitelist", "blacklist"}
 _SUPPORTED_OVERRIDE_ACTIONS = {"allow", "block", "inherit"}
 _SUPPORTED_DEFAULT_ACTIONS = {"allow", "block"}
 _IMPLICIT_DEFAULT_ACTION = "allow"
+_POLICY_WRITE_LOCK = RLock()
+
+
+def _locked_update(function):
+    @wraps(function)
+    def update(*args, **kwargs):
+        with _POLICY_WRITE_LOCK:
+            return function(*args, **kwargs)
+    return update
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +137,18 @@ class AdapterPolicyManager:
             reason=f"default_{_IMPLICIT_DEFAULT_ACTION}",
         )
 
+    def get_group_features(self, identity: AdapterIdentity, target_id: str) -> Dict[str, bool]:
+        """Explicit group switches; absent values inherit existing behaviour."""
+        result = {}
+        for policy, _ in self._iter_resolved_policies(self._load_policy_data(), identity, 'group'):
+            features = policy.get('features', {})
+            for key in (str(target_id), '*'):
+                row = features.get(key, {}) if isinstance(features, Mapping) else {}
+                for feature in ('llm_enabled', 'plugins_enabled'):
+                    if feature not in result and isinstance(row.get(feature), bool):
+                        result[feature] = row[feature]
+        return result
+
     def get_default_actions(self) -> Dict[str, str]:
         """返回群聊和私聊当前生效的全局默认动作。"""
 
@@ -188,6 +212,8 @@ class AdapterPolicyManager:
                 "allow_ids": allow_ids,
                 "deny_ids": deny_ids,
             }
+            if typed_policy is not None and 'features' in typed_policy:
+                result[chat_type]['features'] = self._normalize_features(typed_policy['features'])
         if best_policy is not None and "policy_groups" in best_policy:
             groups = best_policy["policy_groups"]
             active_group = best_policy.get("active_group")
@@ -253,6 +279,7 @@ class AdapterPolicyManager:
             )
         return entries
 
+    @_locked_update
     def set_adapter_policy(
         self,
         identity: AdapterIdentity,
@@ -313,6 +340,13 @@ class AdapterPolicyManager:
                 chat_policy["default_action"] = default_action
             self._set_or_remove_id_list(chat_policy, "allow_ids", normalized_policy["allow_ids"])
             self._set_or_remove_id_list(chat_policy, "deny_ids", normalized_policy["deny_ids"])
+            if 'features' in normalized_policy:
+                if normalized_policy['features']:
+                    chat_policy['features'] = normalized_policy['features']
+                else:
+                    chat_policy.pop('features', None)
+            elif normalized_groups is not None:
+                chat_policy.pop('features', None)
             self._prune_empty_ui_policy(adapter_policy, chat_type)
 
         self._prune_empty_adapter_policy(adapters, adapter_policy)
@@ -340,9 +374,29 @@ class AdapterPolicyManager:
                 "allow_ids": allow_ids,
                 "deny_ids": deny_ids,
             }
+            if 'features' in raw_policy:
+                if chat_type != 'group' and raw_policy['features']:
+                    raise ValueError('逐群功能开关仅适用于群聊')
+                normalized_policies[chat_type]['features'] = self._normalize_features(raw_policy['features'])
 
         return normalized_policies
 
+    @staticmethod
+    def _normalize_features(value):
+        if not isinstance(value, Mapping) or len(value) > 1000:
+            raise ValueError('群聊功能开关必须是最多 1000 项的映射')
+        result = {}
+        for target, flags in value.items():
+            target = str(target).strip()
+            if not target or not isinstance(flags, Mapping):
+                raise ValueError('群聊功能开关缺少有效群 ID')
+            if any(key not in {'llm_enabled','plugins_enabled'} or not isinstance(flag,bool) for key,flag in flags.items()):
+                raise ValueError('群聊功能仅支持布尔 llm_enabled/plugins_enabled')
+            if flags:
+                result[target] = dict(flags)
+        return result
+
+    @_locked_update
     def set_default_action(self, chat_type: str, action: str) -> None:
         """设置某类聊天在没有命中具体规则时的全局默认动作。"""
 
@@ -360,6 +414,7 @@ class AdapterPolicyManager:
         chat_policy["default_action"] = normalized_action
         self._write_policy_doc(policy_doc)
 
+    @_locked_update
     def set_chat_override(
         self,
         identity: AdapterIdentity,
@@ -403,6 +458,7 @@ class AdapterPolicyManager:
         self._policy_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_policy_doc(policy_doc)
 
+    @_locked_update
     def remove_chat_overrides(
         self,
         *,
@@ -662,8 +718,10 @@ class AdapterPolicyManager:
 
         self._policy_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self._policy_path.with_suffix(f"{self._policy_path.suffix}.tmp")
-        with temporary_path.open("w", encoding="utf-8") as policy_file:
-            policy_file.write(tomlkit.dumps(policy_doc))
+        serialized = tomlkit.dumps(policy_doc)
+        tomllib.loads(serialized)
+        with temporary_path.open("w", encoding="utf-8", newline='') as policy_file:
+            policy_file.write(serialized)
         temporary_path.replace(self._policy_path)
 
     @staticmethod
@@ -816,6 +874,8 @@ class AdapterPolicyManager:
                 "allow_ids": list(policy.get("allow_ids", [])),
                 "deny_ids": list(policy.get("deny_ids", [])),
             }
+            if 'features' in policy:
+                selected[chat_type]['features'] = dict(policy['features'])
 
     @staticmethod
     def _prune_empty_ui_policy(adapter_policy: Table, chat_type: str) -> None:
@@ -823,7 +883,7 @@ class AdapterPolicyManager:
         if not isinstance(chat_policy, Table):
             return
         if any(
-            key in chat_policy for key in ("allow_ids", "deny_ids", "list_type", "ids", "disabled", "default_action")
+            key in chat_policy for key in ("allow_ids", "deny_ids", "list_type", "ids", "disabled", "default_action", "features")
         ):
             return
         del adapter_policy[chat_type]

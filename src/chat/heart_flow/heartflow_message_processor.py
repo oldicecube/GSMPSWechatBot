@@ -21,7 +21,7 @@ class HeartFCMessageReceiver:
     def __init__(self):
         pass
 
-    async def process_message(self, message: "SessionMessage"):
+    async def process_message(self, message: "SessionMessage", *, raise_errors: bool = False):
         """处理接收到的原始消息数据
 
         主要流程:
@@ -102,3 +102,5 @@ class HeartFCMessageReceiver:
         except Exception as e:
             logger.error(f"消息处理失败: {e}")
             print(traceback.format_exc())
+            if raise_errors:
+                raise

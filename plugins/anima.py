@@ -3,6 +3,10 @@
 用于调用 Anima 图像生成服务
 """
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import os
 import sys
 from core.sender import send
@@ -51,7 +55,12 @@ def handle(content, context):
         return "❌ 请提供提示词\n用法: /anima <提示词>"
     
     # 获取用户信息
-    user_wxid = context.get("wxid", "unknown")
+    from utils.points_manager import binding_required
+    from utils.account_identity import canonical_user
+    error = binding_required(context)
+    if error:
+        return error
+    user_wxid = canonical_user(context.get("wxid", "unknown"))
     nickname = context.get("user", "未知用户")
     group_name = context.get("group", "")
     

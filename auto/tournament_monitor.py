@@ -138,6 +138,9 @@ def stop():
 
 def sync_new_matches():
     """同步所有已启用小游戏的新对局，供 player_monitor 和手动命令调用。"""
+    from core.maibot_shell_registry import allowed
+    if not allowed('gsmps.automation.tournament_monitor'):
+        return {'ok': False, 'message': 'GSMPS 自动化已停用'}
     if _reader is None:
         init(_config)
     if not _reader or not _reader.available:
@@ -172,6 +175,11 @@ def reset_fetch_state():
     """清除拉取熔断状态（失败计数与跳过集合），供重算/重置后重新拉取。"""
     _fail_counts.clear()
     _skipped_ids.clear()
+
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'enabled': {'type': 'bool', 'default': True, 'label': '锦标赛业务启用（与 /theroom 共用）', 'config_path': 'tournament.enabled', 'reload': 'restart'},
+    'usercache_path': {'type': 'str', 'default': '', 'label': 'usercache.json 路径（与 /theroom 共用）', 'config_path': 'tournament.usercache_path', 'reload': 'restart'},
+}}
 
 WEBUI_CONFIG_SCHEMA = {
     "title": "锦标赛自动化",

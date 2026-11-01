@@ -4,6 +4,18 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+SHELL_PERSONA_FIELDS = frozenset({'assistant_nickname', 'identity', 'prompt', 'reply_style',
+                                'behavior_style', 'group_prompt', 'private_prompt',
+                                'behavior_boundaries', 'style_policy'})
+
+
+def without_shell_persona(settings):
+    """Drop retired instructions without interpreting their contents."""
+    result = {k: v for k, v in settings.items() if k not in SHELL_PERSONA_FIELDS}
+    if isinstance(result.get('group_profiles'), dict):
+        result['group_profiles'] = {name: {k: v for k, v in profile.items() if k not in SHELL_PERSONA_FIELDS}
+                                    for name, profile in result['group_profiles'].items() if isinstance(profile, dict)}
+    return result
 
 
 def _safe_int(value, default):
@@ -230,6 +242,8 @@ def get_llm_config():
 
     if not isinstance(llm_config, dict):
         raise ValueError("Missing llm config")
+    if llm_config.get('model_config_source') == 'maibot':
+        llm_config = without_shell_persona(llm_config)
 
     required_fields = [
         "enabled",
@@ -253,6 +267,7 @@ def get_llm_config():
     )
 
     result = {
+        "model_config_source": llm_config.get('model_config_source', 'legacy_import'),
         "enabled": llm_config["enabled"],
         # ``provider`` used to select a single built-in client. API selection is
         # now entirely driven by ``apis[*].protocol`` and priority.
@@ -354,7 +369,7 @@ def get_llm_config():
         result["api_base"] = _primary["base_url"]
         result["model"] = _primary["model"]
     else:
-        if result["enabled"]:
+        if result["enabled"] and result['model_config_source'] != 'maibot':
             raise ValueError(
                 "Missing a valid LLM API: configure llm.apis or the legacy "
                 "llm.model/llm.api_key/llm.api_base fields"
@@ -550,6 +565,9 @@ def get_llm_config():
         "password": str(raw_rcon.get("password") or raw_rcon.get("pass") or ""),
     }
     result["group_profiles"] = _normalize_group_profiles(llm_config, result, prefix_mode)
+    if result['model_config_source'] == 'maibot':
+        # No synthesized defaults or stale shell persona can reach native callers.
+        result = without_shell_persona(result)
     return result
 
 

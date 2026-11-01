@@ -85,6 +85,12 @@ class PluginPlatformDriver(PlatformIODriver):
             DeliveryReceipt: 规范化后的发送回执。
         """
 
+        from src.platform_io.manager import PlatformIOManager
+        if (PlatformIOManager.build_route_key_from_message(message) != route_key
+                or not PlatformIOManager._driver_matches_route(self, route_key)):
+            return DeliveryReceipt(message.message_id, route_key, DeliveryStatus.FAILED,
+                driver_id=self.driver_id, driver_kind=self.descriptor.kind,
+                error='Message origin does not match plugin adapter identity')
         if not self._supports_send:
             return DeliveryReceipt(
                 internal_message_id=message.message_id,
@@ -187,7 +193,7 @@ class PluginPlatformDriver(PlatformIODriver):
             return DeliveryReceipt(
                 internal_message_id=internal_message_id,
                 route_key=route_key,
-                status=DeliveryStatus.SENT,
+                status=DeliveryStatus.DROPPED if result.get('dropped') is True else DeliveryStatus.SENT,
                 driver_id=self.driver_id,
                 driver_kind=self.descriptor.kind,
                 external_message_id=external_message_id,

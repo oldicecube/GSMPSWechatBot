@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN" translate="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="google" content="notranslate" />
+    <meta http-equiv="content-language" content="zh-CN" />
+    <!-- 防止搜索引擎索引 -->
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+    <meta name="googlebot" content="noindex, nofollow" />
+    <meta name="bingbot" content="noindex, nofollow" />
+    <link rel="icon" type="image/x-icon" href="/maimai.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MaiBot Dashboard</title>
+    <script>
+      (function() {
+        const mode = localStorage.getItem('maibot-theme-mode') 
+          || localStorage.getItem('ui-theme')
+          || localStorage.getItem('maibot-ui-theme');
+        const theme = mode === 'system' || !mode 
+          ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          : mode;
+        document.documentElement.classList.add(theme);
+
+        const dashboardStyle = localStorage.getItem('maibot-theme-dashboard-style');
+        document.documentElement.dataset.dashboardStyle =
+          ['modern', 'future-retro', 'millennium'].includes(dashboardStyle)
+            ? dashboardStyle
+            : 'millennium';
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root" class="notranslate"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

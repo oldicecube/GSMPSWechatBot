@@ -23,7 +23,7 @@ from core.wechat_sender.wechat_sender_v3 import WeChatSenderV3
 from core.wechat_sender.file_down import download_file, download_voice_file, is_in_voice_temp_dir
 from core.wechat_sender.file_copy import copy_file_to_clipboard
 from core.wechat_sender.send_queue import PrioritySendQueue, SendQueueClosed
-from core.wechat_sender.mention_markup import MentionMarkupError, parse_and_resolve_mentions
+from core.wechat_sender.mention_markup import MentionMarkupError, parse_and_resolve_mentions, resolve_native_segments
 
 # 配置日志
 logging.basicConfig(
@@ -292,9 +292,9 @@ class WeChatHookHandler(BaseHTTPRequestHandler):
             logger.info("received text send request target=%s chars=%s", chat_target, len(message_content))
             try:
                 # Exact-text plugins must not expand literal [[WX_AT:...]].
-                mention_plan = (
-                    None if data.get("preserve_text") is True
-                    else parse_and_resolve_mentions(message_content, chat_target)
+                mention_plan = resolve_native_segments(data["native_segments"], data.get("group_id") or chat_target, message_content) if "native_segments" in data else (
+                    None if data.get("preserve_text") is True and data.get("resolve_mentions") is not True
+                    else parse_and_resolve_mentions(message_content, data.get("group_id") or chat_target)
                 )
             except MentionMarkupError as exc:
                 self._send_error_response("Invalid @ marker", str(exc), status_code=400)

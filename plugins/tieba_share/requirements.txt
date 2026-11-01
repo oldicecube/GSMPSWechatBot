@@ -1,0 +1,3 @@
+# 抓贴吧用 httpx。宿主启动时会按 _manifest.json 里的 dependencies 自动装，
+# 这个文件是给手动安装的人看的。
+httpx>=0.26.0

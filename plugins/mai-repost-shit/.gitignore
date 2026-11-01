@@ -1,0 +1,24 @@
+# 插件运行期生成物
+__pycache__/
+*.py[cod]
+
+# 本机实际配置（可能含群号，不入库）——模板见 config.toml.example
+config.toml
+config_back/
+
+# 宿主生成的运行数据
+data/
+temp/
+
+# 本地下载的视频与状态文件
+*.mp4
+state.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地安全扫描钩子的状态目录
+.mimosa/

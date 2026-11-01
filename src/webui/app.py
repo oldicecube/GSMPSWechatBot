@@ -187,6 +187,8 @@ def create_app(
     if enable_static:
         _setup_static_files(app)
 
+    from src.webui.middleware.network_access import NetworkAccessMiddleware
+    app.add_middleware(NetworkAccessMiddleware)
     return app
 
 
@@ -342,7 +344,7 @@ def _log_webui_version_compatibility(static_path: Path) -> None:
 
 
 def _resolve_static_path() -> Path | None:
-    if _is_local_dashboard_enabled():
+    if _is_local_dashboard_enabled() or (_get_project_root() / 'dashboard' / '.gsmps-managed').is_file():
         static_path = _get_project_root() / "dashboard" / "dist"
         if static_path.is_dir() and (static_path / "index.html").exists():
             return static_path
@@ -362,6 +364,10 @@ def _resolve_static_path() -> Path | None:
 
 def show_access_token():
     """显示 WebUI Access Token（供启动时调用）"""
+    from src.webui.middleware.network_access import auth_enabled
+    if not auth_enabled():
+        logger.info("WebUI 已关闭密码登录，访问由网络白名单限制")
+        return
     try:
         from src.webui.core import get_token_manager
 

@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Dict, List, Tuple, TypeAlias, cast
 
 
@@ -541,7 +542,19 @@ class ToolCall:
         Raises:
             ValueError: 当工具调用标识或函数名缺失时抛出。
         """
+        self.func_name = normalize_tool_call_name(self.func_name)
         if not self.call_id:
             raise ValueError("工具调用 ID 不能为空")
         if not self.func_name:
             raise ValueError("工具函数名称不能为空")
+
+
+def normalize_tool_call_name(value: str) -> str:
+    """Normalize free-endpoint names before replaying assistant tool calls."""
+    text = str(value or '').strip()
+    if re.fullmatch(r'[A-Za-z0-9_-]{1,64}', text):
+        return text
+    first = re.match(r'[A-Za-z0-9_-]+', text)
+    if first:
+        return first.group(0)[:64]
+    return re.sub(r'[^A-Za-z0-9_-]+', '', text)[:64]

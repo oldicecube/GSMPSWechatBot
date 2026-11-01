@@ -45,8 +45,8 @@ def _online_account_pairs() -> set[tuple[str, str]]:
     manager = get_platform_io_manager()
     return {
         (normalize_platform(driver.descriptor.platform), str(driver.descriptor.account_id or "").strip())
-        for driver in manager.driver_registry.list(kind=DriverKind.PLUGIN)
-        if driver.descriptor.account_id
+        for driver in manager.driver_registry.list()
+        if driver.descriptor.account_id and (driver.descriptor.kind == DriverKind.PLUGIN or driver.descriptor.plugin_id == 'gsmps.adapter.weflow')
     }
 
 

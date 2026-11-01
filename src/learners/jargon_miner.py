@@ -28,7 +28,8 @@ from .expression_utils import is_single_char_jargon
 logger = get_logger("jargon")
 
 llm_inference = LLMServiceClient(task_name="learner", request_type="jargon.inference")
-JARGON_INFERENCE_THRESHOLDS = [4, 8, 25, 100]
+# Revisit repeated group slang earlier; real user evidence is still required.
+JARGON_INFERENCE_THRESHOLDS = [2, 4, 12, 40]
 EMOJI_ONLY_MESSAGE_PATTERN = re.compile(r"^(?:\s*\[表情包(?:\d+)?(?:[:：][^\]]*)?\]\s*)+$")
 
 
@@ -533,7 +534,7 @@ class JargonMiner:
 
         inferred_meaning = str(inference1.get("meaning", "") or "").strip()
         finalized_meaning = inferred_meaning if is_jargon else previous_meaning
-        is_complete = (jargon_obj.count or 0) >= 100
+        is_complete = (jargon_obj.count or 0) >= 40 and bool(finalized_meaning)
         last_inference_count = jargon_obj.count or 0
         finalize_result = await self._get_runtime_manager().invoke_hook(
             "jargon.inference.before_finalize",
@@ -863,6 +864,10 @@ class JargonMiner:
         # 如果count没有超过上次判定值，不需要判定
         if count <= last_inference:
             return False
+        # An empty/uncertain meaning is not a terminal rejection. Retry after
+        # two new occurrences so later context can clarify the same phrase.
+        if not str(jargon_obj.meaning or '').strip() and count >= last_inference + 2:
+            return True
 
         next_threshold = next(
             (threshold for threshold in JARGON_INFERENCE_THRESHOLDS if threshold > last_inference),

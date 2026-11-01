@@ -1,0 +1,596 @@
+{
+  "research_date": "2026-10-29",
+  "timezone": "Asia/Shanghai",
+  "scope": "Static source/manifest review; public hot-list GET probes. No third-party code execution, production installation, or live group sends.",
+  "host_version": "1.3.15",
+  "installed_sdk_version": "2.7.1",
+  "declared_sdk_dependency": [
+    "maibot-plugin-sdk>=2.16.0"
+  ],
+  "manifest_count": 22,
+  "validation_limits": [
+    "Python package dependency validation disabled.",
+    "SDK range warnings are allowed by the current Host validator; parse_passed is not a runtime compatibility guarantee.",
+    "Source review is partial, not a complete audit.",
+    "Repository commit fields capture observed metadata; source snapshots should be fetched at fixed commits again before installation."
+  ],
+  "manifests": [
+    {
+      "folder": "autonomous_planning_plugin",
+      "id": "xuqian13.autonomous-planning-plugin-v4",
+      "version": "4.4.5",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.0.0"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": false,
+      "errors": [
+        "Host 版本不兼容: 版本 1.3.15 高于最大支持 1.0.0 (当前 Host: 1.3.15)"
+      ],
+      "warnings": [],
+      "upstream": {
+        "repo": "yumuq/autonomous_planning_plugin",
+        "branch": "main",
+        "pushed_at": "2026-09-24T12:38:25Z",
+        "archived": false,
+        "stars": 0,
+        "sha": "04158e62cfe4683c8e468ec8bf7b73bb30587321"
+      },
+      "manifest_sha256": "52f40cefff4791170c848815d3a0172b19857091bc0e4454d13334777835f28d"
+    },
+    {
+      "folder": "autonomous_planning_upstream",
+      "id": "xuqian13.autonomous-planning-plugin-v4",
+      "version": "4.4.6",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "xuqian13/autonomous_planning_plugin",
+        "branch": "main",
+        "pushed_at": "2026-09-14T07:05:06Z",
+        "archived": false,
+        "sha": "0f3877785157370c88ca8ff5be8abfdf8a3f0130"
+      },
+      "manifest_sha256": "68ed643cb6ad963cb3557a7294edf515bcf9be5c877ec24ee6a21bc4762cb1ef"
+    },
+    {
+      "folder": "better-diary",
+      "id": "org.orge-8.better-diary",
+      "version": "1.7.1",
+      "host": {
+        "min_version": "1.2.3",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.8.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [
+        "SDK 版本超出插件声明范围，已放行: 版本 2.7.1 低于最小要求 2.8.0 (当前 SDK: 2.7.1)"
+      ],
+      "upstream": {
+        "repo": "orge-8/better-diary",
+        "branch": "main",
+        "pushed_at": "2026-10-22T00:02:23Z",
+        "archived": false,
+        "sha": "420732ffceca0107819a5542b69929e7ee135b61"
+      },
+      "manifest_sha256": "0b605d773fea4e9ebb4b84128bfa145206631b4a0384c90a93f7f99f4e998fca"
+    },
+    {
+      "folder": "bilibili_autopilot",
+      "id": "local.bilibili-autopilot",
+      "version": "0.8.0",
+      "host": {
+        "min_version": "1.3.10",
+        "max_version": "999.999.999"
+      },
+      "sdk": {
+        "min_version": "2.12.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [
+        "SDK 版本超出插件声明范围，已放行: 版本 2.7.1 低于最小要求 2.12.0 (当前 SDK: 2.7.1)"
+      ],
+      "upstream": {
+        "repo": "namchengwuqiu/bilibili_autopilot",
+        "branch": "main",
+        "pushed_at": "2026-10-28T08:23:35Z",
+        "archived": false,
+        "sha": "0f15ff0ae44036a772cf3206a4faad36495ed162"
+      },
+      "manifest_sha256": "9b207dbd584473a2c82d93759709b90dcd1b9f21b6ede9e75b60ddd83bf1c980"
+    },
+    {
+      "folder": "cateye_mai_personality_swap",
+      "id": "github.cateye.mai-personality-swap",
+      "version": "1.4.7",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "cateyemizuki/cateye_mai_personality_swap",
+        "branch": "main",
+        "pushed_at": "2026-10-05T14:30:49Z"
+      },
+      "manifest_sha256": "d0d0bcc6e2c60fb6720537af4d7711d8980440a15806bdae564e6464c8983cd6"
+    },
+    {
+      "folder": "community.engagement-plus",
+      "id": "small_sunshine.community.engagement-plus",
+      "version": "1.2.0",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.7.1",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "MCYXG233/community.engagement-plus",
+        "branch": "main",
+        "pushed_at": "2026-08-04T12:44:10Z"
+      },
+      "manifest_sha256": "9a9fec19805362661c0fecd3276e421dabb4a4092b3529115a3d16c1c9b953ca"
+    },
+    {
+      "folder": "hot-topics",
+      "id": "zhaocang.hot-topics",
+      "version": "0.7.6",
+      "host": {
+        "min_version": "1.2.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "1.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "ZhaoCang-QWQ/hot-topics",
+        "branch": "main",
+        "pushed_at": "2026-09-08T03:30:11Z",
+        "archived": false,
+        "sha": "ed3807f521eefd881b52fc4b8c2e2237d65d8001"
+      },
+      "manifest_sha256": "c8c80bd105b74bffe39547b9a551d05351f341621c69b46e7e63e2cf0923013a"
+    },
+    {
+      "folder": "idle_proactive_chat",
+      "id": "xxxxx7258.idle-proactive-chat",
+      "version": "1.0.5",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.9.9"
+      },
+      "sdk": {
+        "min_version": "2.5.2",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "XXXxx7258/idle_proactive_chat",
+        "branch": "main",
+        "pushed_at": "2026-06-30T08:12:05Z",
+        "archived": false,
+        "sha": "3d16ebeba44419d9816629c32a798223706400f1"
+      },
+      "manifest_sha256": "8e817fc04b873b542e0da3d3aa58276dbacb2fcc4232767e3a6ce5f333f15fa0"
+    },
+    {
+      "folder": "life-frequency",
+      "id": "org.orge-8.life-frequency",
+      "version": "1.23.4",
+      "host": {
+        "min_version": "1.2.3",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.8.0",
+        "max_version": "2.13.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [
+        "SDK 版本超出插件声明范围，已放行: 版本 2.7.1 低于最小要求 2.8.0 (当前 SDK: 2.7.1)"
+      ],
+      "upstream": {
+        "repo": "orge-8/life-frequency",
+        "branch": "main",
+        "pushed_at": "2026-10-25T08:47:38Z",
+        "archived": false,
+        "sha": "834f19ce07f61857313e86b367e337d9c3e70b8e"
+      },
+      "manifest_sha256": "5815d84ed2d43ff619434190abe4a48d78dce9cd71cf5fd61b91b9705f79dd04"
+    },
+    {
+      "folder": "LifeSimulationPlugin",
+      "id": "com.lifesim.life-simulation",
+      "version": "2.0.0",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "SkonJIYHD/LifeSimulationPlugin",
+        "branch": "main",
+        "pushed_at": "2026-06-09T04:29:29Z",
+        "archived": false,
+        "stars": 3,
+        "sha": "8515914aa4db05497301a807300764eaba49ded5"
+      },
+      "manifest_sha256": "d62bcedce1317ba58115e6cd5257ee8c7d24bb693d56cbc173a617c0793b8f10"
+    },
+    {
+      "folder": "lonely-mai",
+      "id": "NothingButSeaweedSoup.LonelyMai",
+      "version": "1.1.0",
+      "host": {
+        "min_version": "0.10.0"
+      },
+      "sdk": null,
+      "parse_passed": false,
+      "errors": [
+        "Manifest 版本不兼容: manifest_version=1，仅支持 2"
+      ],
+      "warnings": [],
+      "upstream": {
+        "repo": "NothingButSeaweedSoup/lonely-mai",
+        "branch": "main",
+        "pushed_at": "2026-05-05T02:46:52Z",
+        "archived": false,
+        "stars": 3,
+        "sha": "df69f951a9f7c45ad8165dffa1b1337920790fb1"
+      },
+      "manifest_sha256": "1c23f6aab21035a2c3e515ee080fded6690b514f88f7b0361e22e93ad5caaeb1"
+    },
+    {
+      "folder": "lonely-mai-sdkv2",
+      "id": "NothingButSeaweedSoup.LonelyMai-sdkv2",
+      "version": "1.2.0",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.3.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "clfr41/lonely-mai-sdkv2",
+        "branch": "main",
+        "pushed_at": "2026-06-18T06:35:30Z",
+        "archived": false,
+        "sha": "938e0ab189b3d20e73bc5b5bf630fdf20e7afd95"
+      },
+      "manifest_sha256": "e6e48748bdc5ded675ab64c834e0e3c0f982a535c933a071c43d288247adaa58"
+    },
+    {
+      "folder": "mai-life",
+      "id": "mailife.mai-life",
+      "version": "1.3.0",
+      "host": {
+        "min_version": "1.3.1",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.7.1",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "tsuiraku9/mai-life",
+        "branch": "main",
+        "pushed_at": "2026-10-10T06:22:04Z",
+        "archived": false,
+        "sha": "64fbd743c8e8c02102323da78bcc66b680124d27"
+      },
+      "manifest_sha256": "e115763e5941f9517cf98a2654c59704fb0ca20e2a4366923a1c38056562fd31"
+    },
+    {
+      "folder": "Mai_life",
+      "id": "maibot-community.mai-life",
+      "version": "1.24.4",
+      "host": {
+        "min_version": "1.3.16",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.7.0",
+        "max_version": "2.17.99"
+      },
+      "parse_passed": false,
+      "errors": [
+        "Host 版本不兼容: 版本 1.3.15 低于最小要求 1.3.16 (当前 Host: 1.3.15)"
+      ],
+      "warnings": [],
+      "upstream": {
+        "repo": "octmicy/Mai_life",
+        "branch": "main",
+        "pushed_at": "2026-10-28T10:18:16Z",
+        "archived": false,
+        "sha": "41a0a69f6903978444184e6719767fa2aa1afbbc"
+      },
+      "manifest_sha256": "7d87d669b328cee71c796a6090a0e6ddfabdd24aa435dff85947b6f98be98f6d"
+    },
+    {
+      "folder": "maibook-plugin",
+      "id": "com.0-hz.maibook",
+      "version": "0.1.6",
+      "host": {
+        "min_version": "1.2.5",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.8.1",
+        "max_version": "2.16.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [
+        "SDK 版本超出插件声明范围，已放行: 版本 2.7.1 低于最小要求 2.8.1 (当前 SDK: 2.7.1)"
+      ],
+      "upstream": {
+        "repo": "yufei-pan/maibook-plugin",
+        "branch": "main",
+        "pushed_at": "2026-10-22T06:34:11Z",
+        "archived": false,
+        "stars": 0,
+        "sha": "320bedb246be468ffc1282d83e1e9ee08ed2b412"
+      },
+      "manifest_sha256": "1167f9af500ac3d44e5e7314202fb00668ceefce82a1c1ac1bff44da4c2565e3"
+    },
+    {
+      "folder": "maibot-affection-system",
+      "id": "feyumy.affection-system",
+      "version": "1.2.0",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "feiyunming/maibot-affection-system",
+        "branch": "main",
+        "pushed_at": "2026-08-14T14:09:56Z",
+        "archived": false,
+        "stars": 1,
+        "sha": "9c9f6cdd1a1568f3ef0eaa6d7f060846b810ffb6"
+      },
+      "manifest_sha256": "f9cf480add8bbd7efb33e99f621a95c204c6f4685c9afe7b010df7ba1aa1a311"
+    },
+    {
+      "folder": "maibot-bililife",
+      "id": "antinova.maibot-bililife",
+      "version": "0.2.6",
+      "host": {
+        "min_version": "1.3.14",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.16.0",
+        "max_version": "2.16.0"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [
+        "SDK 版本超出插件声明范围，已放行: 版本 2.7.1 低于最小要求 2.16.0 (当前 SDK: 2.7.1)"
+      ],
+      "upstream": {
+        "repo": "ANTINOVIA/maibot-bililife",
+        "branch": "main",
+        "pushed_at": "2026-10-25T08:33:07Z",
+        "archived": false,
+        "sha": "f20fb3f125f9fad99c06e5d38e4cc17a09278ec1"
+      },
+      "manifest_sha256": "b47f9faca53fd1ec3de9f01ddee14ff57162f19a125bf506824951674098e074"
+    },
+    {
+      "folder": "maibot-plugin-douyin-surf",
+      "id": "chunian.maibot-plugin-douyin-surf",
+      "version": "1.2.14",
+      "host": {
+        "min_version": "0.5.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.5.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "mailchunian8395-arch/maibot-plugin-douyin-surf",
+        "branch": "main",
+        "pushed_at": "2026-09-04T08:46:06Z",
+        "archived": false,
+        "stars": 1,
+        "sha": "40bf0c56c443e877a26b2391ffdf255bd3c35f71"
+      },
+      "manifest_sha256": "ba7eab3151bdb08620594e1cf10aecf051cf4afc73fea5151f9d048bb9a599af"
+    },
+    {
+      "folder": "Maibot_fun_pack_plugin",
+      "id": "maibot.fun-pack",
+      "version": "1.6.4",
+      "host": {
+        "min_version": "1.3.0",
+        "max_version": "1.3.99"
+      },
+      "sdk": {
+        "min_version": "2.5.0",
+        "max_version": "2.16.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "NetaJuutilainen/Maibot_fun_pack_plugin",
+        "branch": "main",
+        "pushed_at": "2026-10-27T02:21:29Z"
+      },
+      "manifest_sha256": "b2f5e64b5527fc69038dfe5584ba22c90eb633dd7033665fbeaea4cd2b36c499"
+    },
+    {
+      "folder": "private-humanizer",
+      "id": "deepseek-v4-pro.private-humanizer",
+      "version": "1.6.1",
+      "host": {
+        "min_version": "1.0.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "DeepSeek-V4-Pro/private-humanizer",
+        "branch": "main",
+        "pushed_at": "2026-08-27T17:53:24Z",
+        "archived": false,
+        "stars": 0,
+        "sha": "543d3ee0ef9102701590357c7e306dbed31377d7"
+      },
+      "manifest_sha256": "34035f2ab3fca6902cefde712591a0696fa7f9a80411844ddeacdf7f11e98c91"
+    },
+    {
+      "folder": "proactive_talk_plugin",
+      "id": null,
+      "version": "2.0.1",
+      "host": {
+        "min_version": "0.9.0",
+        "max_version": "0.11.0"
+      },
+      "sdk": null,
+      "parse_passed": false,
+      "errors": [
+        "Manifest 版本不兼容: manifest_version=1，仅支持 2"
+      ],
+      "warnings": [],
+      "upstream": {
+        "repo": "yhny1001/proactive_talk_plugin",
+        "branch": "master",
+        "pushed_at": "2025-12-22T06:23:33Z",
+        "archived": false,
+        "stars": 3,
+        "sha": "4d3ee361f7a1864937d036b89b7e942800e65175"
+      },
+      "manifest_sha256": "94b0a2527508ca4544fef45fb959630eedee604e1c0a2c3652b18143f14d1e03"
+    },
+    {
+      "folder": "social-state",
+      "id": "github.ZhaoCang-QWQ.social-state",
+      "version": "0.4.7",
+      "host": {
+        "min_version": "1.2.0",
+        "max_version": "1.99.99"
+      },
+      "sdk": {
+        "min_version": "2.0.0",
+        "max_version": "2.99.99"
+      },
+      "parse_passed": true,
+      "errors": [],
+      "warnings": [],
+      "upstream": {
+        "repo": "ZhaoCang-QWQ/social-state",
+        "branch": "main",
+        "pushed_at": "2026-10-10T16:04:53Z",
+        "archived": false,
+        "sha": "d2825d1cbb557303aacf2f5f6c04df2339754b7a"
+      },
+      "manifest_sha256": "488b418d3cf899a7202c288a6836039a1a9f9fe2ee98da6449ce560db8d17c80"
+    }
+  ],
+  "hot_api_probes": [
+    {
+      "url": "https://60s.crystelf.top/v2/bili",
+      "status": 200,
+      "code": 200,
+      "data_type": "list",
+      "items": 50
+    },
+    {
+      "url": "https://60s.7se.cn/v2/bili",
+      "status": 200,
+      "code": null,
+      "data_type": "list",
+      "items": 100
+    },
+    {
+      "url": "https://60s.viki.moe/v2/bili",
+      "status": 500,
+      "code": 500,
+      "data_type": "NoneType",
+      "items": null
+    }
+  ],
+  "local_source_evidence": {
+    "plugin_root": "src/plugin_runtime/integration.py::_get_third_party_plugin_dirs",
+    "proactive_queue_semantics": "src/plugin_runtime/capabilities/core.py::_cap_maisaka_proactive_trigger",
+    "wechat_native_at": "llm/core/wechat_driver.py::WechatShellDriver.send_message",
+    "learning_policy": "src/common/learning_policy.py"
+  },
+  "findings": {
+    "hot_topics_wechat": "QQ hardcoded in autonomous target lookup; explicit platform and session_id handling required.",
+    "personality_swap_admin": "admin_util.plain_id accepts digits only, rejects wxid.",
+    "personality_swap_bot_identity": "Reads bot.qq_account; adapt to real WeChat bot identity.",
+    "temporary_chaos_tool": "Proposed custom Planner behavior Tool, not implemented by this research.",
+    "learning_blacklist": "Third-party learning/storage requires explicit shared policy filtering."
+  }
+}

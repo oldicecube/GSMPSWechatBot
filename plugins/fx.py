@@ -2,6 +2,10 @@
 """Lightweight, delayed, group-friendly simulated commodity trading."""
 from __future__ import annotations
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import hashlib
 import json
 import logging
@@ -29,6 +33,7 @@ _THREAD = None
 _SESSION_THREAD = None
 _FEED_THREAD = None
 _FEED_LOCK = threading.Lock()
+_FEED_BACKOFF = {}
 _STOP = threading.Event()
 _BROADCAST = None
 _LLM_SERVICE = None
@@ -389,13 +394,28 @@ def _advance_market(conn, now=None, *, finalize_session=False):
 
 
 def _fetch_json(url):
+    failures, retry_at = _FEED_BACKOFF.get(url, (0, 0.0))
+    if time.monotonic() < retry_at:
+        return None
     try:
         response = requests.get(url, timeout=(4, 8), headers={"User-Agent": "WechatBot-FX/1.0", "Cache-Control": "no-cache"})
         response.raise_for_status()
         payload = response.json()
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object")
+        _FEED_BACKOFF.pop(url, None)
+        return payload
     except Exception as exc:
-        _LOG.warning("FX external feed failed url=%s error=%s", url, exc)
+        failures += 1
+        delay = min(900.0, 60.0 * 2 ** min(failures - 1, 4))
+        response = getattr(exc, 'response', None)
+        if response is not None and response.status_code == 429:
+            try:
+                delay = max(delay, min(3600.0, float(response.headers.get('Retry-After', '0'))))
+            except (TypeError, ValueError):
+                pass
+        _FEED_BACKOFF[url] = (failures, time.monotonic() + delay)
+        _LOG.warning("FX external feed failed; retry in %.0fs url=%s error=%s", delay, url, exc)
         return None
 
 
@@ -421,9 +441,8 @@ def _source_timestamp(value, fallback):
 
 
 def _fetch_quote_payload(url):
-    # Idempotent GET retry, bounded and isolated from the session/notification worker.
-    payload = _fetch_json(url)
-    return payload if payload is not None else _fetch_json(url)
+    # 不立即重复请求失败的上游；保留最后有效报价并等待独立退避。
+    return _fetch_json(url)
 
 def _sync_external_feeds(now=None):
     """Cache XAU/USD and USD/JPY off-thread; never fetch while a trade runs."""
@@ -722,6 +741,10 @@ def _session_tick(now):
 
 def _feed_worker():
     while not _STOP.is_set():
+        from core.maibot_shell_registry import allowed
+        if not allowed('gsmps.command.fx'):
+            _STOP.wait(5)
+            continue
         started = time.monotonic()
         try:
             with _FEED_LOCK:
@@ -746,6 +769,10 @@ def _refresh_external_if_stale(now):
 
 def _session_worker():
     while not _STOP.is_set():
+        from core.maibot_shell_registry import allowed
+        if not allowed('gsmps.command.fx'):
+            _STOP.wait(5)
+            continue
         try:
             _session_tick(time.time())
         except Exception:

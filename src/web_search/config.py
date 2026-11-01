@@ -7,7 +7,7 @@ from src.config.config_base import ConfigBase, Field
 
 
 class WebServiceConfig(ConfigBase):
-    adapter: Literal["deepseek", "tavily", "stepsearch_mcp", "anysearch", "exa", "firecrawl"] = "deepseek"
+    adapter: Literal["deepseek", "tavily", "stepsearch_mcp", "parallel_mcp", "anysearch", "exa", "firecrawl"] = "deepseek"
     """服务协议类型，不需要配置模型列表。"""
 
     base_url: str = ""
@@ -17,7 +17,7 @@ class WebServiceConfig(ConfigBase):
     """HTTP API 密钥。MCP 服务的鉴权由已有 MCP 连接管理。"""
 
     server_ref: str = ""
-    """StepSearch 对应的 bot_config.toml 中 mcp.servers 的名称。"""
+    """MCP 联网服务对应的 bot_config.toml 中 mcp.servers 的名称。"""
 
     timeout: float = Field(default=60.0, gt=0, le=300)
     """单次联网调用的总时限，单位秒。"""
@@ -38,8 +38,8 @@ class WebServiceConfig(ConfigBase):
                 raise ValueError("联网服务 base_url 必须是无用户名和密码的 HTTP(S) 地址")
             if parts.query or parts.fragment:
                 raise ValueError("联网服务 base_url 不能包含查询参数或片段")
-        if self.adapter == "stepsearch_mcp" and (self.api_key or self.base_url):
-            raise ValueError("StepSearch MCP 请使用 server_ref，地址和密钥在 MCP 连接中配置")
+        if self.adapter in {"stepsearch_mcp", "parallel_mcp"} and (self.api_key or self.base_url):
+            raise ValueError("MCP 联网服务请使用 server_ref，地址和密钥在 MCP 连接中配置")
         super().model_post_init(context)
 
 
@@ -92,9 +92,9 @@ class WebRuntimeConfig(WebConfig):
                 raise ValueError(f"web.{operation} 引用了不存在的服务：{selected}")
             if self.enabled and selected:
                 service = self.services[selected]
-                if service.adapter == "stepsearch_mcp" and not service.server_ref.strip():
+                if service.adapter in {"stepsearch_mcp", "parallel_mcp"} and not service.server_ref.strip():
                     raise ValueError(f"联网服务 {selected} 缺少 server_ref")
-                if service.adapter != "stepsearch_mcp" and not service.api_key.strip():
+                if service.adapter not in {"stepsearch_mcp", "parallel_mcp"} and not service.api_key.strip():
                     raise ValueError(f"联网服务 {selected} 缺少 api_key")
         if self.enabled and not (self.search or self.fetch):
             raise ValueError("启用联网功能时至少需要选择一个 search 或 fetch 服务")

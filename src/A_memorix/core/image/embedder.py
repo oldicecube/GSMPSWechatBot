@@ -17,11 +17,18 @@ class ImageEmbedder(Protocol):
     async def embed(self, image_bytes: bytes, *, mime_type: str, session_id: str = "") -> Dict[str, Any]: ...
 
 
-def _probe_png(color: tuple[int, int, int]) -> bytes:
-    from PIL import Image as PILImage
+def _probe_png(*, square: bool) -> bytes:
+    from PIL import Image as PILImage, ImageDraw
 
     output = BytesIO()
-    PILImage.new("RGB", (24, 24), color).save(output, format="PNG")
+    # 检索模型可能弱化纯色差异；用足够大的结构差异检验其确实读取了图片。
+    image = PILImage.new("RGB", (192, 192), "white")
+    draw = ImageDraw.Draw(image)
+    if square:
+        draw.rectangle((25, 25, 165, 165), fill="red")
+    else:
+        draw.ellipse((25, 25, 165, 165), fill="blue")
+    image.save(output, format="PNG")
     return output.getvalue()
 
 
@@ -49,6 +56,21 @@ class HostImageEmbedder:
 
     async def _request(self, image_bytes: bytes, *, mime_type: str, session_id: str = "") -> Dict[str, Any]:
         from src.services.embedding_service import EmbeddingServiceClient
+
+        if self.preprocess_version == "png_rgb_v1":
+            # 当前免费端点仅接受 PNG/JPEG；资产仍保留原始字节，编码输入统一为 PNG。
+            # 版本进入向量指纹，避免转换前后的向量混入同一空间。
+            from PIL import Image as PILImage, ImageOps
+
+            with PILImage.open(BytesIO(image_bytes)) as image:
+                if int(getattr(image, "n_frames", 1)) != 1:
+                    raise ValueError("png_rgb_v1 图片嵌入仅支持静态图片")
+                rgba = ImageOps.exif_transpose(image).convert("RGBA")
+                normalized = PILImage.new("RGBA", rgba.size, "white")
+                normalized.alpha_composite(rgba)
+                output = BytesIO()
+                normalized.convert("RGB").save(output, format="PNG")
+            image_bytes, mime_type = output.getvalue(), "image/png"
 
         result = await EmbeddingServiceClient(
             task_name=self.task_name,
@@ -87,9 +109,9 @@ class HostImageEmbedder:
             ):
                 return dict(self._probe_report)
             try:
-                first = await self._request(_probe_png((20, 80, 210)), mime_type="image/png")
-                repeat = await self._request(_probe_png((20, 80, 210)), mime_type="image/png")
-                other = await self._request(_probe_png((220, 40, 30)), mime_type="image/png")
+                first = await self._request(_probe_png(square=True), mime_type="image/png")
+                repeat = await self._request(_probe_png(square=True), mime_type="image/png")
+                other = await self._request(_probe_png(square=False), mime_type="image/png")
                 if repeat["fingerprint"] != first["fingerprint"] or other["fingerprint"] != first["fingerprint"]:
                     raise RuntimeError("图片嵌入模型在探测期间返回了不同的嵌入空间")
                 same_score = _cosine(first["embedding"], repeat["embedding"])

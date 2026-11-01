@@ -154,6 +154,18 @@ def initialize_database() -> None:
         create_all_start_time = perf_counter()
         SQLModel.metadata.create_all(engine)
         logger.debug(f"数据库模型建表检查完成，耗时={int((perf_counter() - create_all_start_time) * 1000)}ms")
+        from src.common.database.expression_compat import (
+            repair_legacy_expression_sources,
+            repair_legacy_expression_timestamps,
+        )
+
+        with engine.begin() as connection:
+            repaired = repair_legacy_expression_sources(connection)
+            repaired_timestamps = repair_legacy_expression_timestamps(connection)
+        if repaired:
+            logger.info(f"已兼容 {repaired} 条旧表达的修改者字段；内容及审核状态保持不变")
+        if repaired_timestamps:
+            logger.info(f"已兼容 {repaired_timestamps} 条旧表达的 Unix 时间戳字段")
         ensure_runtime_performance_indexes()
         finalize_start_time = perf_counter()
         _migration_bootstrapper.finalize_database(migration_state)

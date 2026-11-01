@@ -37,6 +37,15 @@ class ToolArgumentParseMode(str, Enum):
 class APIProvider(ConfigBase):
     """API提供商配置类"""
 
+    enabled: bool = Field(default=True)
+    """启用端点。停用端点可保留未填写的凭据供模型管理编辑，但不会创建请求客户端。"""
+
+    embedding_fallback_urls: List[str] = Field(default_factory=list)
+    """已验证返回相同向量的备用 Base URL，仅用于 /embeddings 的连接或 5xx 故障切换。不能填写不同模型或不同向量空间的地址。"""
+
+    max_images_per_request: int = Field(default=0, ge=0)
+    """端点硬性图片数上限；0 表示不额外限制，超出时保留最新图片及旧图文本占位。"""
+
     name: str = Field(
         default="",
         json_schema_extra={
@@ -187,6 +196,12 @@ class APIProvider(ConfigBase):
     )
     """重试间隔 (如果API调用失败, 重试的间隔时间, 单位: 秒)"""
 
+    request_min_interval: float = Field(default=0.0, ge=0.0, le=3600.0)
+    """同端点、凭据与模型跨任务请求的最小间隔（秒），0 表示不限速。"""
+
+    system_messages_at_start: bool = Field(default=False)
+    """严格 Chat Completions 模板兼容：将所有 system 内容按原顺序合并到开头；不改用户/助手/工具消息的顺序。"""
+
     def model_post_init(self, context: Any = None) -> None:
         """执行 API 提供商配置的后置校验。
 
@@ -196,12 +211,17 @@ class APIProvider(ConfigBase):
         Raises:
             ValueError: 当配置项缺失或组合不合法时抛出。
         """
-        if self.auth_type != OpenAICompatibleAuthType.NONE and not self.api_key:
+        if self.enabled and self.auth_type != OpenAICompatibleAuthType.NONE and not self.api_key:
             raise ValueError(t("config.api_key_empty"))
         if not self.base_url and self.client_type != "gemini":  # TODO: 允许gemini使用base_url
             raise ValueError(t("config.api_base_url_empty"))
         if not self.name:
             raise ValueError(t("config.api_provider_name_empty"))
+        for url in self.embedding_fallback_urls:
+            from urllib.parse import urlsplit
+            parsed = urlsplit(url)
+            if parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError('embedding_fallback_urls 必须为不含凭据、查询参数或片段的 HTTPS Base URL')
         if self.auth_type == OpenAICompatibleAuthType.HEADER and not self.auth_header_name.strip():
             raise ValueError("当 auth_type=header 时，auth_header_name 不能为空")
         if self.auth_type == OpenAICompatibleAuthType.QUERY and not self.auth_query_name.strip():

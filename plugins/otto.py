@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
+
 import logging
 import os
 

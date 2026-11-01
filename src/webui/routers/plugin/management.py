@@ -368,6 +368,8 @@ async def install_plugin(request: InstallPluginRequest, maibot_session: Optional
     plugin_id = request.plugin_id
 
     try:
+        if str(plugin_id).startswith('gsmps.'):
+            raise HTTPException(409, 'GSMPS 壳子模块由仓库管理版本，请使用启停和配置管理')
         plugin_id = validate_plugin_id(request.plugin_id)
         if request.version is not None:
             entry, release = await resolve_release(plugin_id, request.version)
@@ -515,6 +517,8 @@ async def uninstall_plugin(
 ) -> Dict[str, Any]:
     require_plugin_token(maibot_session)
     logger.info(f"收到卸载插件请求: {request.plugin_id}")
+    if request.plugin_id.startswith('gsmps.'):
+        raise HTTPException(409, 'GSMPS 壳子模块在此仅登记管理；请使用启停开关，不能作为原生插件卸载')
     plugin_id = request.plugin_id
 
     try:
@@ -639,6 +643,8 @@ async def update_plugin(
 async def _perform_update_plugin(request: UpdatePluginRequest, maibot_session: Optional[str]) -> Dict[str, Any]:
     require_plugin_token(maibot_session)
     logger.info(f"收到更新插件请求: {request.plugin_id}")
+    if request.plugin_id.startswith('gsmps.'):
+        raise HTTPException(409, 'GSMPS 壳子模块由仓库管理版本，请使用启停和配置管理')
     plugin_id = request.plugin_id
 
     try:
@@ -859,6 +865,8 @@ def _collect_installed_plugins(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 installed_plugins.append(
                     {
                         "id": plugin_id,
+                        "source": "maibot",
+                        "external": False,
                         "manifest": manifest,
                         "path": str(plugin_path.absolute()),
                         "enabled": enabled,
@@ -891,6 +899,8 @@ def _collect_installed_plugins(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if duplicates:
             logger.warning(f"共检测到 {len(duplicates)} 个重复插件已去重")
 
+        from core.maibot_shell_registry import catalog
+        unique_plugins.extend(catalog())
         logger.info(f"找到 {len(unique_plugins)} 个已安装插件")
         return {"success": True, "plugins": unique_plugins, "total": len(unique_plugins)}
     except Exception as e:

@@ -1,0 +1,234 @@
+/** 首页版本信息共享自更新检查；一言独立加载。 */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import {
+  getVersionCompatibility,
+  type VersionCompatibilityResult,
+} from '@/lib/version-compatibility-api'
+
+import { checkSelfUpdateOnStartup, SELF_UPDATE_STATUS_EVENT, type SelfUpdateStatus } from '@/lib/system-api'
+
+const HITOKOTO_SETTINGS_STORAGE_KEY = 'maibot-home-hitokoto-settings-v1'
+const HITOKOTO_INDEX_STORAGE_KEY = 'maibot-home-hitokoto-index-v1'
+const HITOKOTO_REQUEST_TIMEOUT_MS = 8000
+
+export interface CustomHitokoto {
+  id: string
+  content: string
+  source: string
+}
+
+export interface HitokotoSettings {
+  defaultEnabled: boolean
+  customItems: CustomHitokoto[]
+}
+
+const DEFAULT_HITOKOTO_SETTINGS: HitokotoSettings = {
+  defaultEnabled: true,
+  customItems: [],
+}
+
+function normalizeHitokotoSettings(value: unknown): HitokotoSettings {
+  if (!value || typeof value !== 'object') return DEFAULT_HITOKOTO_SETTINGS
+
+  const candidate = value as Partial<HitokotoSettings>
+  const customItems = Array.isArray(candidate.customItems)
+    ? candidate.customItems
+        .filter(
+          (item): item is CustomHitokoto =>
+            Boolean(item) &&
+            typeof item.id === 'string' &&
+            typeof item.content === 'string' &&
+            typeof item.source === 'string'
+        )
+        .map((item) => ({
+          id: item.id,
+          content: item.content.trim(),
+          source: item.source.trim(),
+        }))
+        .filter((item) => item.content.length > 0)
+    : []
+
+  return {
+    defaultEnabled:
+      typeof candidate.defaultEnabled === 'boolean'
+        ? candidate.defaultEnabled
+        : DEFAULT_HITOKOTO_SETTINGS.defaultEnabled,
+    customItems,
+  }
+}
+
+function loadHitokotoSettings(): HitokotoSettings {
+  try {
+    const stored = localStorage.getItem(HITOKOTO_SETTINGS_STORAGE_KEY)
+    return stored ? normalizeHitokotoSettings(JSON.parse(stored)) : DEFAULT_HITOKOTO_SETTINGS
+  } catch (error) {
+    console.error('读取一言设置失败:', error)
+    return DEFAULT_HITOKOTO_SETTINGS
+  }
+}
+
+function loadHitokotoIndex(): number {
+  const value = Number.parseInt(localStorage.getItem(HITOKOTO_INDEX_STORAGE_KEY) ?? '0', 10)
+  return Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+export function useMaibotVersion() {
+  const { t } = useTranslation()
+  const [hitokoto, setHitokoto] = useState<{ hitokoto: string; from: string } | null>(null)
+  const [hitokotoLoading, setHitokotoLoading] = useState(true)
+  const [hitokotoSettings, setHitokotoSettings] = useState(loadHitokotoSettings)
+  const [selfUpdateStatus, setSelfUpdateStatus] = useState<SelfUpdateStatus | null>(null)
+  const [versionCompatibility, setVersionCompatibility] =
+    useState<VersionCompatibilityResult | null>(null)
+  const hitokotoIndexRef = useRef(loadHitokotoIndex())
+  const hitokotoSettingsRef = useRef(hitokotoSettings)
+  const hitokotoRequestRef = useRef<AbortController | null>(null)
+
+  // 使用 ref 跟踪组件是否已卸载，防止内存泄漏
+  const isMountedRef = useRef(true)
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      hitokotoRequestRef.current?.abort()
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    const loadVersionCompatibility = async () => {
+      try {
+        const result = await getVersionCompatibility(controller.signal)
+        if (!controller.signal.aborted) {
+          setVersionCompatibility(result)
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.debug('检查版本匹配状态失败:', error)
+        }
+      }
+    }
+
+    void loadVersionCompatibility()
+    return () => controller.abort()
+  }, [])
+
+  // 与顶栏复用同一个启动请求，手动检查也通过事件同步结果。
+  useEffect(() => {
+    let mounted = true
+    let receivedCheck = false
+    const handleStatus = (event: Event) => {
+      receivedCheck = true
+      setSelfUpdateStatus((event as CustomEvent<SelfUpdateStatus>).detail)
+    }
+    window.addEventListener(SELF_UPDATE_STATUS_EVENT, handleStatus)
+    void checkSelfUpdateOnStartup().then((status) => {
+      if (mounted && !receivedCheck) setSelfUpdateStatus(status)
+    }).catch((error: unknown) => console.debug('检查 MaiBot 更新失败:', error))
+    return () => {
+      mounted = false
+      window.removeEventListener(SELF_UPDATE_STATUS_EVENT, handleStatus)
+    }
+  }, [])
+
+  const loadHitokoto = useCallback(
+    async (settings: HitokotoSettings) => {
+      // 新加载（包括保存设置）取代旧加载，避免迟到的响应覆盖本地内容。
+      hitokotoRequestRef.current?.abort()
+      const controller = new AbortController()
+      hitokotoRequestRef.current = controller
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      const isCurrentRequest = () =>
+        isMountedRef.current && hitokotoRequestRef.current === controller
+      try {
+        const candidates = settings.customItems.map((item) => ({
+          hitokoto: item.content,
+          from: item.source,
+        }))
+        const candidateCount = candidates.length + Number(settings.defaultEnabled)
+        const index = candidateCount > 0 ? hitokotoIndexRef.current % candidateCount : 0
+
+        // 只有轮到在线来源才发请求，本地文本不等待网络。
+        if (settings.defaultEnabled && index === candidates.length) {
+          setHitokotoLoading(true)
+          timeoutId = setTimeout(
+            () => controller.abort(new Error('一言接口请求超时')),
+            HITOKOTO_REQUEST_TIMEOUT_MS
+          )
+          try {
+            const response = await fetch('https://v1.hitokoto.cn/?c=a&c=b&c=c&c=d&c=h&c=i&c=k', {
+              signal: controller.signal,
+            })
+            if (!response.ok) {
+              throw new Error(`一言接口返回 HTTP ${response.status}`)
+            }
+            const data = await response.json()
+            candidates.push({
+              hitokoto: String(data.hitokoto),
+              from: String(data.from || data.from_who || t('home.unknownSource')),
+            })
+          } catch (error) {
+            if (!isCurrentRequest()) return
+            console.error('获取默认一言失败:', error)
+            if (candidates.length === 0) {
+              candidates.push({
+                hitokoto: t('home.hitokotoFallback'),
+                from: t('home.hitokotoFallbackFrom'),
+              })
+            }
+          }
+        }
+
+        if (isCurrentRequest()) {
+          if (candidates.length === 0) {
+            setHitokoto(null)
+          } else {
+            hitokotoIndexRef.current += 1
+            localStorage.setItem(HITOKOTO_INDEX_STORAGE_KEY, String(hitokotoIndexRef.current))
+            setHitokoto(candidates[index % candidates.length])
+          }
+        }
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId)
+        if (isCurrentRequest()) {
+          setHitokotoLoading(false)
+        }
+      }
+    },
+    [t]
+  )
+
+  // 获取下一条一言
+  const fetchHitokoto = useCallback(async () => {
+    await loadHitokoto(hitokotoSettingsRef.current)
+  }, [loadHitokoto])
+
+  const saveHitokotoSettings = useCallback(
+    async (settings: HitokotoSettings) => {
+      const normalizedSettings = normalizeHitokotoSettings(settings)
+      localStorage.setItem(HITOKOTO_SETTINGS_STORAGE_KEY, JSON.stringify(normalizedSettings))
+      hitokotoSettingsRef.current = normalizedSettings
+      setHitokotoSettings(normalizedSettings)
+      hitokotoIndexRef.current = 0
+      localStorage.setItem(HITOKOTO_INDEX_STORAGE_KEY, '0')
+      // 设置已写入本地，保存操作无需等待在线内容返回。
+      void loadHitokoto(normalizedSettings).catch((error: unknown) => {
+        console.error('保存后刷新一言失败:', error)
+      })
+    },
+    [loadHitokoto]
+  )
+
+  return {
+    hitokoto,
+    hitokotoLoading,
+    hitokotoSettings,
+    selfUpdateStatus,
+    versionCompatibility,
+    fetchHitokoto,
+    saveHitokotoSettings,
+  }
+}

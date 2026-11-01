@@ -55,12 +55,22 @@ class Router:
     # 🚦 解析入口
     # =========================================================
     def parse(self, msg):
+        # Source fields survive every parse branch, including follow-up events.
+        event = self._parse(msg)
+        if event:
+            for name in ('platform', 'source_platform', 'account_id', 'scope', 'user_id', 'group_id', 'group_name', 'native_session_id'):
+                if name in msg:
+                    event[name] = msg[name]
+        return event
+
+    def _parse(self, msg):
         wxid = msg.get("wxid")
         if self._is_blacklisted(wxid):
             return None
         if not self._is_in_time_slot():
             return None
-        if not self._is_target_group(msg.get("group")):
+        target = msg.get('group') or (msg.get('sessionId') if msg.get('platform') == 'qq' else '')
+        if not (self._is_target_group(target) or self._is_target_group(msg.get('group_id') or msg.get('sessionId'))):
             return None
 
         content = self._clean(msg.get("content", ""))
@@ -96,6 +106,12 @@ class Router:
 
         if self.prefix_mode == "strict" and not has_prefix:
             if not directed_to_bot:
+                raw_targets = get_raw_message_targets()
+                if raw_targets:
+                    return {"command": None, "args": None, "user": user, "group": group,
+                            "sessionId": session_id, "content": content, "type": "raw_auto",
+                            "raw": msg, "wxid": wxid, "prefix_used": False,
+                            "proactive_candidate": False, "auto_target": raw_targets}
                 return None
             if not self._check_rate_limit(wxid, "llm"):
                 return None
@@ -471,6 +487,9 @@ class Router:
         )
         return {
             "group": msg.get("group"),
+            "platform": msg.get("platform") or msg.get("source_platform") or "wechat",
+            "account_id": msg.get("account_id") or "",
+            "scope": msg.get("scope") or "",
             "sessionId": msg.get("sessionId"),
             "user": msg.get("user", "未知用户"),
             "wxid": msg.get("wxid"),
@@ -489,7 +508,8 @@ class Router:
             "prompt_visible": msg.get("prompt_visible", local_type not in {10000,10002}),
             "is_emoji": bool(msg.get("is_emoji") or msg.get("isEmoji") or local_type == 47),
             "is_voice": bool(msg.get("is_voice") or msg.get("isVoice") or local_type == 34),
-            "is_target_group": self._is_target_group(msg.get("group")),
+            "is_target_group": (self._is_target_group(msg.get("group"))
+                                or self._is_target_group(msg.get('group_id') or msg.get('sessionId'))),
             "has_prefix": self._has_prefix(content),
             "is_command_like": content.strip().startswith("/"),
             "is_at": bool(msg.get("is_at") or msg.get("isAt")),

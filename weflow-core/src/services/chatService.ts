@@ -50,6 +50,7 @@ export interface Message {
   senderUsername: string | null
   parsedContent: string
   rawContent: string
+  msgSource?: string
   content?: string  // 原始XML内容（与rawContent相同，供前端使用）
   // 表情包相关
   emojiCdnUrl?: string
@@ -4962,6 +4963,7 @@ class ChatService {
         senderUsername,
         parsedContent: '',
         rawContent: content,
+        msgSource: this.getMessageMentionSource(row),
         content,
         _db_path: sourceInfo.dbPath
       })
@@ -5211,6 +5213,7 @@ class ChatService {
         senderUsername,
         parsedContent: this.parseMessageContent(content, localType),
         rawContent: content,
+        msgSource: this.getMessageMentionSource(row),
         emojiCdnUrl,
         emojiMd5,
         quotedContent,
@@ -10066,6 +10069,15 @@ class ChatService {
     return String(source || '').trim()
   }
 
+  private getMessageMentionSource(row: Record<string, any>): string {
+    const candidates = this.buildFootprintSourceCandidates(row.source ?? row.msg_source ?? row.msgSource)
+    return candidates.find(value => value.toLowerCase().includes('atuserlist')) || candidates[0] || ''
+  }
+
+  getMessageAtUserIds(message: Message): string[] {
+    return this.extractAtUserListTokensFromSource(message.msgSource)
+  }
+
   private extractAtUserListTokensFromSource(source: unknown, prebuiltCandidates?: string[]): string[] {
     const tokens = new Set<string>()
     const sourceCandidates = Array.isArray(prebuiltCandidates) && prebuiltCandidates.length > 0
@@ -11592,6 +11604,7 @@ class ChatService {
       isSend: sendState.isSend,
       senderUsername,
       rawContent: rawContent,
+      msgSource: this.getMessageMentionSource(row),
       content: rawContent,  // 添加原始内容供视频MD5解析使用
       parsedContent: this.parseMessageContent(rawContent, localType),
       _db_path: sourceInfo.dbPath

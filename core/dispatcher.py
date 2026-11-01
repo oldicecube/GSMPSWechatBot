@@ -21,6 +21,8 @@ AUTO_DIR = "auto"
 class Dispatcher:
 
     def __init__(self):
+        from core.maibot_shell_registry import bind_dispatcher
+        bind_dispatcher(self)
         self.plugins = {}   # command -> module
         self.modules = {}   # all modules
         self.mtimes = {}
@@ -92,15 +94,34 @@ class Dispatcher:
             if str(item or "").strip()
         }
 
-    def _module_enabled_for_group(self, module_name, group_id):
+    def _module_enabled_for_group(self, module_name, group_id, context=None):
         """Combine the WebUI global switch with an optional group allowlist."""
         if not self.enabled_modules.get(module_name, True):
             return False
-        allowlist = self._group_plugin_allowlist(group_id)
-        return allowlist is None or str(module_name or "").casefold() in allowlist
+        from core.maibot_shell_registry import allowed
+        kind = 'automation' if str(module_name).startswith('auto:') else 'command'
+        basename = str(module_name).removeprefix('auto:')
+        if not allowed(f'gsmps.{kind}.{basename}', context or {'group': group_id}):
+            return False
+        if (context or {}).get('platform') == 'qq':
+            return True  # Native adapter/session controls own QQ admission.
+        allowlist = self._group_plugin_allowlist(self._context_group_key(context or {'group':group_id}))
+        return allowlist is None or basename.casefold() in allowlist or str(module_name).casefold() in allowlist
 
     def _context_feature_enabled(self, context, feature):
-        return self._group_feature_enabled((context or {}).get("group"), feature)
+        from src.platform_io.chat_features import context_override
+        override = context_override(context, 'plugins_enabled' if feature=='auto_plugins_enabled' else feature)
+        if override is not None:
+            return override
+        if (context or {}).get('platform') == 'qq':
+            return True  # Do not inherit WeChat display-name feature defaults.
+        return self._group_feature_enabled(self._context_group_key(context), feature)
+
+    def _context_group_key(self, context):
+        context = context or {}
+        features = self.config.get('group_features') or {}
+        stable_id = str(context.get('group_id') or context.get('sessionId') or '')
+        return stable_id if stable_id in features else context.get('group')
 
     # =========================================================
     # init plugins
@@ -110,6 +131,8 @@ class Dispatcher:
             return
 
         print("[PLUGIN] 初始化配置...")
+        from core.shell_plugin_config import apply_overrides
+        config = apply_overrides(config)
         self.config = config or {}
         # Plugins are initialized globally once; optional group allowlists are
         # enforced only while dispatching or broadcasting to each destination.
@@ -240,9 +263,9 @@ class Dispatcher:
 
         try:
             module = importlib.import_module(path)
-            self.modules[name] = module
+            self.modules['auto:' + name] = module
             self.auto_modules[name] = module
-            self.enabled_modules.setdefault(name, True)
+            self.enabled_modules.setdefault('auto:' + name, True)
 
             if getattr(module, "MATCH_RAW_MESSAGE", False):
                 register_raw_message_target(name)
@@ -251,6 +274,25 @@ class Dispatcher:
 
         except Exception as e:
             print(f"[AUTO LOAD ERROR] {fname}: {e}")
+
+    @staticmethod
+    def _auto_priority(module):
+        try:
+            return int(getattr(module, "AUTO_PRIORITY", 100))
+        except (TypeError, ValueError):
+            return 100
+
+    def _ordered_auto_dispatch_modules(self):
+        return sorted(
+            self.modules.items(),
+            key=lambda item: (self._auto_priority(item[1]), str(item[0])),
+        )
+
+    def _ordered_fallback_auto_modules(self):
+        return sorted(
+            self.auto_modules.items(),
+            key=lambda item: (self._auto_priority(item[1]), str(item[0])),
+        )
 
     # =========================================================
     # 🔥 核心 dispatch（融合 auto + command）
@@ -283,6 +325,27 @@ class Dispatcher:
         return None
 
     def dispatch(self, command, args, context):
+        from core.plugin_activity import legacy_plugin_scope, tag_plugin_result
+        platform = str(context.get('platform') or context.get('source_platform') or 'wechat')
+        if platform not in {'wechat', 'qq'}:
+            raise ValueError('Unsupported shell plugin platform')
+        plugins_only = platform == 'qq' or bool(context.get('_shell_plugins_only'))
+
+        # Decide before AUTO/command handlers can perform the requested action.
+        if not plugins_only and command and self.llm_service and getattr(self.llm_service, "native_ingress", False) and self._context_feature_enabled(context, "llm_enabled"):
+            from llm.core.wechat_translation import wire_fields, external_id
+            from src.common.bot_interaction_policy import find_bot_rule, select_plugin_refusal
+            fields = wire_fields(context)
+            user_id = str(fields.get("wxid") or fields.get("senderWxid") or "")
+            group_id = str(fields.get("sessionId") or fields.get("group_id") or fields.get("group") or "")
+            if find_bot_rule("wechat", user_id, group_id):
+                known_plugin = command in self.plugins or any(command in (getattr(m, "AUTO_COMMANDS", ()) or ()) for m in self.modules.values())
+                if not known_plugin:
+                    from src.plugin_runtime.component_query import component_query_service
+                    known_plugin = bool(component_query_service.find_command_by_text(str(command) + (" " + str(args) if args else "")))
+                if known_plugin and select_plugin_refusal("wechat", user_id, group_id, external_id(fields, group_id)):
+                    routed = {**context, "command": command, "args": args, "force_reply": True, "bot_plugin_request": True}
+                    return self.llm_service.ingest_context(routed)
 
         if self.debug:
             print("\n[DISPATCH]")
@@ -297,32 +360,42 @@ class Dispatcher:
         auto_command_consumed = False
         auto_plugins_enabled = self._context_feature_enabled(context, "auto_plugins_enabled")
         plugins_enabled = self._context_feature_enabled(context, "plugins_enabled")
-        llm_enabled = self._context_feature_enabled(context, "llm_enabled")
+        llm_enabled = not plugins_only and self._context_feature_enabled(context, "llm_enabled")
 
-        for name, module in self.modules.items():
+        for name, module in self._ordered_auto_dispatch_modules():
             if not auto_plugins_enabled:
                 break
             if getattr(module, "FALLBACK_ONLY", False):
                 continue
-            if not self._module_enabled_for_group(name, context.get("group")):
+            if not self._module_enabled_for_group(name, context.get("group"), context):
                 continue
             if auto_target:
                 if isinstance(auto_target, (list, tuple, set)):
-                    if name not in auto_target:
+                    if name.removeprefix('auto:') not in auto_target and name not in auto_target:
                         continue
-                elif name != auto_target:
+                elif name != auto_target and name.removeprefix('auto:') != auto_target:
                     continue
             auto_commands = getattr(module, "AUTO_COMMANDS", ()) or ()
             if command and command in {str(item).strip() for item in auto_commands}:
                 auto_command_handled = True
+                context['_shell_command_matched'] = name
                 auto_command_consumed = bool(
                     auto_command_consumed or getattr(module, "AUTO_COMMAND_CONSUMES", False)
                 )
             if hasattr(module, "handle_auto"):
                 try:
-                    res = module.handle_auto(context)
+                    with legacy_plugin_scope(self.llm_service, name, context) as execution:
+                        res = module.handle_auto(context)
+                    forwarded = isinstance(res, dict) and (res.get('forward_to_llm') or res.get('forward_batch_to_llm'))
+                    if not forwarded and (res is not None or execution.get('delivered')):
+                        from core.shell_plugin_config import mark_invoked
+                        kind = 'automation' if name.startswith('auto:') else 'command'
+                        mark_invoked(f'gsmps.{kind}.{name.removeprefix("auto:")}', context)
+                        context['_host_plugin_activity'] = dict(plugin_id='shell.' + name,
+                            kind='plugin_trigger', trigger_message_id=execution['trigger_message_id'],
+                            invocation_id=execution['invocation_id'])
                     if res is not None:
-                        auto_results.append(res)
+                        auto_results.append(tag_plugin_result(res, name, context, self.llm_service))
                 except Exception as e:
                     print("[AUTO ERROR]", name, e)
 
@@ -333,6 +406,18 @@ class Dispatcher:
         # 2. 无 command → 直接走 auto
         # =====================================================
         if not command:
+            if plugins_only:
+                return auto_results[-1] if auto_results else None
+            if self.llm_service and getattr(self.llm_service, "native_ingress", False) and llm_enabled:
+                # Native admission is independent of legacy batches/reservations. Preserve
+                # every transport field and leave reply timing and delivery to MaiBot.
+                auto_result = auto_results[-1] if auto_results else None
+                forwarded = isinstance(auto_result, dict) and (auto_result.get("forward_to_llm") or auto_result.get("forward_batch_to_llm"))
+                consumed = (bool(auto_results) or bool(context.get('_host_plugin_activity'))) and not forwarded
+                strict_observation = self.prefix_mode == "strict" and not any(context.get(k) for k in
+                    ("prefix_used", "directed_to_bot", "reply_to_bot", "is_at", "is_mentioned"))
+                native_result = self.llm_service.ingest_context(context, observe_only=consumed or strict_observation)
+                return auto_result if consumed else native_result
             if auto_results:
                 auto_result = auto_results[-1]
                 if isinstance(auto_result, dict) and auto_result.get("forward_batch_to_llm"):
@@ -397,6 +482,8 @@ class Dispatcher:
         # An opted-in auto command owns the message. This prevents a command
         # plugin with the same alias from enqueueing the same job a second time.
         if auto_command_consumed and auto_results:
+            if self.llm_service and getattr(self.llm_service, 'native_ingress', False) and llm_enabled:
+                self.llm_service.ingest_context(context, observe_only=True)
             return auto_results[-1]
 
         # =====================================================
@@ -411,7 +498,7 @@ class Dispatcher:
         if plugin and not self.enabled_modules.get(plugin_name, True):
             print(f"[PLUGIN BLOCK] module={plugin_name} disabled by WebUI")
             plugin = None
-        elif plugin and not self._module_enabled_for_group(plugin_name, context.get("group")):
+        elif plugin and not self._module_enabled_for_group(plugin_name, context.get("group"), context):
             print(f"[PLUGIN BLOCK] group={context.get('group')} module={plugin_name} disabled by group allowlist")
             plugin = None
         if plugin and not plugins_enabled:
@@ -433,22 +520,40 @@ class Dispatcher:
                 return auto_results[-1] if auto_results else None
             if not plugins_enabled:
                 return None
+            if plugins_only:
+                return auto_results[-1] if auto_results else None
+            if self.llm_service and getattr(self.llm_service, "native_ingress", False) and llm_enabled:
+                # Shell commands retain ownership; native /clear and registered
+                # plugin commands must still reach the native command chain.
+                return self.llm_service.ingest_context(context)
             return auto_results[-1] if auto_results else f"未知命令: {command}"
 
         # =====================================================
         # 5. 执行 command plugin
         # =====================================================
         try:
-            result = plugin.handle(args, context)
+            context['_shell_command_matched'] = plugin_name
+            if not plugins_only and self.llm_service and getattr(self.llm_service, 'native_ingress', False):
+                observed = {**context, '_host_plugin_activity': dict(plugin_id='shell.' + plugin_name,
+                    kind='plugin_trigger', trigger_message_id=str(context.get('serverId') or context.get('messageKey') or ''))}
+                self.llm_service.ingest_context(observed, observe_only=True)
+            with legacy_plugin_scope(self.llm_service, plugin_name, context):
+                result = plugin.handle(args, context)
+            if result is not None:
+                from core.shell_plugin_config import mark_invoked
+                mark_invoked('gsmps.command.' + plugin_name, context)
 
             if result is None:
                 return auto_results[-1] if auto_results else None
 
-            return result
+            return tag_plugin_result(result, plugin_name, context, self.llm_service)
 
         except Exception as e:
             print("[PLUGIN ERROR]", command, e)
-            return "插件执行异常"
+            from src.common.logger import get_logger
+            get_logger('gsmps_plugin_execution').exception('Shell command execution failed: command=%s platform=%s',
+                command, platform)
+            return tag_plugin_result("插件执行异常", plugin_name, context, self.llm_service)
 
     def _init_llm(self):
         try:
@@ -549,8 +654,8 @@ class Dispatcher:
             animation = result.get("animation")
             if animation:
                 try:
-                    from llm.security import get_emoji_path
-                    file_path = get_emoji_path(animation)
+                    from llm.core.maibot_emoji import get_native_emoji_path
+                    file_path = get_native_emoji_path(animation)
                     if file_path:
                         outcome = send(
                             target=target,
@@ -1101,6 +1206,9 @@ class Dispatcher:
         if not isinstance(result, dict):
             return None
 
+        if result.get("native_delivery_owned"):
+            return result  # The Platform IO driver already owns delivery; never send twice.
+
         return {
             "target": context.get("group") or context.get("user"),
             "messages": result.get("messages") or [],
@@ -1127,6 +1235,10 @@ class Dispatcher:
     ):
         """Flush a timer-owned proactive batch without waiting for a new event."""
         context = dict(context or {})
+        if context.get('platform') == 'qq':
+            # QQ timing and wakeups belong to the native runtime. A shell
+            # automation batch must never enter the WeChat translator again.
+            return
         if not self._context_feature_enabled(context, "llm_enabled"):
             return
         context["planned_send_delay_seconds"] = preview_delay_seconds("wechat_text")
@@ -1170,8 +1282,8 @@ class Dispatcher:
             animation = result.get("animation")
             if animation:
                 try:
-                    from llm.security import get_emoji_path
-                    file_path = get_emoji_path(animation)
+                    from llm.core.maibot_emoji import get_native_emoji_path
+                    file_path = get_native_emoji_path(animation)
                     if file_path:
                         outcome = send(
                             target=target,
@@ -1191,8 +1303,8 @@ class Dispatcher:
     def _dispatch_fallback_auto(self, context):
         if not self._context_feature_enabled(context, "auto_plugins_enabled"):
             return None
-        for name, module in self.auto_modules.items():
-            if not self._module_enabled_for_group(name, context.get("group")):
+        for name, module in self._ordered_fallback_auto_modules():
+            if not self._module_enabled_for_group(name, context.get("group"), context):
                 continue
             if not getattr(module, "FALLBACK_ONLY", False):
                 continue
@@ -1290,15 +1402,15 @@ class Dispatcher:
         result = False
 
         for target in target_groups:
-            if not self._group_feature_enabled(target, feature):
+            from core.shell_platform_bridge import context_for_target
+            from core.plugin_activity import legacy_plugin_scope
+            context = context_for_target(target)
+            if not self._context_feature_enabled(context, feature):
                 continue
-            if module_name and not self._module_enabled_for_group(module_name, target):
+            if module_name and not self._module_enabled_for_group(module_name, target, context):
                 continue
-            ok, _ = send(
-                target=target,
-                content=content,
-                mode="wechat_text"
-            )
+            with legacy_plugin_scope(self.llm_service, module_name or 'background', context):
+                ok, _ = send(target=target, content=content, mode="wechat_text")
             result = result or ok
 
         return result

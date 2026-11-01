@@ -77,7 +77,12 @@ class CapabilityService:
 
         # 3. 执行
         try:
-            result = await impl(plugin_id, capability, args)
+            from src.common.message_provenance import plugin_scope, matching_invocation
+            # RPC peer identity is authoritative; plugin arguments cannot replace it.
+            invocation = matching_invocation(plugin_id, args.get('stream_id'))
+            with plugin_scope(plugin_id, invocation_id=invocation.get('invocation_id') or str(envelope.request_id),
+                              trigger_message_id=invocation.get('trigger_message_id', '')):
+                result = await impl(plugin_id, capability, args)
             resp_payload = CapabilityResponsePayload(success=True, result=result)
             return envelope.make_response(payload=resp_payload.model_dump())
         except RPCError as e:

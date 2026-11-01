@@ -46,6 +46,7 @@ from src.llm_models.openai_compat import (
     build_openai_compatible_client_config,
     split_openai_request_overrides,
     validate_image_embedding_transport,
+    normalize_chat_system_messages,
 )
 from src.llm_models.payload_content.context_item import (
     AssistantMessageItem,
@@ -1452,8 +1453,13 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
         # api_key 为空表示鉴权不交给 SDK（none/header/query 或自定义 Bearer 前缀）；
         # 此时若没有自定义 Authorization 头覆盖占位密钥，每次请求都要显式省略它
         self._omit_sdk_authorization = not client_config.api_key and _AUTHORIZATION_HEADER not in default_headers
+        http_options = {"verify": get_shared_ssl_context()}
+        if api_provider.embedding_fallback_urls:
+            from .embedding_failover import EmbeddingFailoverTransport
+            http_options['transport'] = EmbeddingFailoverTransport(api_provider.base_url,
+                api_provider.embedding_fallback_urls, verify=http_options['verify'])
         self.client = AsyncOpenAI(
-            http_client=DefaultAsyncHttpxClient(verify=get_shared_ssl_context()),
+            http_client=DefaultAsyncHttpxClient(**http_options),
             api_key=client_config.api_key or _SDK_AUTH_PLACEHOLDER_API_KEY,
             organization=api_provider.organization,
             project=api_provider.project,
@@ -1578,6 +1584,10 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 else _sanitize_messages_for_toolless_request(request.context_items)
             )
             messages_payload: List[ChatCompletionMessageParam] = _convert_messages(request_messages)
+            if self.api_provider.system_messages_at_start:
+                messages_payload = cast(
+                    List[ChatCompletionMessageParam], normalize_chat_system_messages(messages_payload)
+                )
             tools_payload: List[ChatCompletionToolParam] | None = (
                 _convert_tool_options(request.tool_options) if request.tool_options else None
             )

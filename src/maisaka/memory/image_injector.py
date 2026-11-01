@@ -53,7 +53,13 @@ class ImageMemoryInjector:
             )
 
         # 沿用记忆服务与模型请求的超时机制，避免把检索超时当作没有匹配。
-        results = await asyncio.gather(*(search_one(*query) for query in queries[:3]))
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*(search_one(*query) for query in queries[:3])),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            return ""
 
         lines = [IMAGE_MEMORY_REFERENCE_MARKER, "以下内容来自当前图片的历史同图或相似图记录，仅作为回答依据。"]
         seen: set[str] = set()

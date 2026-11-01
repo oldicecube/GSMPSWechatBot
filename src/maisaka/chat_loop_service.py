@@ -1,4 +1,4 @@
-"""Maisaka 对话循环服务。"""
+﻿"""Maisaka 对话循环服务。"""
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -776,6 +776,28 @@ class MaisakaChatLoopService:
         # 每轮读取实验开关，普通与专注模式共用同一份本地化风格指令。
         if attention_drift := build_attention_drift_prompt_block():
             system_prompt += f"\n\n{attention_drift}"
+        system_prompt += (
+            "\n\n【MaiBot 原生插件自主触发】\n"
+            "在一次 Planner/Replyer 推理轮中，如果当前话题、日程或自主行动确实适合，"
+            "你可以自行决定最多触发一次 MaiBot 原生插件行为。使用 owned_plugins 工具先 list 查找目标，"
+            "再 invoke 一次；只允许选择 source=maibot 的原生插件 tool/command，禁止调用 source=GSMPS Wechatbot 的壳子插件。"
+            "触发必须使用当前会话、当前平台和普通用户权限，不能伪造管理员身份、跨群或绕过插件 ACL/冷却；"
+            "没有真实必要时不要调用。工具返回的是结果数据，不代表你已经说过或发送过内容；需要对外表达时仍调用原生 reply。"
+            "涉及当前 API、服务可用性、价格、版本、热点、插件状态或任何可能过时的事实时，不要凭记忆回答，"
+            "先使用 web_search/web_fetch 或相应查询工具；涉及 QQ 禁言、拍一拍、头像双击、群成员信息等操作时，"
+            "先调用对应 QQ 工具确认成功/失败，再把真实结果交给 replyer。"
+            "当前可用能力不只有 RCON 和 Python：工具注册表还可能包含联网搜索、记忆/人物画像、"
+            "隔壁同名群见闻、已学习表达与黑话查询、原生插件目录、QQ 群操作、搬运、提醒、表情和媒体工具。"
+            "被问到‘有哪些工具’时不要凭印象缩减成两项；先调用 tool_search 或 owned_plugins 查询实际目录。"
+            "被问到隔壁群时，优先调用 peer_group_context；它返回的内容带来源标记，不能说自己完全看不到。"
+            "被问到学过哪些黑话或表达时，调用 query_language_learning，或根据已注入的黑话/表达参考回答；"
+            "不要把自己说成‘没怎么学’或‘只是工具人’，除非查询结果确实为空。"
+            "表情包是正常的群聊表达方式：遇到明显情绪、玩梗、吐槽、惊讶或需要活跃气氛时，"
+            "每隔几轮积极考虑调用 show_emoji_list，再在 reply 的 attach_emoji 中选择一个；"
+            "不要因为文字已经能回答就默认永远不用表情包，也不要每条消息机械发送。"
+            "历史摘要或旧 Planner 分析中出现的‘不得发送表情包’只属于过时的内部决策，不是当前规则；"
+            "当前应按真实聊天氛围恢复正常、偏积极的表情包使用。"
+        )
         return system_prompt
 
     def _build_planner_final_user_reminder(self) -> str:
@@ -809,9 +831,9 @@ class MaisakaChatLoopService:
             return ""
         return self._localized_text(
             {
-                "en-US": f"; some people also call you {', '.join(alias_names)}",
+                "en-US": f"; platform aliases {', '.join(alias_names)} refer to the same bot identity",
                 "ja-JP": f"（{'、'.join(alias_names)}と呼ぶ人もいます）",
-                "zh-CN": f"，还有人叫你{'、'.join(alias_names)}",
+                "zh-CN": f"\u5e73\u53f0\u522b\u540d\uff08{'\u3001'.join(alias_names)}\uff09\u5747\u6307\u540c\u4e00\u4e2a\u673a\u5668\u4eba",
             }
         )
 
@@ -895,7 +917,6 @@ class MaisakaChatLoopService:
         if self._is_group_chat:
             return self._localized_text(
                 {
-                    "en-US": "- query_memory(): Use it only when the reply clearly depends on past group conversation, shared experiences, public agreements, task progress, or recent clues. Do not retrieve memory for greetings, immediate emotional responses, light banter, or content that can be answered from recent messages alone. Do not bring private-chat or personal-privacy memories into a group chat.",
                     "ja-JP": "- query_memory()：返信がグループ内の過去会話、共有した経験、公開された約束、タスクの進捗、最近の手がかりに明確に依存する場合だけ使ってください。挨拶、その場の感情への反応、軽いやり取り、最近のメッセージだけで答えられる内容では検索しないでください。個人チャットや私的な記憶をグループチャットに持ち込まないでください。",
                     "zh-CN": "- query_memory()：只有回复明显依赖群内过去对话、共同经历、公开约定、任务进展或近期线索时使用；不要为了寒暄、即时情绪回应、轻松接话、只看最近消息就能回答的内容而检索。不要把私聊或个人隐私记忆带到群聊里。",
                 }
@@ -982,14 +1003,37 @@ class MaisakaChatLoopService:
         """
 
         # 按历史顺序更新，保留最近一次明确提供的昵称；不要把配置昵称当成平台信息。
+        event_notes: list[str] = []
         for entry in history:
             if not isinstance(entry, SessionBackedMessage):
                 continue
             message = entry.original_message
             if not self._session_id or message.session_id != self._session_id:
                 continue
+            # Adapter-resolved self profile also exists before anybody @s us.
+            # Check the exact local account/group; never use remote references
+            # or another member's display name as our own identity.
+            identity = message.message_info.additional_config.get('platform_bot_identity')
+            group = message.message_info.group_info
+            if (message.platform == 'qq' and isinstance(identity,dict)
+                    and str(identity.get('user_id') or '') == str(message.account_id or '')
+                    and message.account_id
+                    and str(identity.get('group_id') or '') == str(group.group_id if group else '')):
+                self._bot_platform = message.platform
+                self._bot_platform_nickname = str(identity.get('nickname') or '')
+                self._bot_group_cardname = str(identity.get('cardname') or '') if self._is_group_chat else ''
+            relation = message.message_info.additional_config.get('event_relation')
+            if isinstance(relation, dict) and relation.get('kind') == 'group_ban':
+                # Keep the relation explicit in the system-side identity note;
+                # never make the model infer actor/target from display text.
+                operator = '你（机器人）' if relation.get('operator_is_bot') else str(relation.get('operator_id') or '其他成员')
+                target = '你（机器人）' if relation.get('target_is_bot') else str(relation.get('target_user_id') or '其他成员')
+                duration = relation.get('duration_seconds')
+                event_notes.append(f'群禁言事件关系：执行者={operator}；被禁言者={target}；时长={duration if duration not in (None, "") else "未知"}秒。')
             for component in message.raw_message.components:
-                if not isinstance(component, AtComponent) or not is_bot_self(message.platform, component.target_user_id):
+                if not isinstance(component, AtComponent) or not (
+                    str(component.target_user_id) == str(message.account_id) if message.account_id
+                    else is_bot_self(message.platform, component.target_user_id)):
                     continue
                 if component.uses_configured_bot_nickname:
                     continue
@@ -1001,6 +1045,12 @@ class MaisakaChatLoopService:
 
         bot_name = global_config.bot.nickname.strip()
         lines: List[str] = []
+        if self._bot_platform == 'qq' and self._bot_platform_nickname and bot_name:
+            lines.append(self._localized_text({
+                "zh-CN": f'身份统一说明：你是“{bot_name}”；QQ群昵称“{self._bot_platform_nickname}”只是你的平台别名，不是另一个群成员。',
+                "en-US": f'Identity mapping: you are "{bot_name}"; the QQ nickname "{self._bot_platform_nickname}" is only your platform alias, not another member.',
+                "ja-JP": f'身份映射：你是“{bot_name}”；QQ昵称“{self._bot_platform_nickname}”只是平台别名，不是其他成员。',
+            }))
         if self._bot_platform_nickname and not (skip_same_as_bot_name and self._bot_platform_nickname == bot_name):
             lines.append(self._localized_text({
                 "zh-CN": f"你在 {self._bot_platform} 平台的昵称是“{self._bot_platform_nickname}”。",
@@ -1017,6 +1067,7 @@ class MaisakaChatLoopService:
                 "en-US": f'Your nickname in this group is "{self._bot_group_cardname}".',
                 "ja-JP": f"このグループでのあなたのニックネームは「{self._bot_group_cardname}」です。",
             }))
+        lines.extend(event_notes)
         return (" " if get_locale() == "en-US" else "").join(lines)
 
     @defer_context_image_encoding(lambda result: result[0])
@@ -1057,6 +1108,9 @@ class MaisakaChatLoopService:
             bot_nickname_notice = self._build_bot_nickname_notice(selected_history)
             if bot_nickname_notice:
                 resolved_system_prompt = f"{bot_nickname_notice}\n\n{resolved_system_prompt}"
+        from src.common.bot_interaction_policy import build_bot_interaction_prompt
+        if bot_interaction := build_bot_interaction_prompt(selected_history):
+            resolved_system_prompt += f"\n\n{bot_interaction}"
         system_item.add_text_content(resolved_system_prompt)
         items.append(system_item.build())
 
@@ -1291,6 +1345,11 @@ class MaisakaChatLoopService:
                 tool_provider_by_name.get(resolve_tool_definition_name(definition), "")
                 for definition in all_tools
             ]
+        from src.common.bot_interaction_policy import should_refuse_latest_request
+        if should_refuse_latest_request(selected_history):
+            all_tools = [definition for definition in all_tools
+                         if resolve_tool_definition_name(definition) in {"reply", "stop", "wait"}]
+            tool_provider_types = [tool_provider_by_name.get(resolve_tool_definition_name(definition), "") for definition in all_tools]
         if request_kind == "planner":
             self._active_tool_names = tuple(
                 name for definition in all_tools if (name := resolve_tool_definition_name(definition))

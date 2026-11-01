@@ -1,0 +1,215 @@
+--- a/plugins/mai-life/plugin.py
++++ b/plugins/mai-life/plugin.py
+@@ -722,6 +722,24 @@
+                 result[session_id] = text
+         return result
+ 
++    @staticmethod
++    def _learning_message_allowed(message: dict, rules: list) -> bool:
++        if not isinstance(message, dict) or message.get("is_notify"):
++            return False
++        info = message.get("message_info") or {}
++        metadata = info.get("additional_config") or {}
++        if metadata.get("learnable") is False or (metadata.get("wechat") or {}).get("learnable") is False:
++            return False
++        platform = str(message.get("platform") or "")
++        user = str((info.get("user_info") or {}).get("user_id") or "")
++        group = str((info.get("group_info") or {}).get("group_id") or "")
++        for rule in rules:
++            if not isinstance(rule, dict):
++                raise TypeError("Invalid learning policy rule")
++            if rule.get("platform") == platform and str(rule.get("user_id")) == user and (not rule.get("group_id") or str(rule["group_id"]) == group):
++                return False
++        return True
++
+     async def _resolve_history(self, stream_ids: list[str] | None = None) -> str:
+         config = self.config.generation
+         if not config.include_history or config.history_message_limit <= 0:
+@@ -759,6 +777,19 @@
+                 continue
+             if not messages:
+                 continue
++            # Persistent life generation is learning: honor the host learning policy.
++            try:
++                rules = await self.ctx.config.get("learning.excluded_users", [])
++                if not isinstance(rules, list):
++                    raise TypeError("learning.excluded_users must be a list")
++                if isinstance(messages, dict):
++                    messages = messages.get("messages", [])
++                messages = [m for m in messages if self._learning_message_allowed(m, rules)]
++            except Exception:
++                logger.exception("Cannot verify learning policy; skipping history: %s", stream_id)
++                continue
++            if not messages:
++                continue
+             try:
+                 readable = await self.ctx.message.build_readable(messages)
+             except Exception:
+--- a/plugins/hot-topics/plugin.py
++++ b/plugins/hot-topics/plugin.py
+@@ -9,15 +9,7 @@
+ 
+ import random
+ import re
+-import sys
+-from pathlib import Path
+-
+-# 插件运行时可能不会把插件目录加入 sys.path，这里手动保证能找到同目录的 hot_core
+-_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+-if _PLUGIN_DIR not in sys.path:
+-    sys.path.insert(0, _PLUGIN_DIR)
+-
+-import hot_core  # noqa: E402
++from . import hot_core
+ 
+ from typing import Any, Literal
+ 
+@@ -438,6 +430,21 @@
+                 result[gid] = kws
+         return result
+ 
++    async def _wechat_target_stream(self, target: str, *, group: bool):
++        """Resolve typed targets without treating WeChat IDs as QQ accounts."""
++        value = str(target).strip()
++        parts = value.split(":", 2)
++        if len(parts) == 3 and parts[1] in {"group", "private"}:
++            platform, kind, value = parts
++            if (kind == "group") != group:
++                return None
++        elif len(parts) == 2 and parts[0] in {"wechat", "qq"}:
++            platform, value = parts
++        else:
++            platform = "wechat" if value.endswith("@chatroom") or value.startswith("wxid_") else "qq"
++        resolver = self.ctx.chat.get_stream_by_group_id if group else self.ctx.chat.get_stream_by_user_id
++        return await resolver(value, platform=platform)
++
+     async def _resolve_target_streams(self) -> tuple[list[str], dict[str, str]]:
+         """把配置里的 QQ 群号/私聊 QQ 号解析成聊天流 ID，并返回 stream_id->群号 映射。"""
+         targets: list[str] = []
+@@ -445,7 +452,7 @@
+         # 全局生效模式：自动发现所有聊天流（无需手动填列表）
+         if getattr(self.config.ambient, "apply_to_all", False):
+             try:
+-                streams = await self.ctx.chat.get_all_streams("qq")
++                streams = await self.ctx.chat.get_all_streams("all_platforms")
+                 for s in streams or []:
+                     if isinstance(s, dict):
+                         sid = s.get("stream_id") or s.get("session_id") or s.get("id")
+@@ -469,10 +476,10 @@
+             if not gid:
+                 continue
+             try:
+-                stream = await self.ctx.chat.get_stream_by_group_id(gid)
++                stream = await self._wechat_target_stream(gid, group=True)
+                 sid = None
+                 if isinstance(stream, dict):
+-                    sid = stream.get("stream_id") or stream.get("id") or stream.get("stream")
++                    sid = stream.get("stream_id") or stream.get("session_id") or stream.get("id") or stream.get("stream")
+                 else:
+                     sid = getattr(stream, "stream_id", None) or getattr(stream, "id", None)
+                 if sid:
+@@ -487,10 +494,10 @@
+             if not uid:
+                 continue
+             try:
+-                stream = await self.ctx.chat.get_stream_by_user_id(uid)
++                stream = await self._wechat_target_stream(uid, group=False)
+                 sid = None
+                 if isinstance(stream, dict):
+-                    sid = stream.get("stream_id") or stream.get("id") or stream.get("stream")
++                    sid = stream.get("stream_id") or stream.get("session_id") or stream.get("id") or stream.get("stream")
+                 else:
+                     sid = getattr(stream, "stream_id", None) or getattr(stream, "id", None)
+                 if sid:
+@@ -570,9 +577,9 @@
+                 for gid in selected:
+                     sid = None
+                     try:
+-                        stream = await self.ctx.chat.get_stream_by_group_id(gid)
++                        stream = await self._wechat_target_stream(gid, group=True)
+                         if isinstance(stream, dict):
+-                            sid = stream.get("stream_id") or stream.get("id") or stream.get("stream")
++                            sid = stream.get("stream_id") or stream.get("session_id") or stream.get("id") or stream.get("stream")
+                         else:
+                             sid = getattr(stream, "stream_id", None) or getattr(stream, "id", None)
+                     except Exception as exc:  # noqa: BLE001
+--- a/plugins/cateye_mai_personality_swap/plugin.py
++++ b/plugins/cateye_mai_personality_swap/plugin.py
+@@ -720,7 +720,7 @@
+             return
+         self._last_stream_refresh = now
+         try:
+-            streams = await self.ctx.chat.get_all_streams()
++            streams = await self.ctx.chat.get_all_streams("all_platforms")
+         except Exception as exc:
+             self._log("debug", f"拉取聊天流失败（映射将从消息流量中逐步补齐）：{exc}")
+             return
+@@ -1679,7 +1679,7 @@
+             return True
+         # 用户侧：调用方与名单两侧都经 plain_id 归一为纯 ID 后比对
+         # （'qq:10001' 与 '10001' 视为同一人；无法归一的非纯数字 ID 不放行）
+-        caller_pid = plain_id(user_id)
++        caller_pid = plain_id(user_id, platform=platform)
+         if not caller_pid:
+             return False
+         admin_ids = await self._admin_user_ids()
+@@ -2183,6 +2183,14 @@
+         if nickname:
+             self._log("debug", f"bot 昵称缓存：{nickname}")
+         account = (await self._read_official("bot.qq_account")).strip()
++        try:
++            platforms = await self.ctx.config.get("bot.platforms", [])
++            for item in platforms or []:
++                if isinstance(item, str) and item.startswith("wechat:"):
++                    account = item.split(":", 1)[1]
++                    break
++        except Exception:
++            pass
+         self._bot_user_id = account
+         if account:
+             self._log("debug", f"bot 账号缓存：{account}")
+--- a/plugins/cateye_mai_personality_swap/admin_util.py
++++ b/plugins/cateye_mai_personality_swap/admin_util.py
+@@ -15,23 +15,28 @@
+ from typing import Any, Iterable, List
+ 
+ 
+-def plain_id(entry: Any) -> str:
+-    """任意形态的 ID 条目 → 纯数字 ID 字符串；无法解析返回空串。
+-
+-    支持：'qq:10001' / '平台:10001' / '10001' / 数字 / {'user_id': ...} 等。
+-    """
++def plain_id(entry: Any, platform: str = "") -> str:
++    """Normalize identities, preserving platform boundaries for non-QQ users."""
+     if isinstance(entry, dict):
++        platform = str(entry.get("platform") or platform)
+         entry = entry.get("user_id") or entry.get("id") or ""
+-    if isinstance(entry, int):
+-        return str(entry)
+-    if not isinstance(entry, str):
++    if not isinstance(entry, (str, int)) or isinstance(entry, bool):
+         return ""
+-    s = entry.strip()
+-    if not s:
+-        return ""
+-    if ":" in s:
+-        s = s.rsplit(":", 1)[1].strip()
+-    return s if s.isdigit() else ""
++    value = str(entry).strip()
++    if ":" in value:
++        prefix, value = value.split(":", 1)
++        if platform and prefix != platform:
++            return ""
++        platform = prefix
++        if value.startswith("user:") or value.startswith("private:"):
++            value = value.split(":", 1)[1]
++    if not platform:
++        platform = "wechat" if value.startswith("wxid_") else "qq"
++    if platform == "qq":
++        return value if value.isdigit() else ""
++    if platform == "wechat" and value and all(c.isalnum() or c in "_-." for c in value):
++        return "wechat:" + value
++    return ""
+ 
+ 
+ def collect_admins(host_permissions: Any, config_admins: Any) -> List[str]:

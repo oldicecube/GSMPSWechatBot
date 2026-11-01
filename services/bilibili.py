@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import re
 import time
+from html import unescape
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -44,9 +46,13 @@ QUALITY_LABELS = {
     125: "HDR",
 }
 
-BVID_RE = re.compile(r"BV[0-9A-Za-z]{10}", re.IGNORECASE)
-AVID_RE = re.compile(r"av(\d+)", re.IGNORECASE)
-B23_RE = re.compile(r"https?://b23\.tv/[0-9A-Za-z]+")
+BVID_RE = re.compile(r"(?<![A-Za-z0-9])BV[0-9A-Za-z]{10}(?![A-Za-z0-9])", re.IGNORECASE)
+AVID_RE = re.compile(r"(?<![A-Za-z0-9])av(\d+)(?![A-Za-z0-9])", re.IGNORECASE)
+B23_RE = re.compile(
+    r"(?<![A-Za-z0-9_./:@%+-])(?:https?://)?b23\.tv/[0-9A-Za-z]+/?(?![0-9A-Za-z_/%-])"
+    r"(?:\?[^\s<>\"'{}\[\]（）【】《》，。！？、；：]*)?",
+    re.IGNORECASE,
+)
 BILI_URL_RE = re.compile(r"https?://(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv)/\S*", re.IGNORECASE)
 PAGE_RE = re.compile(r"[?&]p=(\d+)")
 
@@ -126,15 +132,64 @@ def _api_get(url, params):
     return payload.get("data") or {}
 
 
-def _resolve_short_link(url):
-    """b23.tv 短链本身不含 bvid，跟一次跳转才能拿到。"""
+def extract_short_link(text):
+    """Local-only scan of share text, including scheme-less WeChat links."""
+    match = B23_RE.search(unescape(str(text or '')))
+    if not match:
+        return ''
+    value = match.group(0).rstrip('.,;:!?)]}')
+    if not value.lower().startswith(('http://', 'https://')):
+        value = 'https://' + value
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ''))
+
+
+def _short_redirect_target(url):
+    """Validate every hop before making a request; final pages are not fetched."""
     try:
-        response = requests.get(
-            url.strip(), headers=_headers(), timeout=_timeout(), allow_redirects=True
-        )
-    except requests.RequestException as exc:
-        raise BilibiliError(f"短链解析失败（{exc.__class__.__name__}）") from exc
-    return str(response.url or "")
+        parsed = urlsplit(url)
+        host = (parsed.hostname or '').lower()
+        valid = (parsed.scheme in ('http', 'https') and not parsed.username and not parsed.password
+                 and parsed.port in (None, 80, 443))
+    except ValueError:
+        valid = False
+    if not valid or not (host == 'b23.tv' or host == 'bilibili.com' or host.endswith('.bilibili.com')):
+        raise BilibiliError('短链跳转地址不受支持')
+    return host
+
+
+def _resolve_short_link(url):
+    """Read bounded HTTP Location hops without downloading Bilibili HTML."""
+    current = url
+    visited = set()
+    deadline = time.monotonic() + min(20.0, _timeout())
+    for _ in range(5):
+        host = _short_redirect_target(current)
+        if host != 'b23.tv':
+            return current
+        if current in visited:
+            raise BilibiliError('短链出现循环跳转')
+        visited.add(current)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BilibiliError('短链解析超时')
+        try:
+            response = requests.get(current, headers=_headers(), timeout=remaining,
+                                    allow_redirects=False, stream=True)
+        except requests.RequestException as exc:
+            raise BilibiliError(f"短链解析失败（{exc.__class__.__name__}）") from exc
+        try:
+            if response.status_code >= 400:
+                raise BilibiliError(f'短链返回 HTTP {response.status_code}')
+            location = response.headers.get('Location')
+            if response.status_code not in (301, 302, 303, 307, 308) or not location:
+                raise BilibiliError('短链无效或已失效（未返回视频跳转地址）')
+            current = urljoin(current, location)
+            if _short_redirect_target(current) != 'b23.tv':
+                return current
+        finally:
+            response.close()
+    raise BilibiliError('短链跳转次数过多')
 
 
 def extract_identifier(text):
@@ -154,6 +209,24 @@ def extract_identifier(text):
         except (TypeError, ValueError):
             page = 1
 
+    short_url = extract_short_link(raw)
+    if short_url:
+        final_url = _resolve_short_link(short_url)
+        # Parse the destination path only. A live/profile/article URL with a BV
+        # in a query parameter is not an ordinary downloadable video.
+        parsed = urlsplit(final_url)
+        video = re.fullmatch(r'/video/(BV[0-9A-Za-z]{10}|av\d+)/?', parsed.path, re.IGNORECASE)
+        identifier = extract_identifier(video.group(1)) if video else None
+        if identifier:
+            # 短链自带的分P参数优先，否则沿用调用方给的
+            final_page = PAGE_RE.search('?' + parsed.query)
+            if final_page:
+                identifier['page'] = max(1, int(final_page.group(1)))
+            else:
+                identifier["page"] = page
+            return identifier
+        raise BilibiliError("不支持的短链类型（可能是番剧或直播）")
+
     bv_match = BVID_RE.search(raw)
     if bv_match:
         raw_bvid = bv_match.group(0)
@@ -163,17 +236,6 @@ def extract_identifier(text):
     av_match = AVID_RE.search(raw)
     if av_match:
         return {"bvid": None, "aid": int(av_match.group(1)), "page": page}
-
-    short_match = B23_RE.search(raw)
-    if short_match:
-        final_url = _resolve_short_link(short_match.group(0))
-        identifier = extract_identifier(final_url)
-        if identifier:
-            # 短链自带的分P参数优先，否则沿用调用方给的
-            if not PAGE_RE.search(final_url):
-                identifier["page"] = page
-            return identifier
-        raise BilibiliError("不支持的短链类型（可能是番剧或直播）")
 
     return None
 

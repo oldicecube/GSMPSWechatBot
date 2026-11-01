@@ -54,13 +54,18 @@ def get_person_id(platform: str, user_id: Union[int, str]) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def get_person_id_by_person_name(person_name: str) -> str:
+def get_person_id_by_person_name(person_name: str, platform: str = '') -> str:
     """根据用户名获取用户ID"""
     try:
         with get_db_session(auto_commit=False) as session:
-            statement = select(PersonInfo.person_id).where(col(PersonInfo.person_name) == person_name).limit(1)
-            person_id = session.exec(statement).first()
-            return str(person_id) if person_id else ""
+            from sqlalchemy import or_
+            statement = select(PersonInfo.person_id).where(or_(col(PersonInfo.person_name) == person_name,
+                col(PersonInfo.user_nickname) == person_name))
+            if platform:
+                statement = statement.where(col(PersonInfo.platform) == platform)
+            ids = set(session.exec(statement.limit(2)).all())
+            # A nickname is an alias, never sufficient to merge two accounts.
+            return str(next(iter(ids))) if len(ids) == 1 else ""
     except Exception as e:
         logger.error(f"根据用户名 {person_name} 获取用户ID时出错: {e}")
         return ""
@@ -76,15 +81,10 @@ def resolve_person_id_for_memory(
     """解析长期记忆检索/写入使用的人物 ID。
 
     解析顺序：
-    1. 优先按 `person_name` 映射数据库中的 `person_id`
-    2. 回退到 `platform + user_id` 生成稳定 `person_id`
+    1. 提供稳定 ID 时，按 `platform + user_id` 生成 `person_id`
+    2. 没有稳定 ID 时，按唯一的 `person_name` 别名查询
     3. 若 `strict_known=True`，则要求该 `person_id` 已被认识
     """
-    clean_name = str(person_name or "").strip()
-    if clean_name:
-        if by_name := get_person_id_by_person_name(clean_name):
-            return by_name
-
     clean_platform = str(platform or "").strip()
     clean_user_id = str(user_id or "").strip()
     if clean_platform and clean_user_id:
@@ -92,6 +92,10 @@ def resolve_person_id_for_memory(
         if strict_known and not is_person_known(person_id=candidate):
             return ""
         return candidate
+
+    clean_name = str(person_name or "").strip()
+    if clean_name:
+        return get_person_id_by_person_name(clean_name, clean_platform)
 
     return ""
 
@@ -214,9 +218,16 @@ class Person:
         if is_person_known(person_id=person_id):
             logger.debug(f"用户 {nickname} 已存在")
             person = Person(person_id=person_id)
+            nickname_changed = person.nickname != nickname
+            if nickname_changed:
+                # Keep the established/personally assigned person_name and all
+                # memory under the same ID, while recording the current alias.
+                person.nickname = nickname
             # 如果是群聊，更新群昵称
             if group_id and group_nick_name:
                 person.add_group_nick_name(group_id, group_nick_name)
+            elif nickname_changed:
+                person.sync_to_database()
             return person
 
         # 创建Person实例
@@ -282,16 +293,16 @@ class Person:
 
         if person_id:
             self.person_id = person_id
+        elif platform and user_id:
+            self.person_id = get_person_id(platform, user_id)
+            self.user_id = user_id
+            self.platform = platform
         elif person_name:
             self.person_id = get_person_id_by_person_name(person_name)
             if not self.person_id:
                 self.is_known = False
                 logger.warning(f"根据用户名 {person_name} 获取用户ID时，不存在用户{person_name}")
                 return
-        elif platform and user_id:
-            self.person_id = get_person_id(platform, user_id)
-            self.user_id = user_id
-            self.platform = platform
         else:
             logger.error("Person 初始化失败，缺少必要参数")
             raise ValueError("Person 初始化失败，缺少必要参数")

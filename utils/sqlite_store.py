@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 
 
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+BASE_DIR = os.environ.get('MAIBOT_INSTANCE_DIR') or os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "bot.sqlite3")
 
@@ -550,6 +550,10 @@ def player_stats_migrate_from_json():
 
 def user_points_get(wxid):
     """获取用户积分，不存在返回 None"""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return None
     wxid = str(wxid).strip()
     with _LOCK:
         with _connect() as conn:
@@ -564,6 +568,10 @@ def user_points_get(wxid):
 
 def user_points_add(wxid, amount):
     """增加用户积分，返回新积分值。用户不存在则自动创建"""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return 0.0
     wxid = str(wxid).strip()
     amount = float(amount)
     now = datetime.now().isoformat()
@@ -589,6 +597,10 @@ def user_points_add(wxid, amount):
 
 def user_points_try_spend(wxid, amount):
     """Atomically spend points only when the user has sufficient balance."""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return False, 0.0
     wxid = str(wxid or "").strip()
     amount = float(amount)
     if not wxid or amount < 0:
@@ -605,6 +617,10 @@ def user_points_try_spend(wxid, amount):
 
 def user_points_set(wxid, amount):
     """设置用户积分（覆盖），返回新积分值"""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return 0.0
     wxid = str(wxid).strip()
     amount = float(amount)
     now = datetime.now().isoformat()
@@ -626,6 +642,10 @@ def user_points_set(wxid, amount):
 
 def user_points_set_sign(wxid):
     """设置签到时间为现在"""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return False
     wxid = str(wxid).strip()
     now = datetime.now().isoformat()
 
@@ -645,6 +665,10 @@ def user_points_set_sign(wxid):
 
 def user_points_get_sign_date(wxid):
     """获取上次签到日期（date 对象或 None）"""
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        return None
     wxid = str(wxid).strip()
     with _LOCK:
         with _connect() as conn:
@@ -664,7 +688,8 @@ def user_points_all_wxids():
     with _LOCK:
         with _connect() as conn:
             rows = conn.execute("SELECT wxid FROM user_points").fetchall()
-    return [r[0] for r in rows]
+    from utils.account_identity import bound_user
+    return sorted({key for r in rows if (key := bound_user(r[0]))})
 
 
 # ============================================================
@@ -672,6 +697,8 @@ def user_points_all_wxids():
 # ============================================================
 
 def sleep_get_active(wxid):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     with _LOCK:
         with _connect() as conn:
             row = conn.execute(
@@ -684,6 +711,8 @@ def sleep_get_active(wxid):
 
 
 def sleep_start(wxid, nickname, group_id, start_at=None):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     now = start_at or datetime.now().isoformat()
     with _LOCK:
         with _connect() as conn:
@@ -710,6 +739,46 @@ def sleep_finish(record_id, status, end_at, duration_seconds, score=0.0,
     return sleep_get_by_id(record_id)
 
 
+def sleep_start_once(wxid, nickname, group_id, start_at, period_start, period_end):
+    """One check-in across bound adapters and concurrent group messages."""
+    from contextlib import closing
+    from utils.account_identity import bound_user
+    with _LOCK:
+        uid = bound_user(wxid)
+        if not uid:
+            return None
+        with closing(_connect()) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute("SELECT 1 FROM sleep_records WHERE wxid=? AND (status='active' OR (start_at>=? AND start_at<?))", (uid,period_start,period_end)).fetchone():
+                return None
+            return conn.execute('INSERT INTO sleep_records(wxid,nickname,group_id,start_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+                (uid,str(nickname),str(group_id),start_at,'active',start_at,start_at)).lastrowid
+
+
+def sleep_settle_once(record_id, status, end_at, duration_seconds, score=0.0,
+                      points_awarded=0.0, invalid_reason='', points_delta=0.0):
+    """State transition and shared wallet update commit together, once only."""
+    from contextlib import closing
+    from utils.account_identity import bound_user
+    if status not in {'completed','invalid'}:
+        raise ValueError('invalid sleep settlement')
+    with _LOCK:
+        with closing(_connect()) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row=conn.execute("SELECT wxid FROM sleep_records WHERE id=? AND status='active'", (int(record_id),)).fetchone()
+            if not row:
+                return False
+            uid=bound_user(row[0])
+            if not uid:
+                return False
+            conn.execute("UPDATE sleep_records SET status=?,end_at=?,duration_seconds=?,score=?,points_awarded=?,invalid_reason=?,updated_at=? WHERE id=? AND status='active'",
+                (status,end_at,float(duration_seconds),float(score),float(points_awarded),str(invalid_reason),end_at,int(record_id)))
+            conn.execute('INSERT INTO user_points(wxid,points,created_at,updated_at) VALUES(?,?,?,?) '
+                'ON CONFLICT(wxid) DO UPDATE SET points=points+excluded.points,updated_at=excluded.updated_at',
+                (uid,float(points_delta),end_at,end_at))
+            return True
+
+
 def sleep_get_by_id(record_id):
     with _LOCK:
         with _connect() as conn:
@@ -722,6 +791,8 @@ def sleep_get_by_id(record_id):
 
 
 def sleep_recent(wxid, limit=10):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     with _LOCK:
         with _connect() as conn:
             rows = conn.execute(
@@ -805,6 +876,10 @@ def lottery_update_draw_totals(draw_date, total_bet, total_prize):
 def lottery_add_bet(draw_date, wxid, nickname, number, amount, created_at=None,
                      option_label="", base_odds=2.0, locked_odds=0.0,
                      participation_rebate=0.0, protection_rebate=0.0):
+    from utils.account_identity import bound_user
+    wxid = bound_user(wxid)
+    if not wxid:
+        raise ValueError('请先绑定游戏账号后使用积分系统')
     draw_date = str(draw_date)
     wxid = str(wxid or "").strip()
     number = str(number or "").strip()
@@ -825,6 +900,8 @@ def lottery_add_bet(draw_date, wxid, nickname, number, amount, created_at=None,
 
 
 def lottery_user_bets(draw_date, wxid):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     with _LOCK:
         with _connect() as conn:
             rows = conn.execute(
@@ -867,6 +944,8 @@ def lottery_settle_bet(bet_id, status, prize, settled_at=None, locked_odds=None,
 
 
 def lottery_history(wxid, limit=10):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     with _LOCK:
         with _connect() as conn:
             rows = conn.execute(
@@ -1018,6 +1097,8 @@ def lottery_update_option(option_date, option_id, *, total_stake=None, demand_fa
 
 
 def lottery_get_player_streak(wxid):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     with _LOCK:
         with _connect() as conn:
             row = conn.execute("SELECT wxid, loss_streak, last_bet_date, last_win_date, protection_available, protection_used_date, updated_at FROM lottery_player_streaks WHERE wxid=?", (str(wxid or ""),)).fetchone()
@@ -1028,6 +1109,8 @@ def lottery_get_player_streak(wxid):
 
 def lottery_update_player_streak(wxid, loss_streak=0, last_bet_date=None, last_win_date=None,
                                  protection_available=None, protection_used_date=None):
+    from utils.account_identity import canonical_user
+    wxid = canonical_user(wxid)
     now = datetime.now().isoformat()
     current = lottery_get_player_streak(wxid)
     values = (str(wxid or ""), int(loss_streak), last_bet_date if last_bet_date is not None else current["last_bet_date"],

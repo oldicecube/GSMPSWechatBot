@@ -136,8 +136,11 @@ def _has_at_component_targeting_bot(message: SessionMessage, platform: str) -> b
     """检查消息中的结构化 @ 组件是否直接指向当前 bot。"""
 
     raw_message = getattr(message, "raw_message", None)
+    account_id = str(getattr(message, 'account_id', '') or '')
     for component in getattr(raw_message, "components", []) or []:
-        if isinstance(component, AtComponent) and is_bot_self(platform, component.target_user_id):
+        if isinstance(component, AtComponent) and (
+            str(component.target_user_id) == account_id if account_id
+            else is_bot_self(platform, component.target_user_id)):
             return True
     return False
 
@@ -147,7 +150,8 @@ def is_mentioned_bot_in_message(message: SessionMessage) -> tuple[bool, bool, fl
     text = message.processed_plain_text or ""
     platform = str(message.platform or "").strip().lower()
 
-    current_accounts = get_bot_accounts(platform)
+    account_id = str(getattr(message, 'account_id', '') or '')
+    current_accounts = [account_id] if account_id else get_bot_accounts(platform)
 
     nickname = global_config.bot.nickname
     alias_names = global_config.bot.alias_names

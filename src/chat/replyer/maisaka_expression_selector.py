@@ -119,6 +119,22 @@ class MaisakaExpressionSelector:
         all_candidates: List[dict[str, Any]] = []
         for expression_id, situation, style, count in rows:
             normalized_style = normalize_expression_style_for_learning(str(style or ""))
+            # Older migrations stored many real short expressions as
+            # style="legacy" with the phrase embedded in the situation. Recover
+            # only compact, non-targeted phrases; never expose old @/name or
+            # poke templates as reusable style.
+            if normalized_style.casefold() == 'legacy':
+                marker = '群聊重复短回应：'
+                raw_situation = str(situation or '')
+                if raw_situation.startswith(marker):
+                    recovered = raw_situation[len(marker):].strip()
+                    if (recovered and len(recovered) <= 30 and '@' not in recovered
+                            and '拍了拍' not in recovered and 'http' not in recovered
+                            and not any(token in recovered for token in ('服务器状态@我', '陈年老冰块'))):
+                        normalized_style = recovered
+                        situation = '群聊接梗或复读该短语'
+                    else:
+                        normalized_style = ''
             if (
                 expression_id is None
                 or not situation
@@ -175,6 +191,10 @@ class MaisakaExpressionSelector:
 
     @staticmethod
     def _build_expression_habits_block(selected_expressions: List[dict[str, Any]]) -> str:
+        selected_expressions = [
+            expression for expression in selected_expressions
+            if str(expression.get("style") or "").strip().casefold() not in {"legacy", "unknown"}
+        ]
         if not selected_expressions:
             return ""
         lines = [
@@ -383,7 +403,7 @@ class MaisakaExpressionSelector:
                 continue
             situation = str(raw_candidate.get("situation") or "").strip()
             style = normalize_expression_style_for_learning(str(raw_candidate.get("style") or "").strip())
-            if not situation or not style or is_prompt_example_expression_style(style):
+            if not situation or not style or style.casefold() in {"legacy", "unknown"} or is_prompt_example_expression_style(style):
                 continue
             normalized_candidates.append(
                 {
@@ -425,7 +445,7 @@ class MaisakaExpressionSelector:
                 continue
             situation = str(raw_expression.get("situation") or "").strip()
             style = normalize_expression_style_for_learning(str(raw_expression.get("style") or "").strip())
-            if not situation or not style or is_prompt_example_expression_style(style):
+            if not situation or not style or style.casefold() in {"legacy", "unknown"} or is_prompt_example_expression_style(style):
                 continue
             normalized_expression = {
                 "situation": situation,

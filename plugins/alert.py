@@ -1,3 +1,7 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1, 'fields': {}}
+
 import logging
 from core.sender import send
 
@@ -46,8 +50,15 @@ def handle(content, context):
 
     username = context.get("user", "未知用户")
 
+    raw = context.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    platform = str(
+        context.get("platform") or context.get("source_platform")
+        or raw.get("platform") or raw.get("source_platform") or "wechat"
+    ).strip().lower()
+    source_label = {"qq": "QQ群", "wechat": "微信群"}.get(platform, "未知来源")
     msg_text = _normalize_content(context.get("content", content))
-    msg = f"[微信群] <{username}>\n{msg_text}"
+    msg = f"[{source_label}] <{username}>\n{msg_text}"
 
     try:
         ok, err = send(

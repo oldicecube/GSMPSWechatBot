@@ -38,7 +38,20 @@ class MCPToolProvider(ToolProvider):
         """列出全部 MCP 工具。"""
 
         del context
-        return await self._service.list_tools()
+        tools = await self._service.list_tools()
+        # The selected MCP search service is exposed through the native web
+        # provider, with source labels, bounded previews and result persistence.
+        # Keep the underlying connection callable by that provider without
+        # presenting a second unbounded entry point to the model.
+        from src.config.config import config_manager
+        model_config = config_manager.get_model_config()
+        selected = model_config.model_task_config.web_search.model_list
+        service = model_config.web.services.get(selected[0]) if selected else None
+        if service and service.adapter in {'stepsearch_mcp', 'parallel_mcp'}:
+            tools = [tool for tool in tools if not (
+                tool.metadata.get('server_name') == service.server_ref
+                and tool.name in {'web_search', 'web_fetch'})]
+        return tools
 
     async def invoke(
         self,
@@ -59,4 +72,3 @@ class MCPToolProvider(ToolProvider):
 
     async def close(self) -> None:
         """Runtime 不拥有共享连接，因此关闭 Provider 时无需释放服务。"""
-

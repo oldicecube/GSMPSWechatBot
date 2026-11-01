@@ -373,7 +373,16 @@ class PluginRuntimeManager(
             session_message = PluginMessageUtils._build_session_message_from_dict(dict(envelope.payload))
         if session_message is None:
             raise ValueError("Platform IO 入站封装缺少可用的 SessionMessage 或 payload")
+        from src.platform_io.route_key_factory import RouteKeyFactory
+        if RouteKeyFactory.from_session_message(session_message) != envelope.route_key:
+            raise ValueError('Inbound payload origin does not match registered route')
+        from src.common.message_provenance import stamp_message
+        stamp_message(session_message, direction='inbound', transport=envelope.driver_id)
         session_message.received_at = received_at
+
+        from core.shell_platform_bridge import dispatch_native_plugins
+        if await dispatch_native_plugins(session_message):
+            return
 
         from src.chat.message_receive.bot import chat_bot
 

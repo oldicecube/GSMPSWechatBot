@@ -559,6 +559,14 @@ def _build_outbound_session_message(
         )
 
     additional_config: Dict[str, object] = _inherit_platform_io_route_metadata(target_stream)
+    if target_stream.platform == 'qq' and target_stream.group_id:
+        from src.platform_io.bot_identity import get as get_bot_identity
+        identity = get_bot_identity(platform='qq', account_id=bot_user_id,
+                                    scope=str(target_stream.scope or ''), group_id=str(target_stream.group_id))
+        if identity:
+            additional_config['platform_bot_identity'] = identity
+        else:
+            identity = {}
     if selected_expressions is not None:
         additional_config["selected_expressions"] = selected_expressions
 
@@ -572,7 +580,8 @@ def _build_outbound_session_message(
     outbound_message.message_info = MessageInfo(
         user_info=UserInfo(
             user_id=bot_user_id,
-            user_nickname=global_config.bot.nickname,
+            user_nickname=(identity.get('nickname') or global_config.bot.nickname) if target_stream.platform == 'qq' and target_stream.group_id else global_config.bot.nickname,
+            user_cardname=(identity.get('cardname') or None) if target_stream.platform == 'qq' and target_stream.group_id else None,
         ),
         group_info=group_info,
         additional_config=additional_config,
@@ -847,6 +856,8 @@ async def _send_via_platform_io(
     Returns:
         bool: 发送成功时返回 ``True``。
     """
+    from src.common.message_provenance import stamp_message
+    stamp_message(message, direction='outbound')
     before_send_result, message = await _invoke_send_hook(
         "send_service.before_send",
         message,
@@ -901,6 +912,7 @@ async def _send_via_platform_io(
     sent = bool(delivery_batch.has_success)
     if sent:
         await _apply_successful_delivery_receipt(message, delivery_batch)
+        stamp_message(message, direction='outbound')
         await _dispatch_adapter_callbacks(delivery_batch)
     await _invoke_send_hook(
         "send_service.after_send",
@@ -917,6 +929,9 @@ async def _send_via_platform_io(
         _record_sent_emoji_usage(message)
         if storage_message:
             await _store_sent_message(message)
+        from src.common.message_provenance import is_plugin_message
+        if is_plugin_message(message):
+            _sync_sent_message_to_maisaka_history(message, source_kind='plugin_output')
         await _notify_memory_automation_on_message_sent(message)
         should_log_delivery = show_log and any(
             receipt.driver_kind != DriverKind.LOCAL
@@ -977,7 +992,8 @@ async def send_session_message_with_message(
         storage_message=storage_message,
         show_log=show_log,
     )
-    if sent_message is not None and sync_to_maisaka_history:
+    from src.common.message_provenance import is_plugin_message
+    if sent_message is not None and sync_to_maisaka_history and not is_plugin_message(sent_message):
         _sync_sent_message_to_maisaka_history(
             sent_message,
             source_kind=str(maisaka_source_kind or "outbound_send"),

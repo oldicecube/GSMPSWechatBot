@@ -20,7 +20,6 @@ from src.common.database.database import get_db_session
 from src.common.database.database_model import Images, ImageType
 from src.common.utils.image_path import StoredImagePathError, resolve_stored_image_path, serialize_stored_image_path
 from src.config.config import global_config
-from src.webui.core import get_token_manager
 from src.webui.core import verify_auth_token_from_cookie_or_header as verify_auth_token
 
 from .schemas import (
@@ -398,22 +397,18 @@ async def update_emoji(
 
             session.add(emoji)
 
-            # 若通过更新接口封禁表情包，同步从内存列表移除
-            if update_data.get("is_banned") or update_data.get("is_registered") is False:
-                from src.emoji_system.emoji_manager import emoji_manager
-
-                emoji_manager.emojis = [
-                    e for e in emoji_manager.emojis if e.file_hash != emoji.image_hash
-                ]
-                emoji_manager._emoji_num = len(emoji_manager.emojis)
-
             logger.info(f"表情包已更新: ID={emoji_id}, 字段: {list(update_data.keys())}")
+            response_data = emoji_to_response(emoji)
 
-            return EmojiUpdateResponse(
-                success=True,
-                message=f"成功更新 {len(update_data)} 个字段",
-                data=emoji_to_response(emoji),
-            )
+        # Reload only after committing. Bans, unbans, registration and changed
+        # descriptions must all reach the same native catalog used by Planner.
+        from src.emoji_system.emoji_manager import emoji_manager
+        await asyncio.to_thread(emoji_manager.load_emojis_from_db)
+        return EmojiUpdateResponse(
+            success=True,
+            message=f"成功更新 {len(update_data)} 个字段",
+            data=response_data,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -683,13 +678,8 @@ def get_emoji_thumbnail(
         FileResponse | JSONResponse: 缩略图文件、原图文件或生成中的状态响应。
     """
     try:
-        token_manager = get_token_manager()
-        is_valid = False
-
-        if maibot_session and token_manager.verify_token(maibot_session):
-            is_valid = True
-        elif token and token_manager.verify_token(token):
-            is_valid = True
+        from src.webui.core.auth import is_token_valid
+        is_valid = is_token_valid(maibot_session) or bool(token and is_token_valid(token))
 
         if not is_valid:
             raise HTTPException(status_code=401, detail="Token 无效或已过期")

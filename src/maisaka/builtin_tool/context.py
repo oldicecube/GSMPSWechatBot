@@ -281,11 +281,34 @@ class BuiltinToolRuntimeContext:
             target_message_id = str(raw_target or "").strip()
 
         if target_user_id:
+            platform = self.runtime.chat_stream.platform
+            if (platform == 'qq' and (not target_user_id.isascii() or not target_user_id.isdecimal() or int(target_user_id) <= 0)
+                    or platform == 'wechat' and not target_user_id.startswith('wxid_')):
+                raise ValueError('at 用户 ID 不属于当前平台')
             return AtComponent(target_user_id=target_user_id)
 
+        # Keep the message-ID field's semantics even when this entry point is
+        # called outside the planner dispatcher, which normally expands aliases.
+        target_message_id = str(self.runtime.expand_message_id_aliases({"msg_id": target_message_id})["msg_id"])
         target_message = self.runtime.find_source_message_by_id(target_message_id)
         if target_message is None:
+            # Resolve only within this real conversation, never another group
+            # with the same display name or a cross-platform memory hit.
+            from src.common.database.database import get_db_session
+            from src.common.database.database_model import Messages
+            from sqlmodel import select
+            with get_db_session(auto_commit=False) as database:
+                rows = database.exec(select(Messages).where(Messages.session_id == self.runtime.session_id,
+                    Messages.platform == self.runtime.chat_stream.platform).order_by(Messages.id.desc()).limit(1000)).all()
+                matches = [r for r in rows if r.message_id == target_message_id or to_display_message_id(r.message_id) == target_message_id]
+                if len({r.message_id for r in matches}) == 1:
+                    row = matches[0]
+                    return AtComponent(target_user_id=row.user_id, target_user_nickname=row.user_nickname,
+                                       target_user_cardname=row.user_cardname or '')
             raise ValueError(f"无法解析 at 目标消息：msg_id={to_display_message_id(target_message_id)}")
+
+        if target_message.session_id != self.runtime.session_id or target_message.platform != self.runtime.chat_stream.platform:
+            raise ValueError('at 目标消息不属于当前聊天流')
 
         user_info = target_message.message_info.user_info
         return AtComponent(
@@ -401,10 +424,12 @@ class BuiltinToolRuntimeContext:
         if raw_emoji is not None and not global_config.emoji.use_new_send_logic:
             raise ValueError("新表情包发送逻辑未开启，请使用 send_emoji 工具。")
 
-        at_components = [
-            self._resolve_at_attachment(raw_target)
-            for raw_target in self._normalize_attachment_list(attachment_args.get("attach_at"), "attach_at")
-        ]
+        at_components = []
+        for raw_target in self._normalize_attachment_list(attachment_args.get('attach_at'), 'attach_at'):
+            try:
+                at_components.append(self._resolve_at_attachment(raw_target))
+            except ValueError as exc:
+                logger.warning(f'丢弃无效 @ 附件，保留回复正文：{exc}')
         image_components = [
             await self._resolve_image_attachment(raw_attachment)
             for raw_attachment in self._normalize_attachment_list(attachment_args.get("attach_pic"), "attach_pic")

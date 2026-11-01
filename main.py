@@ -101,6 +101,14 @@ def _launch_weflow_setup_wizard():
 def main():
     global _weflow, _dispatcher, _worker
 
+    # NapCat is independent of the bot lifetime. Reuse it if running; otherwise
+    # attempt saved-account login and expose its local QR page when needed.
+    try:
+        from core.napcat_boot import ensure_napcat
+        ensure_napcat(BASE_DIR)
+    except Exception as exc:
+        print('[QQ STARTUP]', type(exc).__name__, 'see depends-data/napcat/config/bootstrap.log', flush=True)
+
     try:
         config = json.load(open("config.json", encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError) as e:
@@ -221,7 +229,7 @@ def main():
     # when enabled, the authenticated WebUI is attached to live BotControl.
     webui_config = config.get("webui") if isinstance(config.get("webui"), dict) else {}
     env_webui_enabled = str(os.environ.get("WECHATBOT_WEBUI_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
-    if bool(webui_config.get("enabled", False)) or env_webui_enabled:
+    if llm_config.get('model_config_source') != 'maibot' and (bool(webui_config.get("enabled", False)) or env_webui_enabled):
         try:
             webui_config = dict(webui_config)
             webui_config["enabled"] = True

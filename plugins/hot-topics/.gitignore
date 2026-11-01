@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+config.toml
+config_back/
+data/
+ambient_seen.json

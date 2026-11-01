@@ -1,9 +1,20 @@
+
+# GSMPS WebUI metadata only; execution remains in this shell module.
+WEBUI_CONFIG = {'version': 1,
+ 'fields': {'followup_ttl_seconds': {'type': 'int',
+                                     'default': 60,
+                                     'min': 15,
+                                     'max': 300,
+                                     'label': '等待下一张图片的时间（秒）'}}}
+
 import os
 import time
+import io
 
 from PIL import Image
 
 from core.followup import register as register_followup
+from core.shell_plugin_config import settings
 from core.followup import consume as consume_followup
 from core.followup import peek as peek_followup
 from core.sender import send
@@ -58,6 +69,8 @@ def _get_raw(context):
 # 判断图片消息
 # =========================================================
 def _is_image(context):
+    if context.get("is_picture"):
+        return True
     content = context.get("content", "").strip()
 
     if content == "[图片]":
@@ -251,7 +264,7 @@ def handle_auto(context):
         register_followup(
             session_id=session_id,
             target="picture",
-            ttl=60,
+            ttl=settings('gsmps.automation.picture')['followup_ttl_seconds'],
             payload={"mode": mode},
             wxid=wxid
         )
@@ -304,26 +317,33 @@ def handle_auto(context):
     save_path = None
 
     try:
-        image_url, best_diff = find_image_url_by_timestamp(
-            session_id,
-            target_ts,
-            limit=20
-        )
-
-        if not image_url:
-            print("[symmetry] 获取图片失败：未找到匹配图片")
-            return None
-
-        if best_diff is None:
-            print("[symmetry] 未找到可比对时间戳，回退最近图片")
+        if context.get('platform') == 'qq':
+            binary = context.get('_image_binary') or raw.get('_image_binary')
+            if not isinstance(binary, bytes) or len(binary) > 20*1024*1024:
+                return 'Original QQ image is unavailable; send an image again.'
+            with Image.open(io.BytesIO(binary)) as source:
+                img = source.convert('RGBA')
         else:
-            print(f"[symmetry] 已按时间戳匹配图片 diff={best_diff}")
+            image_url, best_diff = find_image_url_by_timestamp(
+                session_id,
+                target_ts,
+                limit=20
+            )
 
-        # =================================================
-        # 核心修复：
-        # 强制转 RGBA，解决透明 PNG 黑底白图问题
-        # =================================================
-        img = download_image(image_url).convert("RGBA")
+            if not image_url:
+                print("[symmetry] 获取图片失败：未找到匹配图片")
+                return None
+
+            if best_diff is None:
+                print("[symmetry] 未找到可比对时间戳，回退最近图片")
+            else:
+                print(f"[symmetry] 已按时间戳匹配图片 diff={best_diff}")
+
+            # =================================================
+            # 核心修复：
+            # 强制转 RGBA，解决透明 PNG 黑底白图问题
+            # =================================================
+            img = download_image(image_url).convert("RGBA")
 
         if mode == "left_right":
             out = _make_left_right(img)

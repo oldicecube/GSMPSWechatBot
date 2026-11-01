@@ -97,8 +97,6 @@ def set_llm_service(service):
 def init(config):
     global _config, _draw_thread
     _config = config if isinstance(config, dict) else {}
-    if not bool(_settings().get("enabled", True)):
-        return
     with _lock:
         if _draw_thread is None or not _draw_thread.is_alive():
             _draw_stop.clear()
@@ -111,6 +109,8 @@ def _settings():
     raw = ((_config or {}).get("lottery") or {}) if isinstance(_config, dict) else {}
     if isinstance(raw, dict):
         merged.update(raw)
+    from core.shell_plugin_config import settings, COMMON_FIELDS
+    merged.update({k:v for k,v in settings('gsmps.command.lottery').items() if k not in COMMON_FIELDS})
     return merged
 
 
@@ -258,6 +258,10 @@ def _announce(draw):
 def _draw_loop():
     last_draw_date = None
     while not _draw_stop.is_set():
+        from core.maibot_shell_registry import allowed
+        if not allowed('gsmps.command.lottery') or not _settings().get('enabled', True):
+            _draw_stop.wait(5)
+            continue
         today = _now().date()
         if _now() >= _draw_time(today) and last_draw_date != today:
             try:
@@ -547,7 +551,13 @@ def _is_admin(context):
 
 
 def handle(content, context):
+    if not _settings().get('enabled', True):
+        return '彩票功能已停用。'
     context = context if isinstance(context, dict) else {}
+    from utils.points_manager import binding_required
+    error = binding_required(context)
+    if error:
+        return error
     content = str(content or "").strip()
     with _lock:
         _settle_due_draws()
@@ -570,6 +580,24 @@ def handle(content, context):
             return _today_text()
         return _place_bet(content, context)
 
+WEBUI_CONFIG = {'version': 1, 'fields': {
+    'enabled': {'type': 'bool', 'default': True, 'label': '允许彩票业务', 'config_path': 'lottery.enabled', 'reload': 'hot'},
+    'min_stake': {'type': 'int', 'default': 10, 'min': 1, 'max': 100000, 'label': '最小投注积分', 'config_path': 'lottery.min_stake', 'reload': 'hot'},
+    'max_stake_per_option': {'type': 'int', 'default': 100, 'min': 1, 'max': 100000, 'label': '单项投注上限', 'config_path': 'lottery.max_stake_per_option', 'reload': 'hot'},
+    'max_options_per_user_per_day': {'type': 'int', 'default': 5, 'min': 1, 'max': 6, 'label': '每人每日选项上限', 'config_path': 'lottery.max_options_per_user_per_day', 'reload': 'hot'},
+    'daily_total_limit': {'type': 'int', 'default': 300, 'min': 1, 'max': 100000, 'label': '每人每日积分上限', 'config_path': 'lottery.daily_total_limit', 'reload': 'hot'},
+    'draw_hour': {'type': 'int', 'default': 22, 'min': 0, 'max': 23, 'label': '开奖小时', 'config_path': 'lottery.draw_hour', 'reload': 'hot'},
+    'draw_minute': {'type': 'int', 'default': 0, 'min': 0, 'max': 59, 'label': '开奖分钟', 'config_path': 'lottery.draw_minute', 'reload': 'hot'},
+    'bet_close_minutes': {'type': 'int', 'default': 5, 'min': 0, 'max': 120, 'label': '提前封盘（分钟）', 'config_path': 'lottery.bet_close_minutes', 'reload': 'hot'},
+    'rank_size': {'type': 'int', 'default': 10, 'min': 1, 'max': 50, 'label': '排行榜人数', 'config_path': 'lottery.rank_size', 'reload': 'hot'},
+    'option_count': {'type': 'int', 'default': 6, 'min': 3, 'max': 12, 'label': '每日选项数量', 'config_path': 'lottery.option_count', 'reload': 'hot'},
+    'winner_count': {'type': 'int', 'default': 2, 'min': 1, 'max': 11, 'label': '每日中奖选项数量', 'config_path': 'lottery.winner_count', 'reload': 'hot'},
+    'options': {'type': 'json', 'default': [], 'label': '选项文案与基础赔率', 'config_path': 'lottery.options', 'reload': 'hot'},
+    'base_odds': {'type': 'json', 'default': [], 'label': '基础赔率列表（数字数组）', 'config_path': 'lottery.base_odds', 'reload': 'hot'},
+    'announce_groups': {'type': 'list', 'item_type': 'str', 'default': [], 'label': '开奖通知群', 'config_path': 'lottery.announce_groups', 'reload': 'hot'},
+    'llm_content_enabled': {'type': 'bool', 'default': False, 'label': '使用模型生成选项文案', 'config_path': 'lottery.llm_content_enabled', 'reload': 'hot'},
+}}
+
 WEBUI_CONFIG_SCHEMA = {
     "title": "彩票",
     "fields": [
@@ -581,5 +609,9 @@ WEBUI_CONFIG_SCHEMA = {
         {"key": "draw_hour", "type": "number", "label": "开奖小时"},
         {"key": "draw_minute", "type": "number", "label": "开奖分钟"},
         {"key": "announce_groups", "type": "list", "label": "公告群组"},
+        {"key": "option_count", "type": "number", "label": "每日选项数量"},
+        {"key": "winner_count", "type": "number", "label": "中奖选项数量"},
+        {"key": "options", "type": "json", "label": "选项文案与基础赔率"},
+        {"key": "base_odds", "type": "json", "label": "基础赔率列表"},
     ],
 }

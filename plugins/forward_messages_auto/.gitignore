@@ -1,0 +1,8 @@
+/config.toml
+/__pycache__/
+/.pytest_cache/
+/.ruff_cache/
+/data/
+/logs/
+*.py[cod]
+debug_forward_stats.local.json

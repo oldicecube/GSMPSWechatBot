@@ -13,7 +13,7 @@ class WeFlowClient:
         self.dedup = dedup
 
     def get_original_message(self, session_id, local_id=None, server_id=None,
-                             timeout=8):
+                             timeout=8, media=False):
         """Fetch one raw WeFlow message for LLM context hydration."""
         session_id = str(session_id or "").strip()
         if not session_id:
@@ -31,6 +31,8 @@ class WeFlowClient:
             params["serverId"] = str(server_id).strip()
         if len(params) == 1:
             return {"ok": False, "error": "missing local_id or server_id"}
+        if media:
+            params["media"] = 1
 
         try:
             response = requests.get(
@@ -100,17 +102,20 @@ class WeFlowClient:
     # 🧠 消息协议层（关键）
     # =========================
     def _normalize_msg(self, msg: dict) -> dict:
+        from utils.wechat_pat import pat_event
+        pat = pat_event(msg)
+        is_system = bool(pat) or int(msg.get("localType") or msg.get("local_type") or 0) in {10000, 10002}
         return {
             # ===== 标准字段（插件只用这些）=====
             "user": msg.get("sourceName") or msg.get("sender") or "未知用户",
-            "content": msg.get("content", ""),
+            "content": (pat.get('title') or msg.get("content", "")) if pat else msg.get("content", ""),
             "group": msg.get("groupName"),
             "sessionId": msg.get("sessionId"),
             "type": msg.get("sessionType"),
 
             # ===== 新增实用字段 =====
-            "wxid": self.get_wxid(msg),                    # 发送者微信ID
-            "text": self.get_real_content(msg),           # 清洗后的正文内容
+            "wxid": (pat.get('actor') or self.get_wxid(msg)) if pat else self.get_wxid(msg),
+            "text": (pat.get('title') or self.get_real_content(msg)) if pat else self.get_real_content(msg),
             "is_group": self.is_group(msg),               # 是否群聊
             "is_private": self.is_private(msg),           # 是否私聊
             "is_at": bool(msg.get("is_at") or msg.get("isAt") or msg.get("atBot")),
@@ -135,12 +140,12 @@ class WeFlowClient:
             "timestamp": msg.get("timestamp"),
             "localType": msg.get("localType") or msg.get("local_type"),
             "source_kind": (
-                "system_event" if int(msg.get("localType") or msg.get("local_type") or 0) in {10000, 10002}
+                "system_event" if is_system
                 else ("user_incoming" if msg.get("senderWxid") or msg.get("sourceName") else "unknown_inbound")
             ),
             "source_origin": "weflow_sse",
-            "learnable": int(msg.get("localType") or msg.get("local_type") or 0) not in {10000, 10002},
-            "prompt_visible": int(msg.get("localType") or msg.get("local_type") or 0) not in {10000, 10002},
+            "learnable": not is_system,
+            "prompt_visible": not is_system,
             "avatarUrl": msg.get("avatarUrl"),
 
             # ===== debug =====

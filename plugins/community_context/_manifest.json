@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "id": "wechatbot.community-context",
+  "name": "同名群跨端见闻",
+  "version": "1.1.0",
+  "description": "以有来源的旁群参考连接已授权的微信和QQ同名群，保持会话与控制操作隔离。",
+  "author": {"name": "Wechat Bot", "url": "https://github.com/oldicecube"},
+  "urls": {"repository": "https://github.com/oldicecube/GSMPSWechatBot"},
+  "license": "MIT",
+  "host_application": {"min_version": "1.3.15", "max_version": "1.99.99"},
+  "sdk": {"min_version": "2.16.0", "max_version": "2.99.99"},
+  "dependencies": [],
+  "capabilities": ["chat.get_all_streams", "message.get_recent", "knowledge.search", "frequency.get_current_talk_value"],
+  "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]}
+}

@@ -36,10 +36,19 @@ interface MessagePushPayload {
   localId?: number
   serverId?: string
   localType?: number
+  rawLocalType?: number
+  localSubtype?: number
+  msgSource?: string
+  atUsers?: string[]
+  isAt?: boolean
   avatarUrl?: string
   sourceName: string
   groupName?: string
   content: string | null
+  rawContent?: string
+  parsedContent?: string
+  senderWxid?: string
+  isSend?: number | null
   timestamp: number
 }
 
@@ -720,6 +729,11 @@ class MessagePushService {
     const rawid = this.getMessageRawId(message)
 
     const createTime = Number(message.createTime || 0)
+    const rawLocalType = Number(message.localType || 0)
+    const localType = rawLocalType % 4294967296
+    const localSubtype = Math.floor(rawLocalType / 4294967296)
+    const atUsers = chatService.getMessageAtUserIds(message)
+    const isAt = atUsers.includes(this.configService.getMyWxidCleaned()) || atUsers.includes('notify@all')
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -733,13 +747,16 @@ class MessagePushService {
         rawid,
         messageKey,
         localId: Number(message.localId || 0),
-        serverId: String(message.serverId || message.serverIdRaw || '').trim() || undefined,
-        localType: Number(message.localType || 0),
+        serverId: String(message.serverIdRaw || message.serverId || '').trim() || undefined,
+        localType, rawLocalType, localSubtype, msgSource: message.msgSource, atUsers, isAt,
         avatarUrl,
         groupName,
         sourceName,
         senderWxid: message.senderUsername || '',
         content,
+        rawContent: message.rawContent,
+        parsedContent: message.parsedContent,
+        isSend: message.isSend,
         timestamp: createTime
       }
     }
@@ -753,12 +770,15 @@ class MessagePushService {
         rawid,
         messageKey,
         localId: Number(message.localId || 0),
-        serverId: String(message.serverId || message.serverIdRaw || '').trim() || undefined,
-        localType: Number(message.localType || 0),
+        serverId: String(message.serverIdRaw || message.serverId || '').trim() || undefined,
+        localType, rawLocalType, localSubtype, msgSource: message.msgSource, atUsers, isAt,
         avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       senderWxid: message.senderUsername || '',
       content,
+      rawContent: message.rawContent,
+      parsedContent: message.parsedContent,
+      isSend: message.isSend,
       timestamp: createTime
     }
   }
@@ -1349,7 +1369,7 @@ class MessagePushService {
       if (!value) return value
       return value.replace(/^\s*\[视频号\]\s*/u, '').trim() || value
     }
-    switch (Number(message.localType || 0)) {
+    switch (Number(message.localType || 0) % 4294967296) {
       case 1:
         return cleanOfficialPrefix(normalizeTextContent(message.parsedContent || message.rawContent))
       case 3:

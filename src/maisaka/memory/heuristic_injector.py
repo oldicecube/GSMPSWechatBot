@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import asyncio
 from time import time
 from typing import Sequence
 
@@ -110,7 +111,9 @@ class HeuristicMemoryInjector:
             total_message_count=total_message_count,
         )
         try:
-            impression = await self._build_chat_impression(context)
+            # Natural memory is optional context; it must never hold the
+            # foreground planner behind a slow learner/utils endpoint.
+            impression = await asyncio.wait_for(self._build_chat_impression(context), timeout=6.0)
             if not impression:
                 self.clear_session_reference(session.session_id)
                 return ""
@@ -177,16 +180,20 @@ class HeuristicMemoryInjector:
         limit = config.heuristic_memory_recall_limit
         search_limit = max(limit * 4, limit)
         cross_chat_enabled = config.heuristic_memory_cross_chat_enabled
-        result = await memory_service.search(
-            impression,
-            limit=min(20, search_limit),
-            mode="search",
-            chat_id="" if cross_chat_enabled else context.session.session_id,
-            person_id="",
-            respect_filter=not cross_chat_enabled,
-            user_id=str(context.session.user_id or ""),
-            group_id=str(context.session.group_id or ""),
-        )
+        try:
+            result = await asyncio.wait_for(memory_service.search(
+                impression,
+                limit=min(20, search_limit),
+                mode="search",
+                chat_id="" if cross_chat_enabled else context.session.session_id,
+                person_id="",
+                respect_filter=not cross_chat_enabled,
+                user_id=str(context.session.user_id or ""),
+                group_id=str(context.session.group_id or ""),
+            ), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.debug("启发式记忆检索超过 3 秒，跳过本轮，不阻塞聊天")
+            return []
         if not result.success or result.filtered:
             return []
 

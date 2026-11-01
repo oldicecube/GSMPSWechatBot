@@ -1,12 +1,13 @@
 ﻿from __future__ import annotations
-import json, threading, time
+import json, os, threading, time
 from pathlib import Path
 
 _LOCK = threading.RLock()
-_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_runtime.jsonl"
+_ROOT = Path(os.environ.get("MAIBOT_INSTANCE_DIR") or Path(__file__).resolve().parent.parent)
+_PATH = _ROOT / "logs" / "llm_runtime.jsonl"
 
 def trace_runtime(event, **fields):
-    record={"ts":time.time(),"event":str(event)}
+    record={"ts":time.time(),"pid":os.getpid(),"event":str(event)}
     for key,value in fields.items():
         if isinstance(value,(str,int,float,bool)) or value is None:
             record[key]=value

@@ -3919,6 +3919,17 @@ class AMemorixConfig(ConfigBase):
     """Web 运维配置"""
 
 
+class LearningExclusionItem(ConfigBase):
+    platform: str = Field(default="")
+    user_id: str = Field(default="")
+    group_id: str = Field(default="")
+    label: str = Field(default="")
+
+
+class LearningConfig(ConfigBase):
+    excluded_users: List[LearningExclusionItem] = Field(default_factory=list)
+
+
 class LearningItem(ConfigBase):
     platform: str = Field(
         default="",
@@ -5268,6 +5279,18 @@ class MaimMessageConfig(ConfigBase):
 
 class WebUIConfig(ConfigBase):
     """WebUI配置类"""
+
+    auth_enabled: bool = Field(
+        default=True,
+        json_schema_extra={"label": {"zh_CN": "需要登录", "en_US": "Require login"}, "x-widget": "switch"},
+    )
+    """是否需要 WebUI 访问令牌；关闭时必须配置 allowed_networks。"""
+
+    allowed_networks: list[str] = Field(
+        default=[],
+        json_schema_extra={"label": {"zh_CN": "访问网段", "en_US": "Allowed networks"}, "x-widget": "tags"},
+    )
+    """实际 TCP 客户端的 CIDR 白名单；免密模式下为空则拒绝所有访问。"""
 
     __ui_label__ = "WebUI"
     __ui_advanced__ = True
