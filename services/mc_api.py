@@ -110,3 +110,27 @@ def player_list():
     if not data:
         return None
     return data.get("players", [])
+
+
+def player_snapshot(host=None, port=None, timeout=3):
+    """Read one server's complete player sample without changing default routing.
+
+    None means unknown (timeout, incomplete/hidden sample), never empty/offline.
+    Keep status(), player_list(), RCON and other plugins on their existing host.
+    """
+    address = str(host or _game_host or '').strip()
+    target_port = port if host else (_game_port if port is None else port)
+    if not address:
+        return None
+    try:
+        server = (JavaServer.lookup(address, timeout=timeout) if target_port is None
+                  else JavaServer(address, int(target_port), timeout=timeout))
+        response = server.status()
+        sample = response.players.sample or []
+        online = int(response.players.online)
+        if len(sample) < online:
+            return None
+        names = {str(item.name).strip() for item in sample if item.name != _fake_name}
+        return sorted(name for name in names if name)
+    except Exception:
+        return None

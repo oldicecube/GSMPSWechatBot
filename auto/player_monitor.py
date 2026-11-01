@@ -16,18 +16,13 @@ import services.mc_api as mc_api
 from auto import tournament_monitor
 from services.tournament import db as tournament_db
 from utils.points_manager import add_points
-from utils.sqlite_store import (
-    player_stats_get, player_stats_all, player_stats_ensure,
-    player_stats_increment, player_stats_update,
-)
+from utils.sqlite_store import player_stats_get, player_stats_ensure, player_stats_update
+from utils import player_rewards
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 login_times = {}
-
-# Daily first-login reward per player per calendar day.
-DAILY_LOGIN_POINTS = 5
-
+EVENT_HOST = 'event.sie.gdutmc.com'
 
 def format_time(seconds):
     m, s = divmod(seconds, 60)
@@ -105,202 +100,112 @@ def update_daily_theroom_from_matches(player_name):
 
 
 def start(sender):
-    print("[MC] player monitor started")
+    """Run each endpoint independently; event scope never changes mc_api defaults."""
+    for server_id, host in (('main', None), ('event', EVENT_HOST)):
+        monitor = ServerMonitor(server_id, host)
+        threading.Thread(target=monitor.run, args=(sender,), daemon=True,
+                         name=f'player-monitor-{server_id}').start()
 
-    def loop():
-        print("[MC] monitor loop started")
 
-        last = set()
-        tick = 0
-        initialized = False
-        empty_cooldown = False  # 空列表冷却标记：防止因拉取失败/假人移除导致的误判
+class ServerMonitor:
+    def __init__(self, server_id, host=None):
+        if server_id not in player_rewards.POLICIES:
+            raise ValueError('Unknown monitor server')
+        self.server_id = server_id
+        self.host = host
+        self.last = set()
+        self.initialized = False
+        self.empty_cooldown = False
+        self.uncertain = False
+        self.starts = login_times if server_id == 'main' else {}
+        self._names = {}
 
+    def poll(self, sender, *, now=None, interval=10):
+        snapshot = mc_api.player_snapshot(host=self.host)
+        if snapshot is None:
+            self.uncertain = True
+            print(f'[MC {self.server_id}] player snapshot unavailable/incomplete; no offline or reward inference')
+            return
+        self.accept(snapshot, sender, now=time.time() if now is None else now, interval=interval)
+
+    def accept(self, snapshot, sender, *, now, interval=10):
+        """Successful complete snapshot only; failed reads never become [] leaves."""
+        current = {str(p).strip().casefold(): str(p).strip() for p in snapshot if str(p).strip()}
+        cur = set(current)
+        if self.last and not cur and not self.empty_cooldown:
+            self.empty_cooldown = True
+            return
+        self.empty_cooldown = False
+        baseline = not self.initialized or self.uncertain
+        if self.server_id == 'main':
+            for key, player in current.items():
+                current[key] = player_rewards.ensure_primary_player(player, current_time_iso(now))
+        rewards = player_rewards.observe(self.server_id, current.values(), now, baseline=baseline,
+                                         max_gap_seconds=max(60, int(interval) * 3))
+        for name, awarded in rewards.items():
+            if awarded['login_points'] or awarded['active_points']:
+                print(f"[MC POINTS {self.server_id}] {name} login=+{awarded['login_points']} active=+{awarded['active_points']}")
+        joined, left = cur - self.last, self.last - cur
+        for key in joined:
+            self.starts[key] = now
+        messages = []
+        prefix = '# ' if self.server_id == 'main' else f'# 活动服 {EVENT_HOST} '
+        if self.initialized and joined:
+            players = []
+            for key in sorted(joined):
+                name = current[key]
+                amount = rewards.get(name, {}).get('login_points', 0)
+                players.append(name + (f' 获得每日登录积分💎+{amount}' if amount else ''))
+            messages.append(prefix + '玩家进服: ' + ' '.join(players))
+        if self.initialized and left:
+            # Storage/RCON and match rewards belong exclusively to the original server.
+            if self.server_id == 'main':
+                try:
+                    result = tournament_monitor.sync_new_matches()
+                    print(f'[MC THEROOM] {result.get("message")}')
+                except Exception as exc:
+                    print(f'[MC THEROOM ERROR] {exc}')
+            for key in sorted(left):
+                name = self._names.get(key, key)
+                started = self.starts.pop(key, None)
+                duration = max(0, int(now - started)) if started is not None else 0
+                message = prefix + f'玩家离开: {name} (本次在线 {format_time(duration)})'
+                row = player_stats_get(name) or {}
+                if row.get('bind_user'):
+                    message += f" 今日活跃累计 💎{row.get('online_time_points_today', 0)}（两服共享）"
+                if self.server_id == 'main':
+                    try:
+                        stats = update_daily_theroom_from_matches(name)
+                        row = player_stats_get(name) or {}
+                        if stats['reward_delta'] > 0 and row.get('bind_user'):
+                            add_points(row['bind_user'], stats['reward_delta'])
+                            message += f"\nThe Room 今日 {stats['total']} 局，获得参与奖励 💎+{stats['reward_delta']}"
+                    except Exception as exc:
+                        print(f'[MC THEROOM ERROR] {name}: {exc}')
+                messages.append(message)
+        self.last, self._names = cur, current
+        self.initialized = True
+        self.uncertain = False
+        if messages:
+            try:
+                sender('\n'.join(messages))
+            except Exception as exc:
+                print(f'[MC {self.server_id}] sender failed: {exc}')
+
+    def run(self, sender):
+        from core.maibot_shell_registry import allowed
+        from core.shell_plugin_config import settings
+        print(f'[MC] monitor started: {self.server_id} {self.host or "configured primary"}')
         while True:
-            from core.maibot_shell_registry import allowed
             if not allowed('gsmps.automation.player_monitor'):
+                self.uncertain = True
                 time.sleep(5)
                 continue
-            tick += 1
-
+            interval = 10
             try:
-                print(f"[MC] tick={tick} fetching player list...")
-
-                cur_raw = mc_api.player_list()
-                cur = set(cur_raw or [])
-                now = time.time()
-                now_iso = current_time_iso(now)
-
-                if not initialized:
-                    for player in cur:
-                        if player not in login_times:
-                            login_times[player] = now
-                        player_stats_ensure(player, first_join_at=now_iso)
-
-                    last = cur
-                    initialized = True
-                    print(f"[MC] initial online player baseline: {sorted(cur)}")
-                    time.sleep(10)
-                    continue
-
-                # 冷却机制：上次有玩家，本次变为空 → 冷却本次结果，等待下次确认
-                if last and not cur:
-                    if not empty_cooldown:
-                        empty_cooldown = True
-                        print(f"[MC] tick={tick} 玩家列表由非空变为空，进入冷却，等待下次确认")
-                        time.sleep(10)
-                        continue
-                    else:
-                        # 连续两次为空，确认玩家真的全部离开了
-                        empty_cooldown = False
-                        print(f"[MC] tick={tick} 连续两次拉取为空，确认玩家已离开")
-                else:
-                    # 本次有玩家，清除冷却标记
-                    empty_cooldown = False
-
-                joined = cur - last
-                left = last - cur
-                msgs = []
-
-                for player in joined:
-                    if player not in login_times:
-                        login_times[player] = now
-
-                if joined:
-                    joined_msgs = []
-
-                    for player in joined:
-                        player_stats_ensure(player, first_join_at=now_iso)
-
-                        # 检查是否是当日首次进服
-                        today_str = str(date.today())
-                        pstats = player_stats_get(player)
-                        last_login_date = pstats.get("last_login_date") if pstats else None
-
-                        join_msg = player
-                        if last_login_date != today_str:
-                            # 是新的一天，首次进服 +5 积分
-                            user_wxid = pstats.get("bind_user") if pstats else None
-                            if user_wxid:
-                                try:
-                                    add_points(user_wxid, DAILY_LOGIN_POINTS)
-                                    player_stats_update(
-                                        player,
-                                        last_login_date=today_str,
-                                        login_points_today=DAILY_LOGIN_POINTS,
-                                        online_time_points_today=0,
-                                    )
-                                    join_msg += " 获得每日登录积分💎+5"
-                                    print(f"[MC POINTS] {player} ({user_wxid}) 首次进服，获得 +5 积分")
-                                except Exception as e:
-                                    print(f"[MC POINTS ERROR] {player} 积分增加失败: {e}")
-                            else:
-                                player_stats_update(
-                                    player,
-                                    last_login_date=today_str,
-                                    login_points_today=DAILY_LOGIN_POINTS,
-                                    online_time_points_today=0,
-                                )
-
-                        joined_msgs.append(join_msg)
-
-                    msgs.append("# 玩家进服: " + " ".join(joined_msgs))
-
-                if left:
-                    # 本批离服玩家共享一次 Storage 同步，避免重复 RCON 拉取。
-                    try:
-                        sync_result = tournament_monitor.sync_new_matches()
-                        if not sync_result.get("ok"):
-                            print(f"[MC THEROOM WARN] 对局同步失败: {sync_result.get('message')}")
-                        else:
-                            print(f"[MC THEROOM] {sync_result.get('message')}")
-                    except Exception as e:
-                        print(f"[MC THEROOM ERROR] 同步对局失败: {e}")
-
-                    for player in left:
-                        start_time = login_times.pop(player, None)
-
-                        if start_time is None:
-                            msgs.append(f"# 玩家离开: {player} (无上线记录)")
-                            continue
-
-                        duration = int(time.time() - start_time)
-                        player_stats_ensure(player)
-                        player_stats_increment(player, "total_time", duration)
-
-                        print(f"[MC TIME] {player} session {duration}s")
-
-                        # 基于已入库 Storage 对局计算今日 The Room 次数与积分差额。
-                        today_str = str(date.today())
-                        pstats = player_stats_get(player)
-                        last_login_date = pstats.get("last_login_date") if pstats else None
-                        theroom_stats = update_daily_theroom_from_matches(player)
-                        ther_room_delta = theroom_stats["reward_delta"]
-                        ther_room_points_awarded = 0
-                        user_wxid = pstats.get("bind_user") if pstats else None
-                        if ther_room_delta > 0 and user_wxid:
-                            try:
-                                add_points(user_wxid, ther_room_delta)
-                                ther_room_points_awarded = ther_room_delta
-                                print(
-                                    f"[MC POINTS] {player} ({user_wxid}) The Room 今日参与奖励 "
-                                    f"+{ther_room_delta}（总 {theroom_stats['total']} 局："
-                                    f"LP {theroom_stats['luckypillar']} / MC {theroom_stats['miner_chaos']}）"
-                                )
-                            except Exception as e:
-                                print(f"[MC POINTS ERROR] {player} The Room 积分增加失败: {e}")
-
-                        # 计算在线时长奖励积分
-                        online_time_points_today = pstats.get("online_time_points_today", 0) if pstats else 0
-                        if not isinstance(online_time_points_today, (int, float)):
-                            online_time_points_today = 0
-                        leave_msg = f"# 玩家离开: {player} (本次在线 {format_time(duration)}"
-                        points_earned = 0
-
-                        if last_login_date == today_str and online_time_points_today < 10:
-                            minutes_online = max(1, duration // 60)  # 向下取整，最少 1 分钟
-                            points_to_add = min(minutes_online, 10 - online_time_points_today)  # 不超过上限
-
-                            if user_wxid:
-                                try:
-                                    add_points(user_wxid, points_to_add)
-                                    new_online_pts = online_time_points_today + points_to_add
-                                    player_stats_update(player, online_time_points_today=new_online_pts)
-                                    points_earned = points_to_add
-                                    print(f"[MC POINTS] {player} ({user_wxid}) 在线 {minutes_online} 分钟，获得 +{points_to_add} 积分 (每日上限: {new_online_pts}/10)")
-                                except Exception as e:
-                                    print(f"[MC POINTS ERROR] {player} 在线时长积分增加失败: {e}")
-
-                        if points_earned > 0:
-                            leave_msg += f" 获得每日活跃奖励积分 💎+{points_earned}"
-
-                        if ther_room_points_awarded > 0:
-                            if points_earned > 0:
-                                leave_msg += " "
-                            leave_msg += (
-                                f"\nThe Room 今日 {theroom_stats['total']} 局"
-                                f"（LP {theroom_stats['luckypillar']} / MC {theroom_stats['miner_chaos']}），"
-                                f"获得参与奖励 💎+{ther_room_points_awarded}"
-                            )
-
-                        leave_msg += ")"
-                        msgs.append(leave_msg)
-
-                if msgs:
-                    final_msg = "\n".join(msgs)
-
-                    try:
-                        sender(final_msg)
-                        print("[MC SEND] sent")
-                    except Exception as e:
-                        print("[MC ERROR] sender failed:", e)
-
-                last = cur
-
-            except Exception as e:
-                print("[MC ERROR] loop exception:", e)
-
-            from core.shell_plugin_config import settings
-            time.sleep(settings('gsmps.automation.player_monitor')['poll_interval_seconds'])
-
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
+                interval = settings('gsmps.automation.player_monitor')['poll_interval_seconds']
+                self.poll(sender, interval=interval)
+            except Exception as exc:
+                self.uncertain = True
+                print(f'[MC {self.server_id}] monitor error: {exc}')
+            time.sleep(interval)
