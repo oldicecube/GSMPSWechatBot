@@ -37,7 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from maibot_sdk import Field, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
+from maibot_sdk import API, Field, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 SUPPORTED_CONFIG_VERSION = "0.1.3"
@@ -1263,6 +1263,25 @@ class MaiForwardPlugin(MaiBotPlugin):
             self.ctx.logger.error("[麦麦转发] share_message_pack 内部异常：%s", exc, exc_info=True)
             return {"success": False, "content": f"分享失败：插件内部异常（{exc}）"}
 
+    @API('repost.qq_pack_one', description='统一搬屎：分享已保存的授权群聊记录包', public=True, timeout_ms=180000)
+    async def repost_one(self, stream_id: str = '', **kwargs):
+        if not self.config.plugin.enabled:
+            return {'success': False, 'sent': False, 'reason': 'forward plugin disabled'}
+        from utils.plugin_stream import stream_for
+        stream = await stream_for(self.ctx, stream_id)
+        if not stream or stream['platform'] != 'qq':
+            return {'success': False, 'sent': False, 'reason': 'QQ group required'}
+        current = self._target_from_stream(stream)
+        records = await self._pack_load_all()
+        for record in sorted(records, key=lambda row: int(row.get('share_count') or 0)):
+            source = record.get('source') or {}
+            if source.get('kind') != 'group' or str(source.get('chat_id')) == str(stream['group_id']):
+                continue
+            if self._permission_error({'kind': 'group', 'id': source.get('chat_id')}, current):
+                continue
+            return await self._do_share_pack(record['pack_id'], {'stream_id': stream_id})
+        return {'success': False, 'sent': False, 'reason': 'no authorized saved group pack'}
+
     async def _do_share_pack(self, pack_id: Any, call_kwargs: dict) -> dict:
         pid = _as_str(pack_id)
         if not pid:
@@ -1377,6 +1396,7 @@ class MaiForwardPlugin(MaiBotPlugin):
             "success": True,
             "content": content,
             "pack_id": pid,
+            "sent": True,
             "share_count": record.get("share_count", 0),
             "record_injected": injected,
         }
@@ -1905,6 +1925,8 @@ class MaiForwardPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.debug("[麦麦转发] chat.get_all_streams 异常：%s", exc)
             return []
+        if isinstance(streams, dict):
+            streams = streams.get('streams', [])
         return [s for s in (streams or []) if isinstance(s, dict)]
 
     async def _find_stream_by_id(self, stream_id: str) -> dict | None:

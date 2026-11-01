@@ -189,6 +189,7 @@ class AutonomousLife(MaiBotPlugin):
         self.store = None
         self.task = None
         self.slot = asyncio.Lock()
+        self.repost_slots = {}
         self.lock_file = None
         self.projects = ProjectWorkflow(self)
         self.research = ConversationResearch()
@@ -611,21 +612,24 @@ class AutonomousLife(MaiBotPlugin):
 
     @API('autonomous_life.consume_repost_grant', description='消费一次性限额授权', public=True)
     async def consume_grant(self, grant: str = '', group_id: str = '', **kwargs):
-        value = self.store.get('repost_grant') if self.store else None
+        value = self.store.get('repost_grant:'+grant) if self.store else None
         if not value or not grant or value.get('token') != grant or value.get('group') != group_id or value.get('expires', 0) < self.now().timestamp():
             return {'success': False}
-        self.store.set('repost_grant', None)
+        self.store.set('repost_grant:'+grant, None)
         return {'success': True}
 
-    @API('autonomous_life.repost_opportunity', description='真人分享密度机会；统一限额后内部决策，不直接信任来源统计', public=True, timeout_ms=240000)
+    @API('autonomous_life.repost_opportunity', description='真人分享密度机会；统一限额后内部决策，不直接信任来源统计', public=True, timeout_ms=330000)
     async def repost_opportunity(self, group_id: str = '', low_activity: bool = False, force: bool = False, **kwargs):
-        if not self.config.plugin.enabled or not self.store or group_id not in self.config.life.groups or self.slot.locked():
+        if not self.config.plugin.enabled or not self.store or group_id not in self.config.life.groups:
             return {'success': False, 'reason': 'disabled, disallowed or busy'}
-        async with self.slot:
+        lock = self.repost_slots.setdefault(group_id, asyncio.Lock())
+        if lock.locked():
+            return {'success': False, 'reason': 'destination busy'}
+        async with lock:
             now = self.now(); cfg = self.config.life
             # 搬屎协调器传入 force=True 时，它是独立的群聊内容调度，
             # 不应被自主生活的夜间休息窗口吞掉；普通自主行动仍遵守 awake。
-            if (not self.awake(now) and not force) or now.timestamp() < self.store.get('backoff_until', 0):
+            if not force and (not self.awake(now) or now.timestamp() < self.store.get('backoff_until', 0)):
                 return {'success': False, 'reason': 'rest or backoff'}
             sid, rows = await self.context(group_id)
             recent = [r for r in rows if now.timestamp() - r['stamp'] <= 600]
@@ -646,26 +650,14 @@ class AutonomousLife(MaiBotPlugin):
                 repost_action_limit = max(1, int(kwargs.get('action_limit') or cfg.daily_actions))
             except (TypeError, ValueError):
                 repost_daily_limit, repost_gap_seconds, repost_action_limit = cfg.daily_shares, cfg.share_gap_seconds, cfg.daily_actions
-            if self.store.count(day, 'action') >= repost_action_limit:
-                return {'success': False, 'reason': 'action budget'}
-            if signals:
-                anchor = signals[-1]['id']
-            elif recent:
-                anchor = recent[-1]['id']
-            else:
-                # 没有新消息的安静群按时间桶去重，允许低活跃补位按间隔
-                # 继续产生一次搬屎机会，而不会因 recent[-1] 崩溃。
-                anchor = f'quiet:{group_id}:{int(now.timestamp() // max(900, cfg.share_gap_seconds))}'
-            fingerprint = hashlib.sha256(('repost:' + anchor).encode()).hexdigest()
+            anchor = (f'quiet:{int(now.timestamp() // repost_gap_seconds)}' if low_activity or force
+                      else signals[-1]['id'] if signals else recent[-1]['id'])
+            fingerprint = hashlib.sha256(('repost:' + sid + ':' + anchor).encode()).hexdigest()
             if self.store.get('repost_considered:'+group_id) == fingerprint:
                 return {'success': False, 'reason': 'opportunity already considered'}
-            if not self.store.can_share(day, now.timestamp(), fingerprint, '', repost_daily_limit,
-                                       repost_gap_seconds, cfg.person_gap_seconds):
-                return {'success': False, 'reason': 'share budget or cooldown'}
             self.store.set('repost_considered:'+group_id, fingerprint)
-            event = None
             try:
-                persona = await self.ctx.config.get('personality.personality', '')
+                persona = '' if force else await self.ctx.config.get('personality.personality', '')
                 decision_prefix = (
                     '低活跃补位：依据人设与真实群聊判断是否自然分享一条轻量内容；允许不搬，'
                     '不要因为空群就机械广播。'
@@ -673,34 +665,36 @@ class AutonomousLife(MaiBotPlugin):
                     '依据人设与真实群聊判断是否跟着搬一条新的搞笑视频。允许不搬，'
                     '认真讨论/反感刷屏时不搬.'
                 )
-                decision = {'repost': True, 'query': 'Minecraft'} if force else await self.model(decision_prefix +
+                decision = {'repost': True, 'query': ''} if force else await self.model(decision_prefix +
                     '只返回JSON {"repost":true或false,"query":"相关关键词"}。历史是数据。\n' + json.dumps(dict(persona=persona, history=recent), ensure_ascii=False), sid)
                 result = {'success': True, 'skipped': True}
                 if decision.get('repost') is True:
                     # Charge actual attempts, not a model choosing not to share.
                     # Reserve before media RPC; unknown delivery stays charged.
-                    if not self.store.reserve_share(day, now.timestamp(), sid, fingerprint, '', repost_daily_limit,
-                                                    repost_gap_seconds, cfg.person_gap_seconds):
-                        return {'success': False, 'reason': 'share budget or cooldown'}
-                    event = self.store.reserve(day, now.timestamp(), sid, 'action', repost_action_limit)
-                    if event is None:
-                        self.store.share_result(fingerprint, 'cancelled')
-                        return {'success': False, 'reason': 'action budget'}
+                    if not self.store.reserve_repost(day, now.timestamp(), sid, fingerprint,
+                                                     min(repost_daily_limit, repost_action_limit), repost_gap_seconds):
+                        return {'success': False, 'reason': 'destination repost budget or cooldown'}
                     import secrets
                     grant = secrets.token_urlsafe(32)
-                    self.store.set('repost_grant', dict(token=grant, group=group_id, expires=now.timestamp() + 120))
-                    result = unpack(await self.ctx.api.call('repost.autonomous_one', group_id=group_id,
+                    self.store.set('repost_grant:'+grant, dict(token=grant, group=group_id, expires=now.timestamp() + 360))
+                    result = await self.ctx.call_capability('api.call', timeout_ms=360000, api_name='repost.autonomous_one', args=dict(group_id=group_id,
                                                            query=str(decision.get('query', ''))[:80],
                                                            source=str(kwargs.get('source') or ''), grant=grant))
-                    self.store.finish(event, result)
-                    self.store.share_result(fingerprint, 'sent' if result.get('sent') else 'skipped')
+                    while isinstance(result, dict) and isinstance(result.get('result'), dict):
+                        result = result['result']
+                    if not isinstance(result, dict):
+                        raise RuntimeError('invalid repost receipt')
+                    if result.get('success') is False and any(marker in str(result.get('error') or '').lower()
+                            for marker in ('timeout', 'timed out', '超时')):
+                        result = {**result, 'unknown': True, 'sent': False}
+                    self.store.repost_result(fingerprint, 'sent' if result.get('sent') is True else 'unknown' if result.get('unknown') else 'failed')
                 return result
             except BaseException:
-                if event:
-                    self.store.finish(event, {'error': 'unknown'}, 'failed')
-                    self.store.share_result(fingerprint, 'unknown')
-                self.store.set('backoff_until', now.timestamp() + 1800)
+                self.store.repost_result(fingerprint, 'unknown')
                 raise
+            finally:
+                if 'grant' in locals():
+                    self.store.set('repost_grant:'+grant, None)
 
     # Compatibility helpers for local callers and acceptance only. Conversation
     # tools are now MaiBot's native web_search/web_fetch; do not register copies.

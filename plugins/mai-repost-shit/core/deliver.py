@@ -1,7 +1,4 @@
-"""投递：把视频以「聊天记录」（合并转发）形式发进群。
-
-**只有这一种投递方式**：转发节点 = 一段说明文字 + 视频本体。不走「直接发视频」或
-「按文件发」——那两种会在群里多出消息，也与"搬史"想要的观感不符。
+"""按真实会话来源投递：QQ 合并转发，微信说明文字与 MP4 文件。
 
 **依赖宿主内部行为的说明（重要）**
 宿主没有 VideoComponent，转发节点里的视频段只能以「未知类型 → DictComponent」的形态落到
@@ -18,8 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -73,6 +68,12 @@ class Deliverer:
 
     async def send(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any) -> Dict[str, Any]:
         """发送一条候选；返回 {"sent": bool, "method": "forward", ...}。"""
+        from utils.plugin_stream import stream_for
+        stream = await stream_for(self._ctx, stream_id)
+        if not stream:
+            return {'sent': False, 'reason': 'unknown destination platform/account'}
+        if stream['platform'] == 'qq':
+            return await self._send_upstream_forward(stream_id, candidate, video_path, cfg, stream)
         # wxSend cannot send QQ merged-forward or VideoComponent messages.
         # One SDK call preserves native text/file fields and prevalidation.
         # Local paths also avoid base64 overflowing the Runner RPC frame.
@@ -85,40 +86,28 @@ class Deliverer:
             result = await self._ctx.send.hybrid(segments,stream_id,return_details=True)
         except Exception as exc:
             self._logger.error(f'微信视频投递失败: {type(exc).__name__}')
-            return {'sent':False,'method':'wechat_file','error':type(exc).__name__}
+            return {'sent':False,'unknown':True,'method':'wechat_file','error':type(exc).__name__}
         return {'sent':bool(isinstance(result,dict) and result.get('sent')),
                 'method':'wechat_file','detail':result}
 
-    async def _send_upstream_forward(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any) -> Dict[str, Any]:
-        """Original upstream QQ delivery retained for reference; unused by this port."""
-        bot_qq = str(await self._ctx.config.get("bot.qq_account", "") or "")
+    async def _send_upstream_forward(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any, stream: dict) -> Dict[str, Any]:
+        """QQ native merged-forward with the destination adapter's own account."""
+        bot_qq = str(stream['account_id'])
         bot_name = str(await self._ctx.config.get("bot.nickname", "") or "麦麦")
         try:
             size_bytes = video_path.stat().st_size
         except OSError:
             size_bytes = 0
         size_mb = size_bytes / 1024 / 1024
-        # 体积在内联预算内就带 base64 发（后端无需读本地文件），超预算才退回路径引用
-        inline_limit = int(getattr(cfg, "inline_video_max_mb", 0) or 0) * 1024 * 1024
-        video_base64 = ""
-        if inline_limit and 0 < size_bytes <= inline_limit:
-            try:
-                video_base64 = base64.b64encode(await asyncio.to_thread(video_path.read_bytes)).decode("ascii")
-            except OSError as exc:
-                self._logger.warning(f"读取视频用于内联失败，退回路径引用: {exc!r}")
-        if not video_base64:
-            self._logger.warning(
-                f"视频 {size_mb:.1f}MB 超过内联预算（{getattr(cfg, 'inline_video_max_mb', 0)}MB），"
-                "改用本地路径引用——若后端不在同一台机器/容器里会读不到而发送失败"
-            )
+        # Local NapCat shares this host; paths keep media out of the 16 MB RPC frame.
         messages = build_forward_messages(
-            candidate, video_path, bot_qq, bot_name, cfg.include_header_text, video_base64
+            candidate, video_path.resolve(), bot_qq, bot_name, cfg.include_header_text
         )
         try:
             result = await self._ctx.send.forward(messages, stream_id, return_details=True)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(f"投递异常（合并转发调用失败，视频 {size_mb:.1f}MB）: {exc!r}")
-            return {"sent": False, "method": "forward", "errors": [repr(exc)]}
+            return {"sent": False, "unknown": True, "method": "forward", "errors": [repr(exc)]}
 
         if isinstance(result, dict) and result.get("sent"):
             return {"sent": True, "method": "forward", "detail": result}

@@ -35,7 +35,7 @@ from .core.pretty import PrettyPicker
 from .core.speaker import SpeakerCache, normalize_qq
 from .core.state import StateStore
 from .core.activity import summarize, eligible, is_hot, low_activity_eligible
-from .core.sources import discover, planner_instruction
+from .core.sources import discover, planner_instruction, call_api
 
 TOOL_REPOST = "repost_shi"
 TOOL_PRETTY = "repost_pretty"
@@ -81,12 +81,12 @@ class TargetSectionConfig(PluginConfigBase):
     active_hours: List[int] = Field(default_factory=lambda: [9, 23], description="允许发送的时间范围 [起, 止]（24 小时制）")
     catch_up_minutes: int = Field(default=30, description="错过计划时刻后多久内仍补发，超时则跳过")
     include_header_text: bool = Field(default=True, description="聊天记录里视频上方是否带标题/数据说明")
-    source_channels: List[str] = Field(default_factory=lambda: ['bilibili', 'qq_forward', 'tieba'],
-                                       description='统一 Planner 可选择的来源；未安装的来源自动跳过')
+    source_channels: List[str] = Field(default_factory=lambda: ['tieba', 'bilibili', 'qq_forward'],
+                                       description='启用的来源；贴吧优先于B站，其后为QQ收藏包；未安装的来源自动跳过')
 
 
 class PlannerSectionConfig(PluginConfigBase):
-    coordinator: bool = Field(default=False, description='通过自主生活插件统一决定、计入每日分享限额；不可用则不主动搬')
+    coordinator: bool = Field(default=False, description='通过自主生活插件统一授权；每个目标群使用独立搬屎限额，不占普通日程分享额度')
     window_seconds: int = Field(default=600, ge=60, le=3600, description="群聊活跃度统计窗口")
     min_messages: int = Field(default=6, ge=1, description="窗口内最少真人消息")
     min_users: int = Field(default=2, ge=1, description="窗口内最少不同发言者")
@@ -351,6 +351,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         self._loop_task: Optional[asyncio.Task[None]] = None
         self._wake = asyncio.Event()
         self._running = False
+        self._bili_slot = asyncio.Lock()
         # 点播任务在创建时同步置位，避免连续两次点播都通过重入检查
         self._manual_busy = False
         self._activity: Dict[str, dict] = {}
@@ -360,6 +361,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         self._reply_suppress: Dict[str, float] = {}
         self._reply_suppress_source: Dict[str, str] = {}
         self._source_status: Dict[str, Dict[str, Any]] = {}
+        self._repost_tasks = {}
 
     # ===== 生命周期 =====
 
@@ -372,7 +374,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
 
         self._store = StateStore(data_dir / "state.json", self.ctx.logger)
         self._store.load()
-        self._source_status = discover()
+        self._source_status = await discover(self.ctx)
         self.ctx.logger.info('统一搬屎来源状态: %s', self._source_status)
         self._client = BiliClient(self.ctx.logger)
         self._speakers = SpeakerCache(self.config.tool.speaker_cache_ttl_seconds, self.ctx.logger)
@@ -391,7 +393,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             f"搬史机已装载：目标群 {self.config.target.groups or '（未配置）'}，"
             f"模式 {self.config.target.mode}，定时模式每天 {self.config.target.daily_times} 次，播放区间 "
             f"{self.config.source.play_min}~{self.config.source.play_max}，"
-            f"投递方式 微信说明文字与 MP4 文件"
+            f"投递方式 QQ合并转发、微信说明文字与MP4文件；贴吧优先"
         )
         self.ctx.logger.info(f"自然语言点播权限：{self._describe_permission(mode)}")
         self.ctx.logger.info(
@@ -443,6 +445,11 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         """停循环、落盘、关连接。宿主只给 5 秒，全部操作都要快。"""
+        pending = list(self._repost_tasks.values())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -681,16 +688,18 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         # this coordinator. Refresh source capabilities on each planner tick
         # instead of permanently caching an on-load unavailable result.
         try:
-            self._source_status = discover()
+            self._source_status = await discover(self.ctx)
         except Exception as exc:
-            self.ctx.logger.debug('??????????: %s', type(exc).__name__)
+            self.ctx.logger.debug('刷新搬屎来源失败: %s', type(exc).__name__)
         now = datetime.now()
         start, end = self.config.target.active_hours[:2]
         active = start <= now.hour < end if start < end else now.hour >= start or now.hour < end
-        if not active or self._manual_busy or self._running or not self.config.tool.enabled:
+        if not active or self._manual_busy or not self.config.tool.enabled:
             return
         cfg = self.config.planner
         for group_id in self.config.target.groups:
+            if (task := self._repost_tasks.get(group_id)) is not None and not task.done():
+                continue
             from utils.platform_target import is_group_target
             if not is_group_target(group_id):
                 continue
@@ -735,30 +744,22 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
                     if self._source_status.get(source, {}).get('available')
                     and (source != 'qq_forward' or target_platform == 'qq')
                 ]
-                source_hint = (
-                    available_sources[int(stamp // max(60, cfg.repost_gap_seconds)) % len(available_sources)]
-                    if available_sources else 'bilibili'
-                )
+                available_sources.sort(key=lambda source: {'tieba': 0, 'bilibili': 1, 'qq_forward': 2}.get(source, 9))
+                source_hint = available_sources[0] if available_sources else ''
+                if not source_hint:
+                    continue
                 if cfg.coordinator:
-                    result = await self.ctx.api.call(
-                        'autonomous_life.repost_opportunity',
-                        group_id=group_id,
-                        low_activity=quiet_mode and not normal_mode,
-                        force=True,
-                        daily_limit=cfg.repost_daily_limit,
-                        gap_seconds=cfg.repost_gap_seconds,
-                        action_limit=cfg.repost_action_limit,
-                        source=source_hint,
-                    )
-                    coordinated = bool(result.get('success')) if isinstance(result, dict) else False
-                    self.ctx.logger.info('搬屎机会交给自主生活限额调度: %s', coordinated)
-                    if coordinated:
-                        continue
-                    # A failed/退避 autonomous coordinator must not swallow a
-                    # real repost opportunity. Fall through to the existing
-                    # density Planner path, which still observes its own
-                    # cooldown and share limits.
-                    self.ctx.logger.warning('自主生活未接管搬屎机会，回退到搬屎 Planner 路径: %s', result)
+                    async def coordinate(target=group_id, source=source_hint, quiet=quiet_mode and not normal_mode):
+                        try:
+                            result = await call_api(self.ctx, 'autonomous_life.repost_opportunity',
+                                group_id=target, source=source, low_activity=quiet, force=True,
+                                daily_limit=cfg.repost_daily_limit, gap_seconds=cfg.repost_gap_seconds,
+                                action_limit=cfg.repost_action_limit)
+                            self.ctx.logger.info('搬屎回执 target=%s source=%s result=%s', target, source, result)
+                        except Exception as exc:
+                            self.ctx.logger.warning('搬屎请求失败 target=%s source=%s error=%r；不自动重发', target, source, exc)
+                    self._repost_tasks[group_id] = asyncio.create_task(coordinate(), name=f'repost:{group_id}')
+                    continue
                 intent = (
                     f"最近{cfg.window_seconds // 60}分钟，群里有{stats['users']}位群友发了{stats['messages']}条消息，"
                     f"其中{stats['shares']}条涉及图像/视频分享或搬屎话题，{stats['bili']}条带B站链接或BV号。"
@@ -790,62 +791,46 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             return min(self.config.tool.min_gap_seconds, cfg.hot_gap_seconds)
         return self.config.tool.min_gap_seconds
 
-    @API('repost.autonomous_one', description='只消费统一限额调度的一次性授权，搬一条视频', public=True, timeout_ms=180000)
+    @API('repost.autonomous_one', description='消费一次性授权，按贴吧、B站、QQ收藏包顺序搬一条', public=True, timeout_ms=300000)
     async def autonomous_one(self, group_id: str = '', query: str = '', grant: str = '', **kwargs):
         if (not self.config.plugin.enabled or not self.config.planner.coordinator
-                or group_id not in self.config.target.groups or self._running or self._manual_busy):
+                or group_id not in self.config.target.groups or self._manual_busy):
             return {'success': False, 'reason': 'disabled, disallowed or busy'}
-        authorized = await self.ctx.api.call('autonomous_life.consume_repost_grant', grant=grant, group_id=group_id)
+        authorized = await call_api(self.ctx, 'autonomous_life.consume_repost_grant', grant=grant, group_id=group_id)
         grant_result = authorized.get('result', authorized) if isinstance(authorized, dict) else {}
         if not isinstance(grant_result, dict) or grant_result.get('success') is not True:
             return {'success': False, 'reason': 'no valid single-use share grant'}
         resolved = await self._pipeline._resolve_stream(group_id)
         if not resolved or resolved[1] != '群':
             return {'success': False, 'reason': 'no real group stream'}
-        source = str(kwargs.get('source') or '').strip().lower()
-        if source in {'tieba', 'qq_forward'}:
-            external = await self._run_external_source(source, group_id, resolved[0], query)
-            return {'success': True, **external}
-        report = await self._run_and_report(self._run_config(), override_stream=resolved[0], extra_keywords=[query] if query else [])
-        return {'success': True, **report}
+        platform = 'qq' if group_id.startswith('qq:') else 'wechat'
+        sources = [source for source in ('tieba', 'bilibili', 'qq_forward')
+                   if source in self.config.target.source_channels
+                   and self._source_status.get(source, {}).get('available')
+                   and (source != 'qq_forward' or platform == 'qq')]
+        attempts = []
+        for source in sources:
+            if source == 'bilibili':
+                # Serialize shared downloader/state without dropping the other destination.
+                async with self._bili_slot:
+                    report = await self._run_and_report(self._run_config(), override_stream=resolved[0],
+                                                       extra_keywords=[query] if query else [])
+            else:
+                report = await self._run_external_source(source, group_id, resolved[0], query)
+            attempts.append({'source': source, 'sent': report.get('sent') is True})
+            if report.get('sent') is True:
+                return {'success': True, **report, 'source': source, 'attempts': attempts}
+            if report.get('unknown') or (report.get('detail') or {}).get('unknown'):
+                return {'success': False, **report, 'attempts': attempts}
+        return {'success': False, 'sent': False, 'reason': 'no source delivered', 'attempts': attempts}
 
     async def _run_external_source(self, source: str, group_id: str, stream_id: str, query: str = '') -> Dict[str, Any]:
         """调用已注册的贴吧/QQ 原样转发工具，并把结果纳入统一搬屎回执。"""
-        from src.plugin_runtime.component_query import component_query_service
-
-        if source == 'tieba':
-            tool_name = 'tieba_share'
-            args = {'stream_id': stream_id, 'chat_id': stream_id, 'count': 1, 'thread_type': 'any'}
-            if query:
-                args['forum'] = query.removesuffix('吧')[:80]
-        else:
-            tool_name = 'cateye_forward_messages'
-            payload = await self.ctx.call_capability(
-                'message.get_recent', chat_id=stream_id, hours=12, limit=6,
-                filter_mai=True, include_binary_data=False,
-            )
-            rows = payload.get('messages', []) if isinstance(payload, dict) else payload
-            ids = [str(row.get('message_id') or '') for row in (rows or []) if isinstance(row, dict)]
-            ids = [value for value in ids if value][-6:]
-            if not ids:
-                return {'sent': False, 'source': source, 'reason': '没有可打包的近期 QQ 消息'}
-            args = {
-                'stream_id': stream_id, 'chat_id': stream_id,
-                'message_ids': ids, 'target_stream_id': stream_id, 'merge': True,
-            }
-        executor = component_query_service.get_tool_executor(tool_name)
-        if executor is None:
-            return {'sent': False, 'source': source, 'reason': f'{tool_name} 未注册'}
-        try:
-            result = await executor(args)
-        except Exception as exc:
-            self.ctx.logger.warning('统一搬屎外部来源执行失败 source=%s: %s', source, type(exc).__name__)
-            return {'sent': False, 'source': source, 'reason': type(exc).__name__}
-        if not isinstance(result, dict):
-            result = {'content': str(result)}
-        sent = bool(result.get('sent') or result.get('success'))
-        self.ctx.logger.info('统一搬屎外部来源完成 source=%s sent=%s target=%s', source, sent, group_id)
-        return {'sent': sent, 'source': source, 'detail': result}
+        name = 'repost.tieba_one' if source == 'tieba' else 'repost.qq_pack_one'
+        result = await call_api(self.ctx, name, stream_id=stream_id)
+        sent = result.get('sent') is True
+        self.ctx.logger.info('外部来源送达 target=%s source=%s sent=%s result=%s', group_id, source, sent, result)
+        return {'sent': sent, 'source': source, 'detail': result, 'unknown': bool(result.get('unknown'))}
 
     async def _run_and_report(
         self,

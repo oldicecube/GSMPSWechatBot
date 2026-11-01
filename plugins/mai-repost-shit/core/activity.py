@@ -81,18 +81,12 @@ def is_hot(stats: dict, cfg: Any) -> bool:
 
 
 def low_activity_eligible(stats: dict, cfg: Any, now: float) -> bool:
-    """Allow quiet-room opportunities after a few human messages.
-
-    This deliberately excludes a completely empty room and a currently busy
-    burst; it lets the planner fill a stale quiet window rather than waiting
-    for two fresh Bilibili shares that may never arrive.
-    """
+    """Allow admitted, resolved destinations with no recent chatter to receive a share."""
     messages = int(stats.get('messages', 0) or 0)
     newest = float(stats.get('newest', 0) or 0)
-    # 允许“没有新的分享”而继续补位；仍要求聊天流至少有一条真实历史，
-    # 避免刚发现一个从未有过消息的空目标就凭空广播。
+    # Target resolution and group ACL precede this recent-window check.
     quiet_since = now - newest if newest > 0 else now
     return (getattr(cfg, 'low_activity_enabled', True)
-            and messages >= getattr(cfg, 'low_activity_min_messages', 1)
+            and (messages == 0 or messages >= getattr(cfg, 'low_activity_min_messages', 1))
             and stats.get('shares', 0) < cfg.min_shares
             and quiet_since >= getattr(cfg, 'low_activity_idle_seconds', 180))

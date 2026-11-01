@@ -44,7 +44,8 @@
     "chat.get_all_streams",
     "message.get_recent",
     "send.hybrid",
-    "api.call"
+    "api.call",
+    "tool.get_definitions"
   ],
   "i18n": {
     "default_locale": "zh-CN",

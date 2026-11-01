@@ -1400,17 +1400,38 @@ class Dispatcher:
 
     def _broadcast_text(self, target_groups, content, feature="plugins_enabled", module_name=None):
         result = False
-
-        for target in target_groups:
+        targets = list(target_groups)
+        if str(module_name or '').removeprefix('auto:') == 'player_monitor':
+            # Monitor workers start before native adapters. Resolve admitted QQ
+            # groups at broadcast time instead of freezing a WeChat-only list.
+            from llm.core.maibot_runtime import native_runtime
+            loop = native_runtime._loop
+            if loop is not None and loop.is_running():
+                import asyncio
+                from core.community_streams import active_groups
+                from utils.platform_target import target_key
+                future = asyncio.run_coroutine_threadsafe(active_groups('qq'), loop)
+                try:
+                    for stream in future.result(timeout=8):
+                        targets.append(target_key('qq', stream.account_id, stream.scope, 'group', stream.group_id))
+                except Exception as exc:
+                    future.cancel()
+                    print(f'[MC BROADCAST] QQ target discovery failed: {type(exc).__name__}')
+        for target in dict.fromkeys(targets):
             from core.shell_platform_bridge import context_for_target
             from core.plugin_activity import legacy_plugin_scope
-            context = context_for_target(target)
-            if not self._context_feature_enabled(context, feature):
-                continue
-            if module_name and not self._module_enabled_for_group(module_name, target, context):
-                continue
-            with legacy_plugin_scope(self.llm_service, module_name or 'background', context):
-                ok, _ = send(target=target, content=content, mode="wechat_text")
-            result = result or ok
+            try:
+                context = context_for_target(target)
+                if not self._context_feature_enabled(context, feature):
+                    continue
+                if module_name and not self._module_enabled_for_group(module_name, target, context):
+                    continue
+                with legacy_plugin_scope(self.llm_service, module_name or 'background', context):
+                    ok, error = send(target=target, content=content, mode="wechat_text")
+                if str(module_name or '').removeprefix('auto:') == 'player_monitor':
+                    print(f'[MC BROADCAST] target={target} sent={ok} error={error if not ok else ""}')
+                result = result or ok
+            except Exception as exc:
+                print(f'[BROADCAST] target={target} failed: {type(exc).__name__}: {exc}')
 
         return result

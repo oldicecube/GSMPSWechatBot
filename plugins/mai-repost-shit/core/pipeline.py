@@ -258,6 +258,8 @@ class Pipeline:
                 stream_id, kind = resolved
                 target_label = f"{label}（{kind}）"
             result = await self._deliverer.send(stream_id, candidate, video_path, cfg)
+            if result.get('unknown'):
+                report['unknown'] = True
             # 只看 sent：投递失败时 method 仍是 "forward"，用它判断会把失败误报成成功
             sent = bool(result.get("sent"))
             report["targets"].append({"group": target_label, "sent": sent, "method": result.get("method")})

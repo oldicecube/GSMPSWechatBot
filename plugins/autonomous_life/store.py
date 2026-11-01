@@ -22,10 +22,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,stream TEXT,title TEXT,status TEXT,note TEXT,code TEXT,updated REAL);
             CREATE TABLE IF NOT EXISTS interests(stream TEXT,topic TEXT,updated REAL,PRIMARY KEY(stream,topic));
             CREATE TABLE IF NOT EXISTS shares(fingerprint TEXT PRIMARY KEY,day TEXT,stamp REAL,stream TEXT,person TEXT,state TEXT);
+            CREATE TABLE IF NOT EXISTS repost_shares(fingerprint TEXT PRIMARY KEY,day TEXT,stamp REAL,stream TEXT,state TEXT);
+            CREATE INDEX IF NOT EXISTS repost_budget ON repost_shares(stream,day,stamp);
             CREATE TABLE IF NOT EXISTS progress_updates(fingerprint TEXT PRIMARY KEY,stream TEXT,project TEXT,stamp REAL,payload TEXT,state TEXT);
             ''')
             db.execute("UPDATE events SET state='interrupted' WHERE state='running'")
             db.execute("UPDATE shares SET state='unknown' WHERE state='reserved'")
+            db.execute("UPDATE repost_shares SET state='unknown' WHERE state='reserved'")
 
     @contextmanager
     def db(self):
@@ -204,6 +207,23 @@ class Store:
             db.execute('INSERT INTO shares VALUES(?,?,?,?,?,?)', (fingerprint, day, stamp, stream, person, 'reserved',))
         return True
 
+    def reserve_repost(self, day, stamp, stream, fingerprint, limit, gap):
+        """Independent per-destination media budget; ordinary life keeps its own limits."""
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT count(*) FROM repost_shares WHERE stream=? AND day=?', (stream, day)).fetchone()[0] >= limit:
+                return False
+            if db.execute('SELECT 1 FROM repost_shares WHERE stream=? AND stamp>?', (stream, stamp-gap)).fetchone():
+                return False
+            if db.execute('SELECT 1 FROM repost_shares WHERE fingerprint=?', (fingerprint,)).fetchone():
+                return False
+            db.execute('INSERT INTO repost_shares VALUES(?,?,?,?,?)', (fingerprint, day, stamp, stream, 'reserved'))
+        return True
+
+    def repost_result(self, fingerprint, state):
+        with self.db() as db:
+            db.execute('UPDATE repost_shares SET state=? WHERE fingerprint=?', (state, fingerprint))
+
     def share_result(self, fingerprint, state):
         with self.db() as db:
             db.execute('UPDATE shares SET state=? WHERE fingerprint=?', (state, fingerprint))
@@ -220,4 +240,5 @@ class Store:
         with self.db() as db:
             db.execute('DELETE FROM events WHERE stamp<?', (stamp - 90 * 86400,))
             db.execute('DELETE FROM shares WHERE stamp<?', (stamp - 90 * 86400,))
+            db.execute('DELETE FROM repost_shares WHERE stamp<?', (stamp - 90 * 86400,))
             db.execute('DELETE FROM progress_updates WHERE stamp<?', (stamp - 3 * 86400,))

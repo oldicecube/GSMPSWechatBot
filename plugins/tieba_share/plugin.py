@@ -101,7 +101,7 @@ def _read_manifest_version() -> str:
 
 _PLUGIN_VERSION = _read_manifest_version()
 
-from maibot_sdk import Command, MaiBotPlugin, Tool  # noqa: E402
+from maibot_sdk import API, Command, MaiBotPlugin, Tool  # noqa: E402
 from maibot_sdk.types import ToolParameterInfo, ToolParamType  # noqa: E402
 
 from st_card import build_thread_html, image_data_uri  # noqa: E402
@@ -664,6 +664,10 @@ class _ToolOptions:
         return getattr(send, name)
 
 
+class _DeliveryUnknown(RuntimeError):
+    """A transport exception does not prove the remote side rejected a send."""
+
+
 class _SendGate:
     """发送侧的令牌桶 + 失败重试。
 
@@ -752,10 +756,8 @@ class _SendGate:
                 ok = await send(*args, **kwargs)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
-                # 异常不往上抛：一轮搬运几十条消息，一条发不出去
-                # 不该让整轮崩掉、把后面的帖子全丢了。
-                ok = False
+            except Exception as exc:  # noqa: BLE001
+                raise _DeliveryUnknown('send receipt unavailable') from exc
             if ok:
                 return True
             if attempt >= limit:
@@ -776,11 +778,14 @@ class _RoundSummary(str):
     「本轮搬了 N 条」没有任何信息量，只是刷屏。
     """
 
-    __slots__ = ("error",)
+    __slots__ = ("error", "sent", "landed_posts", "unknown")
 
-    def __new__(cls, text: str, *, error: bool = False) -> "_RoundSummary":
+    def __new__(cls, text: str, *, error: bool = False, landed_posts: int = 0, unknown: bool = False) -> "_RoundSummary":
         obj = super().__new__(cls, text)
         obj.error = error
+        obj.sent = landed_posts > 0
+        obj.landed_posts = landed_posts
+        obj.unknown = unknown
         return obj
 
 
@@ -1261,6 +1266,27 @@ class StonePlugin(MaiBotPlugin):
 
     # -- 一轮搬运 ---------------------------------------------------------
 
+    @API('repost.tieba_one', description='统一搬屎：等待贴吧实际发送回执', public=True, timeout_ms=240000)
+    async def repost_one(self, stream_id: str = '', **kwargs):
+        from utils.plugin_stream import stream_for
+        if not self.config.plugin.enabled or not self.config.tool.enabled:
+            return {'success': False, 'sent': False, 'reason': 'tieba disabled'}
+        stream = await stream_for(self.ctx, stream_id)
+        from utils.platform_target import target_key
+        allowed = {str(value) for value in self.config.admin.allow_groups}
+        keys = {str(stream['group_id'])} if stream else set()
+        if stream and stream['platform'] == 'qq':
+            keys.add(target_key('qq', stream['account_id'], stream.get('scope', ''), 'group', stream['group_id']))
+        if not stream or not keys & allowed:
+            return {'success': False, 'sent': False, 'reason': 'tieba destination not allowed'}
+        forums = resolve_forums(self.config.stone)
+        if not forums:
+            return {'success': False, 'sent': False, 'reason': 'no configured forums'}
+        summary = await self._run_round('统一搬屎', streams=[stream_id], count=1, tool_options=True,
+                                        only_forums=[random.choice(forums)], lock_timeout_seconds=120)
+        return {'success': not summary.error, 'sent': summary.sent,
+                'unknown': summary.unknown, 'count': summary.landed_posts, 'reason': str(summary)}
+
     async def _run_round(
         self,
         trigger: str,
@@ -1271,6 +1297,7 @@ class StonePlugin(MaiBotPlugin):
         only_kind: str = "",
         post_at: datetime | None = None,
         tool_options: bool = False,
+        lock_timeout_seconds: float = 0.01,
     ) -> str:
         """搬一轮。streams 给了就只发这些会话（手动模式），否则按群配置发。
 
@@ -1282,7 +1309,7 @@ class StonePlugin(MaiBotPlugin):
         # 不能写成 if self._lock.locked(): return —— 检查和获取之间会让出控制权，
         # 两个调用可能同时通过检查，于是并行搬两轮。直接尝试获取才是原子的。
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=0.01)
+            await asyncio.wait_for(self._lock.acquire(), timeout=lock_timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
             return _RoundSummary("上一轮还没跑完，这次跳过")
         try:
@@ -1394,6 +1421,7 @@ class StonePlugin(MaiBotPlugin):
         # 真正落到群里的帖子数（不是「挑了几条」）。摘要按这个说，见下面的说明。
         landed_posts = 0
         failed = 0
+        unknown = False
         host_error = ""
         # 真正收到帖子的会话。结束语只往这些会话补 —— 一句都没发出去的群
         # 再来一句「这是我今天发现的帖子」只会让人莫名其妙。
@@ -1412,6 +1440,7 @@ class StonePlugin(MaiBotPlugin):
                     outcome = await self._deliver(stream_id, collected, payloads)
                 except Exception as exc:  # noqa: BLE001
                     self.ctx.logger.warning("[搬石] 往 %s 发送失败：%s", stream_id, exc)
+                    unknown = unknown or isinstance(exc, _DeliveryUnknown)
                     failed += 1
                     continue
                 delivered += 1
@@ -1485,7 +1514,7 @@ class StonePlugin(MaiBotPlugin):
         # 结束语：这一轮真把帖子发进过某个群，才补这一句。
         await self._say_closing(cfg, ok_streams)
         self.ctx.logger.info("[搬石] %s结束：%s", trigger, summary)
-        return _RoundSummary(summary, error=is_error)
+        return _RoundSummary(summary, error=is_error, landed_posts=landed_posts, unknown=unknown)
 
     async def _say_closing(self, cfg: Any, streams: Sequence[str]) -> None:
         """一轮结束后，在收到帖子的会话里补一句话（面板上的「结束语」）。
@@ -2015,10 +2044,17 @@ class StonePlugin(MaiBotPlugin):
         正是 issue #1 抱怨的重复。
         """
         cfg = self._send_options()
-        if cfg.forward:
+        from utils.plugin_stream import stream_for
+        stream = await stream_for(self.ctx, stream_id)
+        if not stream:
+            return list(collected)
+        if cfg.forward and stream['platform'] == 'qq':
             # 长图恒开，所以每次都要合成聊天记录；装不下的帖子交回 overflow。
             overflow: list[tuple[Any, Any]] = []
             nodes, overflow = await self._forward_nodes(collected, payloads)
+            for node in nodes:
+                if not node.get('user_id'):
+                    node['user_id'] = str(stream['account_id'])
             sent = False
             if nodes:
                 # 转发是最贵的一次发送（几十 MB 的帧），但**恰恰不能重试**：
@@ -2607,11 +2643,27 @@ class StonePlugin(MaiBotPlugin):
             # 单独发长图时也优先用落盘路径：走 base64 的话一张图就要过一次
             # 16MB 的 RPC 帧，路径只有两百来字节。路径为空才退回内嵌。
             page = paths[index] if index < len(paths) else ""
-            await self._send_page_image(stream_id, page, image_b64)
+            if not await self._send_page_image(stream_id, page, image_b64):
+                return False
         return True
 
-    async def _send_page_image(self, stream_id: str, page_uri: str, image_b64: str) -> None:
+    async def _send_page_image(self, stream_id: str, page_uri: str, image_b64: str) -> bool:
         """发一张长图：有落盘路径就走路径，否则退回内嵌 base64。"""
+        from utils.plugin_stream import stream_for
+        stream = await stream_for(self.ctx, stream_id)
+        if not stream:
+            return False
+        if stream['platform'] == 'wechat':
+            if page_uri:
+                from urllib.parse import urlsplit
+                from urllib.request import url2pathname
+                from pathlib import Path
+                path = url2pathname(urlsplit(page_uri).path) if page_uri.startswith('file:') else page_uri
+                return await self._gate_of().run(self.ctx.send.hybrid,
+                    [{'type': 'file', 'data': {'name': Path(path).name, 'mime_type': 'image/png', 'url': path}}],
+                    stream_id, storage_message=False, _retries=0)
+            return await self._gate_of().run(self.ctx.send.image, image_b64, stream_id,
+                                              storage_message=False, _retries=0)
         if page_uri:
             # 路径发不出去时**不要**重试到底再降级：这里已经有降级路径（内嵌 base64），
             # 重试三次才换路等于白等好几秒。给一次机会，失败立刻降级。
@@ -2624,9 +2676,9 @@ class StonePlugin(MaiBotPlugin):
                 timeout_ms=_VIDEO_SEND_TIMEOUT_MS,
             )
             if sent:
-                return
+                return True
             self.ctx.logger.warning("[搬石] 长图按本地路径发送没成功，改用内嵌图片")
-        await self._gate_of().run(
+        return await self._gate_of().run(
             self.ctx.send.image, image_b64, stream_id, storage_message=False
         )
 

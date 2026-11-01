@@ -43,6 +43,9 @@ async def run(isolated):
     plugin = mod.create_plugin()
     plugin.set_plugin_config(tomllib.loads((ROOT/'plugins/mai-repost-shit/config.toml').read_text(encoding='utf8')))
     check('production_coordinator_enabled', plugin.config.planner.coordinator)
+    # This fixture has only one WeChat stream/history. Cross-platform and empty
+    # QQ windows are covered by repost_dual_delivery_acceptance.py separately.
+    plugin.config.target.groups = [GROUP]
     # Exercise the supported native Planner fallback mode in isolation.
     plugin.config.planner.coordinator = False
     plugin.config.target.active_hours = [0, 24]

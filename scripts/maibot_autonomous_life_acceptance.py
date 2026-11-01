@@ -123,24 +123,33 @@ async def run(root):
     count = llm.await_count; await plugin.consider()
     check('backoff_no_retry_storm', llm.await_count == count)
     plugin.store.set('backoff_until', 0)
-    plugin.store.set('repost_grant', dict(token='one-time', group='test@chatroom', expires=NOW.timestamp()+60))
+    plugin.store.set('repost_grant:one-time', dict(token='one-time', group='test@chatroom', expires=NOW.timestamp()+60))
     check('one_time_grant', (await plugin.consume_grant(grant='one-time',group_id='test@chatroom'))['success'] and not (await plugin.consume_grant(grant='one-time',group_id='test@chatroom'))['success'])
     check('repost_scope_rejected', not (await plugin.repost_opportunity(group_id='outside@chatroom'))['success'])
     old_store = plugin.store
     plugin.store = mod.Store(root/'repost.sqlite3')
-    ctx.call_capability.return_value = [msg(i, user='human-'+str(i%2),text='https://b23.tv/synthetic'+str(i)) for i in range(6)]
+    repost_rows = [msg(i, user='human-'+str(i%2),text='https://b23.tv/synthetic'+str(i)) for i in range(6)]
     llm.return_value = dict(success=True,response='{"repost":true,"query":"Minecraft fun"}')
     async def repost_api(name, **kwargs):
         if name == 'repost.autonomous_one':
             allowed = await plugin.consume_grant(grant=kwargs['grant'],group_id=kwargs['group_id'])
             return {'success':True,'result':{'success':allowed['success'],'sent':allowed['success']}}
         raise AssertionError(name)
-    ctx.api.call.side_effect = repost_api
+    async def repost_capability(name, **kwargs):
+        if name == 'api.call':
+            assert kwargs['timeout_ms'] == 360000
+            return await repost_api(kwargs['api_name'], **kwargs['args'])
+        return repost_rows
+    ctx.call_capability.side_effect = repost_capability
     outcome = await plugin.repost_opportunity(group_id='test@chatroom')
-    check('density_decision_budget_single_use_media_grant',outcome.get('sent') and plugin.store.count('2026-10-29','action')==1)
-    before = ctx.api.call.await_count
+    with plugin.store.db() as db:
+        sent_reposts = db.execute("SELECT count(*) FROM repost_shares WHERE state='sent'").fetchone()[0]
+    check('density_decision_budget_single_use_media_grant',outcome.get('sent') and sent_reposts==1
+          and plugin.store.count('2026-10-29','action')==0)
+    before = sum(call.args == ('api.call',) for call in ctx.call_capability.await_args_list)
     await plugin.repost_opportunity(group_id='test@chatroom')
-    check('density_duplicate_and_share_cooldown',ctx.api.call.await_count==before)
+    check('density_duplicate_and_share_cooldown',sum(call.args == ('api.call',) for call in ctx.call_capability.await_args_list)==before)
+    ctx.call_capability.side_effect = None
     ctx.call_capability.return_value=[msg(1),msg(2,'other')]
     check('no_video_signal_no_autonomous_repost',not (await plugin.repost_opportunity(group_id='test@chatroom'))['success'])
     plugin.store = old_store
