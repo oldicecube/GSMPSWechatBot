@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import random
 import sys
 import tempfile
 from types import ModuleType, SimpleNamespace as NS
@@ -60,6 +61,23 @@ def context():
 
 
 class Scheduling(unittest.IsolatedAsyncioTestCase):
+    async def test_equal_random_weights_availability_and_preserved_draw(self):
+        status = {source: {'available': True} for source in ('tieba', 'bilibili', 'qq_forward')}
+        channels = ['tieba', 'bilibili', 'qq_forward']
+        rng = random.Random(20261101)
+        with patch.object(sources.random, 'shuffle', side_effect=rng.shuffle):
+            orders = [sources.source_order(status, channels, 'qq') for _ in range(10000)]
+        first_bili = sum(order[0] == 'bilibili' for order in orders)
+        self.assertTrue(4800 <= first_bili <= 5200, first_bili)
+        self.assertTrue(all(set(order[:2]) == {'bilibili', 'tieba'} and order[-1] == 'qq_forward' for order in orders))
+        for preferred in ('bilibili', 'tieba'):
+            with patch.object(sources.random, 'shuffle') as shuffle:
+                self.assertEqual(sources.source_order(status, channels, 'wechat', preferred)[0], preferred)
+                shuffle.assert_not_called()
+        status['tieba']['available'] = False
+        self.assertEqual(sources.source_order(status, channels, 'qq', 'tieba'), ['bilibili', 'qq_forward'])
+        self.assertEqual(sources.source_order(status, ['tieba'], 'wechat'), [])
+
     async def test_host_discovery_without_importing_host_registry(self):
         ctx = NS(call_capability=AsyncMock(return_value={'tools': [
             {'name': 'tieba_share'}, {'name': 'share_message_pack'}]}))
@@ -110,14 +128,14 @@ class Scheduling(unittest.IsolatedAsyncioTestCase):
         await plugin._planner_tick()
         await asyncio.sleep(0)
         self.assertEqual({row['args']['group_id'] for row in calls}, {WX, QQ})
-        self.assertTrue(all(row['args']['source'] == 'tieba' for row in calls))
+        self.assertTrue(all(row['args']['source'] in {'tieba', 'bilibili'} for row in calls))
         self.assertTrue(all(row['timeout_ms'] == 360000 for row in calls))
         await plugin._planner_tick()
         self.assertEqual(len(calls), 2)
         gate.set()
         await asyncio.gather(*plugin._repost_tasks.values())
 
-    async def test_priority_fallback_and_unknown_delivery(self):
+    async def test_selected_source_fallback_and_unknown_delivery(self):
         plugin = repost.create_plugin()
         configure(plugin, {'plugin': {'enabled': True}, 'planner': {'coordinator': True},
                                   'target': {'groups': [QQ]}})
@@ -126,17 +144,21 @@ class Scheduling(unittest.IsolatedAsyncioTestCase):
         plugin._set_context(NS(call_capability=AsyncMock(return_value={'success': True})))
         plugin._run_external_source = AsyncMock(return_value={'sent': True})
         plugin._run_and_report = AsyncMock(return_value={'sent': True})
-        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake')
+        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake', source='tieba')
         self.assertEqual(receipt['source'], 'tieba')
         plugin._run_and_report.assert_not_awaited()
         plugin._run_external_source.return_value = {'sent': False}
-        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake')
+        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake', source='tieba')
         self.assertEqual(receipt['source'], 'bilibili')
         plugin._run_and_report.reset_mock()
         plugin._run_external_source.return_value = {'sent': False, 'unknown': True}
-        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake')
+        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake', source='tieba')
         self.assertTrue(receipt['unknown'])
         plugin._run_and_report.assert_not_awaited()
+        plugin._run_external_source.reset_mock()
+        receipt = await plugin.autonomous_one(group_id=QQ, grant='fake', source='bilibili')
+        self.assertEqual(receipt['source'], 'bilibili')
+        plugin._run_external_source.assert_not_awaited()
 
     async def test_coordinator_independent_of_life_backoff_and_global_slot(self):
         plugin = life.create_plugin()

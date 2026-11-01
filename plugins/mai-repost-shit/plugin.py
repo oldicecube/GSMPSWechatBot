@@ -35,7 +35,7 @@ from .core.pretty import PrettyPicker
 from .core.speaker import SpeakerCache, normalize_qq
 from .core.state import StateStore
 from .core.activity import summarize, eligible, is_hot, low_activity_eligible
-from .core.sources import discover, planner_instruction, call_api
+from .core.sources import discover, planner_instruction, call_api, source_order
 
 TOOL_REPOST = "repost_shi"
 TOOL_PRETTY = "repost_pretty"
@@ -82,7 +82,7 @@ class TargetSectionConfig(PluginConfigBase):
     catch_up_minutes: int = Field(default=30, description="错过计划时刻后多久内仍补发，超时则跳过")
     include_header_text: bool = Field(default=True, description="聊天记录里视频上方是否带标题/数据说明")
     source_channels: List[str] = Field(default_factory=lambda: ['tieba', 'bilibili', 'qq_forward'],
-                                       description='启用的来源；贴吧优先于B站，其后为QQ收藏包；未安装的来源自动跳过')
+                                       description='启用的来源；B站与贴吧按1:1等权随机选择，其后为QQ收藏包；列表顺序不影响权重，未安装的来源自动跳过')
 
 
 class PlannerSectionConfig(PluginConfigBase):
@@ -393,7 +393,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             f"搬史机已装载：目标群 {self.config.target.groups or '（未配置）'}，"
             f"模式 {self.config.target.mode}，定时模式每天 {self.config.target.daily_times} 次，播放区间 "
             f"{self.config.source.play_min}~{self.config.source.play_max}，"
-            f"投递方式 QQ合并转发、微信说明文字与MP4文件；贴吧优先"
+            f"投递方式 QQ合并转发、微信说明文字与MP4文件；B站与贴吧等权随机"
         )
         self.ctx.logger.info(f"自然语言点播权限：{self._describe_permission(mode)}")
         self.ctx.logger.info(
@@ -739,12 +739,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
                 )
                 await self._store.save()
                 target_platform = 'qq' if str(group_id).startswith('qq:') else 'wechat'
-                available_sources = [
-                    source for source in self.config.target.source_channels
-                    if self._source_status.get(source, {}).get('available')
-                    and (source != 'qq_forward' or target_platform == 'qq')
-                ]
-                available_sources.sort(key=lambda source: {'tieba': 0, 'bilibili': 1, 'qq_forward': 2}.get(source, 9))
+                available_sources = source_order(self._source_status, self.config.target.source_channels, target_platform)
                 source_hint = available_sources[0] if available_sources else ''
                 if not source_hint:
                     continue
@@ -791,7 +786,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             return min(self.config.tool.min_gap_seconds, cfg.hot_gap_seconds)
         return self.config.tool.min_gap_seconds
 
-    @API('repost.autonomous_one', description='消费一次性授权，按贴吧、B站、QQ收藏包顺序搬一条', public=True, timeout_ms=300000)
+    @API('repost.autonomous_one', description='消费一次性授权，B站与贴吧等权随机搬一条，QQ收藏包后备', public=True, timeout_ms=300000)
     async def autonomous_one(self, group_id: str = '', query: str = '', grant: str = '', **kwargs):
         if (not self.config.plugin.enabled or not self.config.planner.coordinator
                 or group_id not in self.config.target.groups or self._manual_busy):
@@ -804,10 +799,8 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         if not resolved or resolved[1] != '群':
             return {'success': False, 'reason': 'no real group stream'}
         platform = 'qq' if group_id.startswith('qq:') else 'wechat'
-        sources = [source for source in ('tieba', 'bilibili', 'qq_forward')
-                   if source in self.config.target.source_channels
-                   and self._source_status.get(source, {}).get('available')
-                   and (source != 'qq_forward' or platform == 'qq')]
+        sources = source_order(self._source_status, self.config.target.source_channels, platform,
+                               preferred=str(kwargs.get('source') or ''))
         attempts = []
         for source in sources:
             if source == 'bilibili':

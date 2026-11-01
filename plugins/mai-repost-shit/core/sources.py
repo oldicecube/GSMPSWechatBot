@@ -1,6 +1,7 @@
 """Optional native source adapters for the unified repost planner."""
 from __future__ import annotations
 
+import random
 from typing import Any
 
 SOURCE_TOOLS = {
@@ -8,6 +9,21 @@ SOURCE_TOOLS = {
     'qq_forward': ('cateye_forward_messages', 'forward_messages', 'pack_chat_messages', 'share_message_pack'),
     'tieba': ('tieba_share', 'tieba_repost', 'tieba_post_share', 'repost_tieba'),
 }
+
+
+def source_order(status, channels, platform, preferred='') -> list[str]:
+    """Equal first-choice probability for Bilibili/Tieba; keep one draw across RPC."""
+    enabled = set(channels)
+    primary = [source for source in ('bilibili', 'tieba')
+               if source in enabled and status.get(source, {}).get('available')]
+    if preferred in primary:
+        primary.remove(preferred)
+        primary.insert(0, preferred)
+    else:
+        random.shuffle(primary)
+    if platform == 'qq' and 'qq_forward' in enabled and status.get('qq_forward', {}).get('available'):
+        primary.append('qq_forward')
+    return primary
 
 
 async def discover(ctx) -> dict[str, dict[str, Any]]:
@@ -48,5 +64,5 @@ def planner_instruction(status: dict[str, dict[str, Any]]) -> str:
     names = '、'.join(available) or '当前仅有 Bilibili'
     return (f'可用搬运来源：{names}。所有来源共用同一个 Planner、去重、群活跃度判断和分享限额；'
             '来源工具未加载时不要猜工具名、不要模拟成功。QQ 聊天记录优先原样合并转发，贴吧优先长图，'
-            'B站优先视频；优先尝试贴吧，确认没有发送后再尝试B站，然后才是QQ收藏包；仅向当前目标平台投递；媒体发送失败时记录失败，'
+            'B站优先视频；B站和贴吧在均可用时按1:1等权随机选择首选来源，确认未发送后才尝试另一来源，QQ收藏包仍作后备；仅向当前目标平台投递；媒体发送失败时记录失败，'
             '不退化成编造正文。')
