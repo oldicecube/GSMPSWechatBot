@@ -700,7 +700,7 @@ async def execute_reply(
             )
     reply_sequences = [item.sequence for item in reply_items]
     reply_segments = [build_visible_text_from_sequence(sequence) for sequence in reply_sequences]
-    combined_reply_text = "".join(reply_segments)
+    combined_reply_text = "\n\n".join(reply_segments)
     reply_result.completion.response_text = combined_reply_text
     reply_result.text_fragments = reply_segments
     reply_result.monitor_detail = build_reply_monitor_detail(reply_result)

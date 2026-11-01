@@ -56,6 +56,7 @@ from src.maisaka.builtin_tool import (
 )
 from .chat_loop_service import ChatResponse
 from .mode_policy import build_consecutive_wait_reminders
+from .reply_protocol import planner_text_action
 from .tool_result_condenser import condense_tool_result, should_condense_tool_result
 from src.maisaka.visual.chat_history_refresher import (
     has_pending_image_recognition,
@@ -378,10 +379,12 @@ class MaisakaReasoningEngine:
         cycle_detail: CycleDetail,
         state: CycleRuntimeState,
         planner_extra_lines: list[str],
+        protocol_repair_attempted: bool = False,
     ) -> bool:
         """处理 Planner 响应中的工具调用，或无工具输出策略。"""
 
         planner_content = self._get_planner_content(response)
+        decision_content = planner_content
         if (response.tool_calls or not self.passive_replyer_enabled) and self._should_replace_reasoning(planner_content):
             planner_content = "我应该根据我上面思考的内容进行反思，重新思考我下一步的行动，我需要分析当前场景，对话，然后直接输出我的想法："
             replaced_items = replace_output_projection(
@@ -426,6 +429,43 @@ class MaisakaReasoningEngine:
                 status_line=f"状态：{state.cycle_end.detail}",
             )
             return True
+
+        # Some compatible models describe a reply/tool call but emit no actual
+        # function call. Ask once to complete the native protocol; do not send
+        # their analysis or silently mark that intention as executed.
+        action = planner_text_action(decision_content)
+        if not self.passive_replyer_enabled and action != 'none':
+            if not protocol_repair_attempted:
+                logger.warning(f'{self._runtime.log_prefix} Planner 已决定行动但缺少工具调用，补正一次协议')
+                self._runtime._update_stage_status('Planner', '补正缺失的工具调用')
+                tools, reminder = await self._build_action_tool_definitions()
+                started = time.time()
+                corrected = await self._run_interruptible_planner(
+                    injected_user_messages=[reminder] if reminder else None,
+                    tail_user_messages=[
+                        '上一条是内部分析，尚未执行工具，也没有发送回复。请把已决定的行动落实为真实工具调用：'
+                        '需要发言时调用 reply，并提供真实 msg_id 和 reply_reference；'
+                        '仍需查询时先调用相应工具；决定不行动则调用 stop。不要仅描述将要调用。'
+                    ],
+                    tool_definitions=tools,
+                )
+                state.planner_duration_ms += (time.time() - started) * 1000
+                state.planner_ended_at = time.time()
+                cycle_detail.time_records['planner'] = state.planner_duration_ms / 1000
+                state.response = corrected
+                return await self._handle_planner_response_actions(
+                    response=corrected, cycle_detail=cycle_detail, state=state,
+                    planner_extra_lines=planner_extra_lines, protocol_repair_attempted=True,
+                )
+            if action == 'reply':
+                # A second explicit reply decision is unambiguous. Reuse the
+                # native text-guidance entry with the frozen real target;
+                # Replyer still generates every visible message and attachment.
+                logger.warning(f'{self._runtime.log_prefix} Planner 补正后仍缺 reply 调用，按明确决定启动一次 Replyer')
+                await self._reply_from_planner_content(decision_content, cycle_detail, state)
+                self._end_planner_no_tool_cycle(planner_extra_lines, status_line=f'状态：{state.cycle_end.detail}')
+                return True
+            logger.warning(f'{self._runtime.log_prefix} Planner 协议补正后仍未调用查询工具，本轮结束；未执行任何所述操作')
 
         if self.passive_replyer_enabled:
             logger.warning(f"{self._runtime.log_prefix} Planner 未返回正文或工具调用，不启动回复")

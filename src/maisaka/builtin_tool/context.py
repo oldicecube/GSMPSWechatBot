@@ -397,7 +397,25 @@ class BuiltinToolRuntimeContext:
     ) -> List[PostProcessedReplyMessage]:
         """异步处理 replyer 正文和附件，并保留每条消息的发送提示。"""
 
-        if skip_post_process:
+        from src.maisaka.context.reply_segments import split_reply_messages
+        message_parts = split_reply_messages(
+            reply_text,
+            global_config.response_splitter.max_split_num
+            if enable_splitter and global_config.response_splitter.enable and not skip_post_process else 1,
+        )
+        if len(message_parts) > 1:
+            # Explicit empty lines are Replyer's independent-message choice.
+            # Keep those boundaries; native punctuation merging must not undo
+            # them. Hooks and attachment resolution still run once per reply.
+            segments = []
+            for part in message_parts:
+                if skip_post_process:
+                    segments.append(ProcessedResponseSegment(part))
+                else:
+                    segments.extend(await process_llm_response_segments_async(
+                        part, enable_splitter=False, enable_chinese_typo=enable_chinese_typo,
+                    ))
+        elif skip_post_process:
             segments = [ProcessedResponseSegment(reply_text.strip())]
         else:
             segments = await process_llm_response_segments_async(

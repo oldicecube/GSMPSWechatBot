@@ -704,6 +704,11 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         think_level: int = 1,
     ) -> List[ContextItem]:
         # 复古模式将人设与注意事项放在首条 system 消息，其余模板作为一条 user 消息发送
+        if global_config.response_splitter.enable:
+            from src.maisaka.context.reply_segments import message_layout_instruction
+            layout = message_layout_instruction(global_config.response_splitter.max_split_num)
+            if layout:
+                reply_requirements = '\n\n'.join(part for part in (reply_requirements, layout) if part)
         if self._uses_retro_prompt():
             return self._build_retro_request_messages(
                 chat_history=chat_history,
