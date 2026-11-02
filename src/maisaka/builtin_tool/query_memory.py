@@ -52,6 +52,10 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
                     "type": "string",
                     "description": "人物名；用于定向过滤。",
                 },
+                "user_id": {
+                    "type": "string",
+                    "description": "可选：要查询的真实QQ号或wxid，优先于昵称；不能填相似昵称或猜测ID。",
+                },
                 "time_start": {
                     "type": "string",
                     "description": "起始时间，仅接受YYYY/MM/DD或YYYY/MM/DD HH:mm。",
@@ -107,7 +111,7 @@ def _resolve_person_id(
     clean_platform = str(platform or "").strip().lower()
     # QQ identity is authoritative by QQ number.  Never let a nickname-only
     # lookup merge similarly named members.
-    if clean_platform == "qq" and user_id:
+    if clean_platform in {'qq', 'wechat'} and user_id:
         person_id = resolve_person_id_for_memory(
             platform=clean_platform,
             user_id=user_id,
@@ -123,10 +127,11 @@ def _resolve_person_id(
         if person_id:
             return person_id, clean_person_name
 
-    if clean_platform != "qq" and clean_person_name:
+    if clean_person_name:
         person_id = resolve_person_id_for_memory(
             person_name=clean_person_name,
             platform=clean_platform,
+            group_id=group_id,
         )
         if person_id:
             return person_id, clean_person_name
@@ -235,9 +240,11 @@ async def handle_tool(
     person_id, person_name = _resolve_person_id(
         person_name=str(invocation.arguments.get("person_name") or ""),
         platform=platform,
-        user_id=user_id,
+        user_id=str(invocation.arguments.get('user_id') or (user_id if not group_id else '')),
         group_id=group_id,
     )
+    if person_name and not person_id:
+        return tool_ctx.build_failure_result(invocation.tool_name, '未能精确且唯一地识别此人物，请提供完整群昵称或真实QQ号/wxid；不会按相似昵称检索其他人的记忆。')
     respect_filter = bool(invocation.arguments.get("respect_filter", True))
     fallback_applied = False
     fallback_reason = ""

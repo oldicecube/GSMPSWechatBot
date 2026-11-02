@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -278,6 +280,16 @@ class RetrySectionConfig(PluginConfigBase):
     gap_seconds: int = Field(default=15, description="两次尝试之间的间隔（秒），0 表示不等待")
 
 
+class StorySectionConfig(PluginConfigBase):
+    __ui_label__ = 'Story 竖刷推荐'
+    __ui_icon__ = 'video'
+    enabled: bool = Field(default=True, description='搬屎使用真正的Story推荐流和标签权重；关闭后使用旧搜索筛选')
+    use_account: bool = Field(default=False, description='使用已授权账号的推荐，请先在Story标签与授权页扫码')
+    expected_uid: str = Field(default='', description='可选：验证授权账号必须严格匹配此UID，不能仅填UID代替授权')
+    seed_aid: int = Field(default=0, ge=0, description='可选：Story入口视频aid，0表示不指定')
+    parse_linked_enabled: bool = Field(default=True, description='/bv所有适配器所有群聊成功解析并发送后，每个不同标签权重加1')
+
+
 class ShitpostConfig(PluginConfigBase):
     """插件配置。"""
 
@@ -285,6 +297,7 @@ class ShitpostConfig(PluginConfigBase):
     target: TargetSectionConfig = Field(default_factory=TargetSectionConfig)
     planner: PlannerSectionConfig = Field(default_factory=PlannerSectionConfig)
     source: SourceSectionConfig = Field(default_factory=SourceSectionConfig)
+    story: StorySectionConfig = Field(default_factory=StorySectionConfig)
     judge: JudgeSectionConfig = Field(default_factory=JudgeSectionConfig)
     download: DownloadSectionConfig = Field(default_factory=DownloadSectionConfig)
     filters: FilterSectionConfig = Field(default_factory=FilterSectionConfig)
@@ -362,6 +375,8 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         self._reply_suppress_source: Dict[str, str] = {}
         self._source_status: Dict[str, Dict[str, Any]] = {}
         self._repost_tasks = {}
+        self._story = None
+        self._tag_store = None
 
     # ===== 生命周期 =====
 
@@ -377,6 +392,12 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         self._source_status = await discover(self.ctx)
         self.ctx.logger.info('统一搬屎来源状态: %s', self._source_status)
         self._client = BiliClient(self.ctx.logger)
+        from utils.bili_interest import TagStore
+        from .core.story import StoryClient
+        self._tag_store = TagStore(data_dir / 'story.sqlite3')
+        self._tag_store.seed(json.loads((Path(__file__).parent / 'core/story_tags.json').read_text(encoding='utf8')))
+        self._tag_store.set('parse_linked_enabled', self.config.story.parse_linked_enabled)
+        self._story = StoryClient(self._tag_store, self._client, self.ctx.logger)
         self._speakers = SpeakerCache(self.config.tool.speaker_cache_ttl_seconds, self.ctx.logger)
         self._pipeline = Pipeline(
             ctx=self.ctx,
@@ -457,11 +478,17 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         self._loop_task = None
         if self._store is not None:
             await self._store.save()
+        if self._story is not None:
+            await self._story.close()
         if self._client is not None:
             await self._client.aclose()
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         """配置热重载：判据的阈值要跟着换。"""
+        if scope == 'self':
+            self.set_plugin_config(config_data)
+            if self._tag_store:
+                self._tag_store.set('parse_linked_enabled', self.config.story.parse_linked_enabled)
         self.ctx.logger.info(f"配置已更新（scope={scope} version={version}），下一轮生效")
         if self._client is not None and self._pipeline is not None:
             self._pipeline.set_judge(
@@ -649,6 +676,9 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
 
     async def _tick(self) -> None:
         """到点就跑一轮。"""
+        from utils.response_window import response_allowed
+        if not response_allowed():
+            return
         if self._pipeline is None or self._store is None:
             return
         cfg = self.config
@@ -680,10 +710,13 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             return
         store.mark_plan_done(due)
         await store.save()
-        await self._run_and_report(self._run_config())
+        await self._run_and_report(self._run_config(), automatic=True)
 
     async def _planner_tick(self) -> None:
         """只向核心提交跟玩机会；不搜索、不下载、不直接投递。包括外壳已解析后仅入库的消息。"""
+        from utils.response_window import response_allowed
+        if not response_allowed():
+            return
         # Plugin registration order is not stable: tieba-share may load after
         # this coordinator. Refresh source capabilities on each planner tick
         # instead of permanently caching an on-load unavailable result.
@@ -788,6 +821,9 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
 
     @API('repost.autonomous_one', description='消费一次性授权，B站与贴吧等权随机搬一条，QQ收藏包后备', public=True, timeout_ms=300000)
     async def autonomous_one(self, group_id: str = '', query: str = '', grant: str = '', **kwargs):
+        from utils.response_window import response_allowed
+        if not response_allowed():
+            return {'success': False, 'sent': False, 'reason': 'automatic repost outside response window'}
         if (not self.config.plugin.enabled or not self.config.planner.coordinator
                 or group_id not in self.config.target.groups or self._manual_busy):
             return {'success': False, 'reason': 'disabled, disallowed or busy'}
@@ -807,7 +843,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
                 # Serialize shared downloader/state without dropping the other destination.
                 async with self._bili_slot:
                     report = await self._run_and_report(self._run_config(), override_stream=resolved[0],
-                                                       extra_keywords=[query] if query else [])
+                                                       extra_keywords=[query] if query else [], automatic=True)
             else:
                 report = await self._run_external_source(source, group_id, resolved[0], query)
             attempts.append({'source': source, 'sent': report.get('sent') is True})
@@ -831,6 +867,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         override_stream: str = "",
         extra_keywords: Sequence[str] = (),
         channel: str = "shi",
+        automatic: bool = False,
     ) -> Dict[str, Any]:
         """跑一轮并汇报结果，带重入保护。"""
         if self._pipeline is None:
@@ -839,12 +876,23 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             return {"sent": False, "reason": "上一轮还在进行中"}
         self._running = True
         try:
+            candidate = None
+            if channel == 'shi' and self.config.story.enabled and self._story:
+                candidate = await self._story.pick(self.config.story, self.config.filters)
+                if candidate is None:
+                    return {'sent': False, 'reason': 'Story推荐未找到符合时长和标签条件的视频'}
+                # Reserve before physical send; a crash or unknown receipt must not replay it.
+                self._tag_store.mark(candidate.aid, 'reserved')
             report = await self._pipeline.run_once(
                 cfg,
                 override_stream=override_stream,
                 extra_keywords=extra_keywords,
                 channel=channel,
+                candidate_override=candidate,
+                automatic=automatic,
             )
+            if candidate is not None:
+                self._tag_store.mark(candidate.aid, 'sent' if report.get('sent') else 'unknown' if report.get('unknown') else 'failed')
         finally:
             self._running = False
         if self._store is not None:
@@ -855,6 +903,91 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         else:
             self.ctx.logger.info(f"本轮未搬：{report.get('reason')}")
         return report
+
+    @API('repost.manual_one', description='绕过Planner，在当前真实群发送一次B站搬屎', public=True, timeout_ms=300000)
+    async def manual_one(self, stream_id: str = '', **kwargs):
+        from utils.plugin_stream import stream_for
+        if not self.config.plugin.enabled or not await stream_for(self.ctx, stream_id):
+            return {'success': False, 'sent': False, 'reason': 'plugin disabled or unknown group'}
+        async with self._bili_slot:
+            return await self._run_and_report(self._run_config(), override_stream=stream_id)
+
+    @API('repost.story.state', public=False)
+    async def story_state(self, **kwargs):
+        token = self._tag_store.get('auth') or {}
+        return {'success': True, 'tags': [{'tag': name, 'weight': weight} for name, weight in self._tag_store.tags().items()],
+                'authorized': bool(token.get('accessToken')), 'uid': str(token.get('mid') or ''),
+                'use_account': self.config.story.use_account, 'expected_uid': self.config.story.expected_uid,
+                'parse_linked': self.config.story.parse_linked_enabled,
+                'expires_at': token.get('accessTokenExpiresAt'), 'app_key': token.get('appKey', ''),
+                'rules': '每批10条；120秒内；先匹配3标签；20条未命中降为2，50条未命中降为1；权重和+2×标签数；同分保留先来者'}
+
+    @Tool('browse_story', brief_description='只读浏览B站Story推荐视频的标题、作者、时长、标签和链接；不会发送视频，不等于已观看画面。',
+          parameters=[])
+    async def browse_story(self, **kwargs):
+        if not self.config.plugin.enabled or not self._story:
+            return {'success': False, 'error': 'Story未启用'}
+        rows = await self._story.feed(self.config.story, 1)
+        result = []
+        for row in rows[:3]:
+            item = await self._story.candidate(row)
+            if item:
+                result.append({'title': item.title, 'author': item.author, 'tags': item.tags,
+                               'duration': item.duration, 'url': 'https://www.bilibili.com/video/'+item.bvid})
+        return {'success': True, 'items': result, 'viewed_frames': False}
+
+    @API('repost.story.import', public=False)
+    async def story_import(self, text: str = '', mode: str = '', **kwargs):
+        from utils.bili_interest import parse_report
+        values = parse_report(text)
+        self._tag_store.import_tags(values, mode)
+        return {'success': True, 'imported': len(values), 'mode': mode}
+
+    @API('repost.story.edit', public=False)
+    async def story_edit(self, tag: str = '', weight: float = 0, delete: bool = False, **kwargs):
+        self._tag_store.edit(tag, weight, delete)
+        return {'success': True}
+
+    @API('repost.story.auth', public=False, timeout_ms=60000)
+    async def story_auth(self, action: str = '', token_json: str = '', **kwargs):
+        generation = self._tag_store.get('auth_generation', 0)
+        if action == 'start':
+            return await self._story.qr_start()
+        if action == 'poll':
+            return await self._story.qr_poll(self.config.story.expected_uid)
+        if action == 'revoke':
+            self._tag_store.set('auth_generation', generation+1)
+            self._tag_store.set('auth', None); self._tag_store.set('qr', None)
+            return {'success': True, 'state': 'revoked'}
+        if action == 'import':
+            if len(token_json) > 10000:
+                raise ValueError('授权数据过长')
+            token = json.loads(token_json)
+            if not isinstance(token, dict):
+                raise ValueError('授权数据必须是JSON对象')
+            token = token.get('appAuthTokens', token)
+            if not isinstance(token, dict):
+                raise ValueError('appAuthTokens必须是JSON对象')
+            # BewlyCat exports expiration in milliseconds, Python stores seconds.
+            for key in ('accessTokenExpiresAt', 'refreshTokenExpiresAt'):
+                try:
+                    expires = float(token.get(key) or 0)
+                except (ValueError, TypeError):
+                    raise ValueError('授权到期时间格式无效') from None
+                if expires > 100000000000:
+                    token[key] = expires/1000
+            token = await self._story.verify(token, self.config.story.expected_uid)
+            if self._tag_store.get('auth_generation', 0) != generation:
+                raise ValueError('授权已撤销，本次导入取消')
+            self._tag_store.set('auth', token)
+            return {'success': True, 'state': 'authorized', 'uid': token['mid']}
+        if action == 'verify':
+            token = await self._story.verify(self._tag_store.get('auth') or {}, self.config.story.expected_uid)
+            if self._tag_store.get('auth_generation', 0) != generation:
+                raise ValueError('授权已撤销，本次验证取消')
+            self._tag_store.set('auth', token)
+            return {'success': True, 'state': 'authorized', 'uid': token['mid']}
+        raise ValueError('未知授权操作')
 
     # ===== 口语触发（命令链：确定性、不经过模型、不回话）=====
 
@@ -1231,7 +1364,9 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             lines.append("最近搬过：")
             for record in reversed(recent):
                 when = datetime.fromtimestamp(record.get("sent_at", 0)).strftime("%m-%d %H:%M")
-                if str(record.get("channel") or "shi") == "pretty":
+                if record.get('channel') == 'story':
+                    metric = 'Story标签推荐：' + '、'.join(record.get('tags') or [])
+                elif str(record.get("channel") or "shi") == "pretty":
                     label = "收藏/点赞" if str(record.get("favorite_metric") or "fav_like") == "fav_like" else "收藏/播放"
                     metric = f"收藏率 {float(record.get('favorite_ratio') or 0):.0%}（{label}）"
                 else:

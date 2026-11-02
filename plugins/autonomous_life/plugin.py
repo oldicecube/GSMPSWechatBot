@@ -13,6 +13,8 @@ from .store import Store
 from .web import explore
 from .research import ConversationResearch
 from .project import ProjectWorkflow, PROJECT_POLICY, PROJECT_LIFE_POLICY, permission_from_error
+from .fun import FunMixin, FunSection
+from utils.fun_journal import FunJournal
 
 
 class PluginSection(PluginConfigBase):
@@ -59,6 +61,7 @@ class ResearchSection(PluginConfigBase):
 
 
 class Config(PluginConfigBase):
+    fun: FunSection = Field(default_factory=FunSection)
     plugin: PluginSection = Field(default_factory=PluginSection)
     life: LifeSection = Field(default_factory=LifeSection)
     project: ProjectSection = Field(default_factory=ProjectSection)
@@ -181,7 +184,7 @@ def history(messages, group_id, now, ignored):
     return sorted(rows, key=lambda x: x['stamp'])[-60:]
 
 
-class AutonomousLife(MaiBotPlugin):
+class AutonomousLife(FunMixin, MaiBotPlugin):
     config_model = Config
 
     def __init__(self):
@@ -223,7 +226,7 @@ class AutonomousLife(MaiBotPlugin):
             self.lock_file.close(); self.lock_file = None
             raise RuntimeError('another autonomous coordinator owns this data directory')
         self.store = Store(root / 'life.sqlite3')
-        if self.projects.seed():
+        if not self.config.fun.enabled and self.projects.seed():
             # Explicit operator assignment: start preparation once, not on every restart.
             self.store.set('next_check', self.now().timestamp() + 30)
         elif not self.store.get('next_check'):
@@ -294,6 +297,8 @@ class AutonomousLife(MaiBotPlugin):
         return sid, rows
 
     async def consider(self):
+        if self.config.fun.enabled:
+            return await self.fun_consider()
         if self.slot.locked() or not self.store:
             return
         async with self.slot:
@@ -734,6 +739,8 @@ class AutonomousLife(MaiBotPlugin):
                 return {'interests': snap.get('interests', []), 'projects': [
                     {k: p[k] for k in ('title', 'status', 'updated')} for p in snap.get('projects', [])],
                     'actual_experiences': experiences,
+                    'leisure': FunJournal(self.ctx.paths.data_dir/'fun.sqlite3').snapshot(stream_id)
+                        if self.config.fun.enabled else {},
                     'activity_budget': self.store.activity_budget(self.now().date().isoformat(), stream_id,
                         self.now().timestamp(), self.config.life.daily_actions, self.config.life.target_actions,
                         self.config.life.daily_shares) if self.store else {},

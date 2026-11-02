@@ -69,7 +69,9 @@ class Candidate:
             f"播放 {self.play:,}　点赞 {self.like:,}　收藏 {self.favorite:,}\n"
             f"时长 {minutes}分{seconds}秒　"
         )
-        if self.channel == "pretty":
+        if self.channel == 'story':
+            tail = 'Story 推荐 · 标签：' + '、'.join(self.tags[:10]) + '\n'
+        elif self.channel == "pretty":
             label = "收藏/点赞" if self.favorite_metric == "fav_like" else "收藏/播放"
             tail = f"收藏率 {self.favorite_ratio:.0%}（{label}）\n"
         else:

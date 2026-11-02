@@ -235,7 +235,8 @@ async def dispatch_native_plugins(message):
         user_id = message.message_info.user_info.user_id
         group_id = group.group_id if group else ''
         known = command in dispatcher.plugins or any(command in (getattr(m,'AUTO_COMMANDS',()) or ()) for m in dispatcher.modules.values())
-        if known and find_bot_rule('qq', user_id, group_id) and select_plugin_refusal('qq',user_id,group_id,message.message_id):
+        from utils.response_window import response_allowed
+        if response_allowed() and known and find_bot_rule('qq', user_id, group_id) and select_plugin_refusal('qq',user_id,group_id,message.message_id):
             message.message_info.additional_config.update(force_reply=True, bot_plugin_request=True)
             return False
     from contextvars import copy_context

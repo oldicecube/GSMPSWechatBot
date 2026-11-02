@@ -13,6 +13,7 @@ from contextvars import copy_context
 import re
 import threading
 import time
+from uuid import uuid4
 
 from core.sender import send
 from services import bilibili
@@ -94,7 +95,7 @@ def handle(content, context):
     target = _target(context)
     if not target:
         return "找不到发送目标"
-    inflight_key = (target, bvid) if context.get('platform') == 'qq' else bvid
+    inflight_key = (str(context.get('platform') or 'wechat'), target, bvid)
 
     with _INFLIGHT_LOCK:
         if inflight_key in _INFLIGHT:
@@ -105,7 +106,9 @@ def handle(content, context):
         _INFLIGHT.add(inflight_key)
         try:
             position = len(_INFLIGHT)
-            _QUEUE.put_nowait((target, text, bvid, copy_context(), inflight_key))
+            event = str(context.get('messageKey') or context.get('serverId') or uuid4().hex)
+            event = ':'.join([str(context.get('platform') or 'wechat'), target, event])
+            _QUEUE.put_nowait((target, text, bvid, copy_context(), inflight_key, event))
         except queue.Full:
             _INFLIGHT.discard(inflight_key)
             return f"B站视频下载队列已满（上限 {QUEUE_LIMIT}），请稍后再试"
@@ -119,7 +122,7 @@ def _worker_loop():
         target, text, bvid = job[:3]
         job_context = job[3] if len(job) > 3 else copy_context()
         try:
-            job_context.run(_run_job, target, text, bvid)
+            job_context.run(_run_job, target, text, bvid, job[5] if len(job)>5 else uuid4().hex)
         except Exception as exc:
             print(f"[BV] unexpected job error bvid={bvid}: {exc}", flush=True)
             job_context.run(_send_text, target, _failure_text(exc))
@@ -129,7 +132,7 @@ def _worker_loop():
             _QUEUE.task_done()
 
 
-def _run_job(target, text, bvid):
+def _run_job(target, text, bvid, interest_event=''):
     os.makedirs(TEMP_DIR, exist_ok=True)
     file_id = bvid if _BVID_RE.fullmatch(bvid) else 'short_' + hashlib.sha256(bvid.encode()).hexdigest()[:16]
     path = os.path.join(TEMP_DIR, f"{file_id}_{int(time.time() * 1000)}.mp4")
@@ -147,6 +150,16 @@ def _run_job(target, text, bvid):
             _send_text(target, _failure_text(error))
             return
         _send_text(target, f"解析成功！{title}")
+        try:
+            from utils.bili_interest import default_path, TagStore
+            if default_path().is_file():
+                store = TagStore()
+                if store.get('parse_linked_enabled', False):
+                    tags = bilibili.fetch_video_tags(info)
+                    store.record_parse(str(info.get('bvid') or bvid), tags, interest_event or uuid4().hex)
+        except Exception as exc:
+            # Tag learning is optional and never reverses a successful video send.
+            print(f'[BV] Story tag learning failed: {type(exc).__name__}', flush=True)
         print(f"[BV] sent bvid={bvid} title={title!r}", flush=True)
     except bilibili.BilibiliError as exc:
         print(f"[BV] failed bvid={bvid}: {exc}", flush=True)

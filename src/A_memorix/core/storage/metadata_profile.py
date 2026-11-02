@@ -378,7 +378,7 @@ class MetadataProfileMixin:
 
     @staticmethod
     def _normalize_person_profile_aliases(aliases: List[str]) -> List[str]:
-        """校验并按大小写无关规则去重人工别名。"""
+        """校验并按精确字符串去重人工别名。"""
         if not isinstance(aliases, list):
             raise ValueError("aliases 必须是字符串列表")
 
@@ -392,7 +392,7 @@ class MetadataProfileMixin:
                 continue
             if len(alias) > 128:
                 raise ValueError("单个别名不能超过 128 个字符")
-            key = alias.casefold()
+            key = alias
             if key in seen:
                 continue
             seen.add(key)
@@ -403,6 +403,18 @@ class MetadataProfileMixin:
         if len(normalized) > 100:
             raise ValueError("人物别名不能超过 100 个")
         return normalized
+
+    def find_exact_profile_alias_ids(self, alias: str) -> list[str]:
+        """Only explicit, current profile aliases can identify a person."""
+        rows = self._conn.execute('SELECT person_id,aliases_json FROM person_profile_alias_overrides').fetchall()
+        result = set()
+        for person_id, payload in rows:
+            try:
+                if alias in json.loads(payload):
+                    result.add(str(person_id))
+            except (ValueError, TypeError):
+                continue
+        return sorted(result)
 
     def get_person_profile_alias_override(self, person_id: str) -> Optional[Dict[str, Any]]:
         """读取人工维护的人物别名集合。"""

@@ -377,8 +377,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         回填最近的用户消息作为可引用目标。返回本次回填的消息条数。
         """
 
+        from src.maisaka.context.freshness import is_stale_message
         if any(
-            isinstance(message, SessionBackedMessage) and message.source_kind == "user" and message.message_id
+            isinstance(message, SessionBackedMessage) and message.source_kind == "user" and message.message_id and not is_stale_message(message.original_message)
             for message in self._chat_history
         ):
             return 0
@@ -424,7 +425,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         }
         restored_history: list[LLMContextMessage] = []
         for message in recent_messages:
-            if message.is_notify or message.message_info.additional_config.get("wechat", {}).get("prompt_visible") is False or message.message_id in existing_message_ids:
+            if is_stale_message(message) or message.is_notify or message.message_info.additional_config.get("wechat", {}).get("prompt_visible") is False or message.message_id in existing_message_ids:
                 continue
             history_message = await self._reasoning_engine._build_history_message(message, source_kind="user")
             if history_message is not None:
@@ -799,6 +800,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
     def _build_proactive_trigger_message(self, task_id: str, description: str = "插件主动聊天任务") -> SessionMessage:
         """构造主动任务触发消息，不写入消息数据库。"""
 
+        bot_user_id = self.chat_stream.account_id
+        if self.chat_stream.platform == 'wechat':
+            from utils.wechat_identity import canonical_wechat_user_id
+            bot_user_id = canonical_wechat_user_id(bot_user_id)
         message = SessionMessage(
             message_id=task_id,
             timestamp=datetime.now(),
@@ -806,14 +811,17 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         )
         message.session_id = self.session_id
         message.message_info = MessageInfo(
-            user_info=self._build_runtime_user_info(),
+            user_info=UserInfo(
+                user_id=bot_user_id or 'maisaka_internal',
+                user_nickname=global_config.bot.nickname, user_cardname=None),
             group_info=self._build_group_info(),
-            additional_config={},
+            additional_config={'proactive_target': True},
         )
         message.account_id = self.chat_stream.account_id
         message.scope = self.chat_stream.scope
         message.raw_message = MessageSequence([TextComponent(description)])
         message.processed_plain_text = description
+        message.is_notify = True
         return message
 
     def _queue_proactive_turn(
@@ -837,6 +845,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
         trigger_message = self._proactive_trigger_message
         self._proactive_trigger_message = None
+        self._active_proactive_message = trigger_message
         return trigger_message
 
     def _consume_proactive_logical_turn_id(self) -> str | None:
@@ -1062,6 +1071,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
     def _get_effective_reply_frequency(self) -> float:
         """返回当前会话生效的回复频率。"""
+        from utils.response_window import response_allowed
+        if self.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
+            return 0.0
         if not self.chat_stream.is_group_session:
             # 私聊只使用暂停开关，忽略旧频率、动态频率规则与插件频率倍率。
             return ChatConfigUtils.get_talk_value(self.session_id, is_group_chat=False)
@@ -1109,6 +1121,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         normalized_message_id = str(message_id or "").strip()
         if not normalized_message_id:
             return None
+        proactive = getattr(self, '_active_proactive_message', None)
+        if proactive is not None and proactive.message_id == normalized_message_id:
+            return proactive
 
         for history_message in reversed(self._chat_history):
             if isinstance(history_message, SessionBackedMessage) and history_message.message_id == normalized_message_id:
@@ -1635,6 +1650,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
         self._last_processed_index = len(self.message_cache)
         self._fixed_message_debouncer.consume()
+        from src.maisaka.context.freshness import is_stale_message
+        pending_messages = [message for message in pending_messages if not is_stale_message(message)]
         # logger.info(
         # f"{self.log_prefix} 已从消息缓存区[{start_index}:{self._last_processed_index}] "
         # f"收集 {len(pending_messages)} 条新消息"

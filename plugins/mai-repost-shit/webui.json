@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "required_capabilities": [
+    "custom_pages"
+  ],
+  "workspace_title": "Story 搬屎",
+  "pages": [
+    {
+      "id": "story",
+      "mode": "custom",
+      "title": "Story 标签与授权",
+      "description": "管理竖刷推荐的标签权重、报告导入和哔哩哔哩账号授权",
+      "placement": "workspace",
+      "icon": "settings",
+      "entry": "webui/story.html",
+      "queries": {
+        "state": {
+          "api": "repost.story.state",
+          "parameters": {}
+        }
+      },
+      "actions": {
+        "importTags": {
+          "api": "repost.story.import",
+          "parameters": {
+            "text": {
+              "type": "string",
+              "max_length": 60000
+            },
+            "mode": {
+              "type": "string",
+              "choices": [
+                "replace",
+                "update",
+                "add",
+                "merge"
+              ]
+            }
+          },
+          "confirmation": "按已选择的模式导入标签？完全覆盖会删除文件中未包含的现有标签。"
+        },
+        "edit": {
+          "api": "repost.story.edit",
+          "parameters": {
+            "tag": {
+              "type": "string",
+              "max_length": 120
+            },
+            "weight": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "delete": {
+              "type": "boolean"
+            }
+          }
+        },
+        "auth": {
+          "api": "repost.story.auth",
+          "parameters": {
+            "action": {
+              "type": "string",
+              "choices": [
+                "start",
+                "poll",
+                "verify",
+                "import"
+              ]
+            },
+            "token_json": {
+              "type": "string",
+              "max_length": 10000
+            }
+          }
+        },
+        "revoke": {
+          "api": "repost.story.auth",
+          "parameters": {
+            "action": {
+              "type": "string",
+              "choices": [
+                "revoke"
+              ]
+            }
+          },
+          "confirmation": "清除本地保存的哔哩哔哩授权？账号推荐将需要重新扫码。"
+        }
+      }
+    }
+  ]
+}

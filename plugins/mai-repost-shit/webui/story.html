@@ -1,0 +1,56 @@
+<style>
+  *{box-sizing:border-box}body{margin:0}.layout{display:grid;gap:18px;padding:12px;max-width:1200px;margin:auto}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}h2{margin:0;font-size:20px}p{line-height:1.6}
+  input,select{max-width:100%}table{color:inherit}table input{width:110px}.scroll{overflow:auto}.maibot-card{min-width:0}
+  #qr{width:220px;height:220px;display:none}#error{white-space:pre-wrap;color:var(--maibot-danger)}
+  #report{display:none}.maibot-input[type=password]{width:min(650px,100%)}
+</style>
+<main class="maibot-page layout">
+  <section class="maibot-card"><h2 class="maibot-card-header">Story 标签与账号授权</h2>
+    <p id="rules" class="maibot-muted"></p><p>推荐开关、是否使用账号、指定 UID、入口 aid 和 /bv 联动开关可在此插件的原生「配置 → Story 竖刷推荐」中修改。</p>
+    <div class="row"><span id="auth" class="maibot-badge"></span><button id="refresh" class="maibot-button">刷新状态</button></div>
+    <p id="error" role="alert"></p><p id="notice" role="status"></p>
+  </section>
+  <section class="maibot-card"><h2 class="maibot-card-header">指定账号的竖刷推荐</h2>
+    <p>只填 UID 无法使用该账号的推荐。请用手机哔哩哔哩扫描二维码并确认授权，再核对返回的账号 UID。授权沿用 BewlyCat / PiliPlus 的 HD AppKey，Token 只保存在服务器本地，不回传到此页面。</p>
+    <div class="row"><button id="login" class="maibot-button maibot-button-primary">申请登录二维码</button><button id="verify" class="maibot-button">验证现有授权</button><button id="revoke" class="maibot-button maibot-button-danger">清除本地授权</button></div>
+    <img id="qr" alt="请使用哔哩哔哩扫码授权"><p id="loginState" class="maibot-muted"></p>
+    <details><summary>导入已有 BewlyCat appAuthTokens</summary><p>仅接受匹配 HD AppKey 的 App 授权数据；网页 Cookie、UID 和其他 AppKey 的 Token 不能代替。导入后通过 myinfo 验证，原始数据不会显示。</p>
+      <input id="tokens" type="password" class="maibot-input" autocomplete="off" placeholder="粘贴 appAuthTokens JSON"><button id="importAuth" class="maibot-button">验证并导入</button>
+    </details>
+  </section>
+  <section class="maibot-card"><h2 class="maibot-card-header">导入标签报告</h2>
+    <p>支持「排名　标签　出现视频数」格式的 UTF-8 TXT 报告，最多 60 KB。选择文件后，必须选择一种导入方式并确认。</p>
+    <input id="file" type="file" accept=".txt,text/plain"><span id="fileInfo" class="maibot-muted"></span>
+    <div class="row"><select id="mode" class="maibot-select"><option value="">请选择导入方式</option><option value="replace">完全覆盖：删除现有标签后导入</option><option value="update">部分覆盖：同名权重替换，保留文件未包含的标签</option><option value="add">新增：只增加配置中不存在的标签</option><option value="merge">合并：同名权重累加，其他标签取并集</option></select><button id="import" class="maibot-button maibot-button-primary">确认导入</button></div>
+  </section>
+  <section class="maibot-card"><h2 class="maibot-card-header">标签与权重</h2>
+    <div class="row"><input id="tag" class="maibot-input" maxlength="120" placeholder="新标签 / 已有标签"><input id="weight" class="maibot-input" type="number" min="0" max="1000000" step="1" value="1"><button id="add" class="maibot-button maibot-button-primary">添加或更新</button></div>
+    <p class="maibot-muted">同一视频的同名标签只计一次。分数＝匹配标签的权重之和＋匹配标签数量×2；同分按推荐流先后选择。/bv 联动开启时，每次成功解析并发送的视频标签各加 1。</p>
+    <input id="search" class="maibot-input" placeholder="筛选标签"><span id="count" class="maibot-badge"></span>
+    <div class="scroll"><table class="maibot-table"><thead><tr><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="tags"></tbody></table></div>
+    <div class="row"><button id="previous" class="maibot-button">上一页</button><span id="page"></span><button id="next" class="maibot-button">下一页</button></div>
+  </section>
+</main>
+<script>
+(() => {
+  const $=id=>document.getElementById(id);let rows=[],page=0,report='',timer=null;
+  const error=e=>{$('error').textContent=String(e.message||e)};
+  async function action(name,args={}){const r=await maibot.action(name,args);if(r?.success===false)throw new Error(r.reason||r.error||r.state||'操作失败');return r}
+  function render(){const filtered=rows.filter(r=>r.tag.includes($('search').value));const pages=Math.max(1,Math.ceil(filtered.length/40));page=Math.max(0,Math.min(page,pages-1));$('count').textContent=filtered.length+' 个标签';$('page').textContent=(page+1)+' / '+pages;$('tags').replaceChildren();
+    for(const item of filtered.slice(page*40,page*40+40)){const tr=document.createElement('tr'),name=document.createElement('td'),td=document.createElement('td'),ops=document.createElement('td'),input=document.createElement('input');name.textContent=item.tag;input.className='maibot-input';input.type='number';input.min='0';input.max='1000000';input.value=item.weight;td.append(input);
+      for(const [label,remove] of [['保存',false],['删除',true]]){const button=document.createElement('button');button.className='maibot-button';button.textContent=label;button.onclick=()=>run(async()=>{await action('edit',{tag:item.tag,weight:Number(input.value),delete:remove});await refresh()});ops.append(button)}tr.append(name,td,ops);$('tags').append(tr)}}
+  async function refresh(){const r=await maibot.query('state');rows=r.tags||[];$('rules').textContent=r.rules;$('auth').textContent=(r.authorized?'已保存授权 UID '+r.uid:'尚未授权')+' · '+(r.use_account?'账号推荐':'匿名推荐');render()}
+  async function run(fn){$('error').textContent='';try{await fn()}catch(e){error(e)}}
+  $('refresh').onclick=()=>run(refresh);$('search').oninput=()=>{page=0;render()};$('previous').onclick=()=>{page--;render()};$('next').onclick=()=>{page++;render()};
+  $('add').onclick=()=>run(async()=>{await action('edit',{tag:$('tag').value,weight:Number($('weight').value),delete:false});await refresh()});
+  $('file').onchange=()=>run(async()=>{report='';$('mode').value='';const f=$('file').files[0];if(!f)return;if(f.size>60000)throw new Error('文件超过60KB');report=await f.text();$('fileInfo').textContent=f.name+' · '+f.size+' 字节'});
+  $('import').onclick=()=>run(async()=>{if(!report||!$('mode').value)throw new Error('请先选择文件及导入方式');const r=await action('importTags',{text:report,mode:$('mode').value});$('notice').textContent='已导入 '+r.imported+' 个标签';await refresh()});
+  $('verify').onclick=()=>run(async()=>{const r=await action('auth',{action:'verify'});clearTimeout(timer);$('qr').style.display='none';$('notice').textContent='已验证账号 UID '+r.uid;await refresh()});
+  $('revoke').onclick=()=>run(async()=>{clearTimeout(timer);await action('revoke',{action:'revoke'});$('qr').style.display='none';await refresh()});
+  $('importAuth').onclick=()=>run(async()=>{const text=$('tokens').value;$('tokens').value='';const r=await action('auth',{action:'import',token_json:text});clearTimeout(timer);$('qr').style.display='none';$('notice').textContent='授权账号 UID '+r.uid;await refresh()});
+  $('login').onclick=()=>run(async()=>{clearTimeout(timer);const r=await action('auth',{action:'start'});$('qr').src=r.image;$('qr').style.display='block';$('loginState').textContent='请扫码并在哔哩哔哩中确认；二维码有效期约3分钟';const deadline=Date.now()+180000;
+    async function poll(){try{if(Date.now()>deadline){$('loginState').textContent='二维码已过期，请重新申请';return}const v=await action('auth',{action:'poll'});if(v.state==='authorized'){$('loginState').textContent='授权成功，UID '+v.uid;$('qr').style.display='none';await refresh();return}timer=setTimeout(poll,3000)}catch(e){error(e)}}timer=setTimeout(poll,3000)});
+  maibot.ready.then(()=>run(refresh));window.addEventListener('pagehide',()=>clearTimeout(timer));
+})();
+</script>

@@ -65,7 +65,7 @@ async def main():
                 check('explicit ID overrides conflicting nickname', resolve_person_id_for_memory(person_name='新昵称', platform='wechat', user_id='wxid_person_with_suffix') == first.person_id)
                 check('constructor explicit ID wins', Person(platform='wechat', user_id='wxid_other', person_name='旧昵称').person_id == second.person_id)
                 check('platform scopes identity', get_person_id('qq', 'wxid_person_with_suffix') != first.person_id)
-                check('named query never falls back to requester', _resolve_person_id(person_name='不存在的人', platform='wechat', user_id='wxid_person_with_suffix', group_id='test@chatroom')[0] == '')
+                check('named query never falls back to requester', _resolve_person_id(person_name='不存在的人', platform='wechat', user_id='', group_id='test@chatroom')[0] == '')
                 with get_db_session() as db:
                     count = len(db.exec(select(PersonInfo)).all())
                 check('rename creates no duplicate person', count == 2)

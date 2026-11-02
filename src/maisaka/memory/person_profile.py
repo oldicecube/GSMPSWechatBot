@@ -193,6 +193,8 @@ def _extract_profile_text(payload: object) -> str:
 
 
 def _profile_display_name(candidate: PersonProfileCandidate, payload: object) -> str:
+    if candidate.person_name:
+        return candidate.person_name
     if isinstance(payload, dict):
         payload_name = _clean_text(payload.get("person_name"))
         if payload_name:
@@ -215,7 +217,9 @@ def _format_profile_reference_block(blocks: Sequence[str]) -> str:
         "【人物画像-内部参考】\n"
         "以下内容仅供内部推理，不要向用户逐字复述。\n\n"
         f"{joined_blocks}\n\n"
-        "使用时把它当作对当前人物的背景理解；若与当前对话冲突，以当前对话为准。"
+        "身份以平台和用户ID为准；群昵称必须完整精确匹配，不能把相似昵称认作同一个人。"
+        "别称只有明确记录在对应人物画像中才可使用，冲突或同名时不猜。当前群名片和稳定ID优先于旧显示名，"
+        "新证据应修正旧推断；除已验证的账号绑定外，不因昵称、口吻或经历相似合并人物。"
     )
 
 
@@ -307,6 +311,9 @@ async def build_person_profile_injection_messages(
 
         display_name = _profile_display_name(candidate, payload)
         identity = f"身份ID：{anchor_message.platform}:{candidate.user_id}；person_id={candidate.person_id}"
+        remembered_name = _clean_text(payload.get('person_name'))
+        if remembered_name and remembered_name != display_name:
+            identity += f'；画像中明确记录的称呼：{remembered_name}'
         if candidate.person_name and candidate.person_name != display_name:
             identity += f"；本次显示名：{candidate.person_name}"
         blocks.append(_format_profile_person_block(display_name, identity + '\n' + profile_text))

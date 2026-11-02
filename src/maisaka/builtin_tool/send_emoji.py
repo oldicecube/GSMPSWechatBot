@@ -453,6 +453,12 @@ async def handle_tool(
     """执行 send_emoji 内置工具。"""
 
     del context
+    from utils.response_window import response_allowed
+    if tool_ctx.runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
+        return tool_ctx.build_failure_result(invocation.tool_name, '当前处于LLM不响应时段，不发送自主表情。')
+    from utils.fun_share_budget import reserve_for_turn
+    if not reserve_for_turn(tool_ctx):
+        return tool_ctx.build_failure_result(invocation.tool_name, '乐子主动分享额度或间隔尚未恢复，暂不发送自主表情。')
     context_texts = [
         message.processed_plain_text.strip()
         for message in tool_ctx.runtime._chat_history[-5:]
@@ -513,6 +519,8 @@ async def handle_tool(
             ),
         )
 
+    from utils.fun_share_budget import record_result
+    record_result(tool_ctx, 'sent' if send_result.success else 'failed')
     if send_result.success:
         structured_result["message"] = _EMOJI_SUCCESS_MESSAGE
         structured_result["reason"] = selection_metadata["reason"]

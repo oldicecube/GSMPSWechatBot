@@ -28,6 +28,8 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: "Plug
         cap_service.register_capability(name, impl)
 
     _register("send.text", manager._cap_send_text)
+    from .core import _fun_control
+    _register('maisaka.fun.control', _fun_control)
     _register("wechatbot.minecraft_rcon", manager._cap_wechatbot_rcon)
     _register('wechatbot.owned_plugins', manager._cap_owned_plugin_tools)
     _register("send.emoji", manager._cap_send_emoji)

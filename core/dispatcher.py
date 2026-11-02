@@ -330,9 +330,10 @@ class Dispatcher:
         if platform not in {'wechat', 'qq'}:
             raise ValueError('Unsupported shell plugin platform')
         plugins_only = platform == 'qq' or bool(context.get('_shell_plugins_only'))
+        from utils.response_window import response_allowed
 
         # Decide before AUTO/command handlers can perform the requested action.
-        if not plugins_only and command and self.llm_service and getattr(self.llm_service, "native_ingress", False) and self._context_feature_enabled(context, "llm_enabled"):
+        if response_allowed() and not plugins_only and command and self.llm_service and getattr(self.llm_service, "native_ingress", False) and self._context_feature_enabled(context, "llm_enabled"):
             from llm.core.wechat_translation import wire_fields, external_id
             from src.common.bot_interaction_policy import find_bot_rule, select_plugin_refusal
             fields = wire_fields(context)
@@ -963,6 +964,9 @@ class Dispatcher:
         conversation_priority=None,
         _from_direct_queue=False,
     ):
+        from utils.response_window import response_allowed
+        if not response_allowed():
+            return None
         if not self._context_feature_enabled(context, "llm_enabled"):
             return None
         # Attention and ordinary autonomous pulls are cheap to skip when a

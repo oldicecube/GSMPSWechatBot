@@ -157,6 +157,12 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         # 不能依赖昵称/群名片等可控文本，避免误判和提示注入。
         if message.source_kind != "guided_reply":
             return ""
+        from src.common.bot_interaction_policy import message_bot_rule
+        from src.maisaka.context.planner_messages import is_current_account
+        original = message.original_message
+        if message_bot_rule(original) is not None or not is_current_account(
+                original.platform, getattr(original, 'account_id', ''), original.message_info.user_info.user_id):
+            return ''
 
         plain_text = message.processed_plain_text.strip()
         _, body = parse_speaker_content(plain_text)
@@ -177,7 +183,13 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         if not target_content:
             target_content = "[无可见文本内容]"
 
-        if is_bot_self(reply_message.platform, user_info.user_id):
+        if reply_message.message_info.additional_config.get('proactive_target') is True:
+            return (f'当前主动发言入口 msg_id={target_message_id}，不是群友消息，也不是你已发送过的发言。'
+                    '按Planner本轮决定分享已确认的发现，不要回答旧问题或把任务描述当作已完成的经历。')
+
+        from src.maisaka.context.planner_messages import is_current_account
+        if is_bot_self(reply_message.platform, user_info.user_id) or is_current_account(
+                reply_message.platform, getattr(reply_message, 'account_id', ''), user_info.user_id):
             return "\n".join(
                 [
                     f"你想要补充说明你自己（{bot_name}） 发送的 msg_id为 {target_message_id} 的消息，"
@@ -205,6 +217,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
 
         target_lines = [
             f"你想要回复的消息是 {sender_name} 发送的 msg_id为 {target_message_id} 的消息，你这次要回复的就是这条目标消息，不要把其他历史消息当成当前回复对象。",
+            f'- 身份键：{reply_message.platform}:{user_info.user_id}；昵称必须完整精确匹配，不能按相似昵称认人。',
         ]
         if quote_ids:
             target_lines.append(f"- quote={','.join(to_display_message_id(quote_id) for quote_id in quote_ids)}")

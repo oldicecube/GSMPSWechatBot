@@ -49,7 +49,7 @@ from src.llm_models.model_client.base_client import (
 from src.llm_models.generation_diagnostics import sanitize_diagnostic_url
 from src.llm_models.quota_cooldown import blocked_reason, explicit_quota_exhaustion, mark_exhausted, mark_rate_limited, remaining_seconds
 from src.llm_models.image_normalizer import normalize_context_images
-from src.llm_models.request_pacing import wait_for_request_slot
+from src.llm_models.request_pacing import wait_for_request_slot, pacing_remaining, try_request_slot, LocalRateLimitError
 from src.llm_models.request_snapshot import (
     attach_request_snapshot,
     format_request_snapshot_log_info,
@@ -966,6 +966,16 @@ class LLMOrchestrator:
         if not available_models:
             raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
 
+        if not requested_model_name and self.task_name not in EMBEDDING_TASK_NAMES:
+            ready = {}
+            for name, scores in available_models.items():
+                info = TempMethodsLLMUtils.get_model_info_by_name(name)
+                provider = TempMethodsLLMUtils.get_provider_by_name(info.api_provider)
+                if not blocked_reason(provider, info) and pacing_remaining(provider, info) <= 0:
+                    ready[name] = scores
+            if ready:
+                available_models = ready
+
         if self.task_name in EMBEDDING_TASK_NAMES:
             # 嵌入模型的向量空间必须保持一致，多模型间随机或均衡切换会污染向量库，
             # 因此这里忽略配置的选择策略，强行按配置顺序优先选择。
@@ -1055,6 +1065,7 @@ class LLMOrchestrator:
         client: BaseClient,
         request: ClientRequest,
         retry_limit: Optional[int] = None,
+        wait_for_slot: bool = True,
     ) -> APIResponse:
         """在单个模型上执行请求，并处理重试逻辑。
 
@@ -1098,7 +1109,10 @@ class LLMOrchestrator:
             attach_request_snapshot(error, snapshot_path)
 
         while retry_remain > 0:
-            await wait_for_request_slot(api_provider, model_info, self.request_type)
+            if wait_for_slot:
+                await wait_for_request_slot(api_provider, model_info, self.request_type)
+            elif not try_request_slot(api_provider, model_info):
+                raise LocalRateLimitError(pacing_remaining(api_provider, model_info))
             # A different concurrent task may have received 429 while this
             # request waited in the pacing queue. Recheck at dispatch time.
             if reason := blocked_reason(api_provider, model_info):
@@ -1109,17 +1123,18 @@ class LLMOrchestrator:
                 active_request.trace_context.model_attempt += 1
                 active_request.trace_context.current_attempt_started_at = time.time()
             try:
-                async with track_model_task_usage(
-                    self.task_name, model_info.name, model_info.model_identifier, api_provider.name,
-                ):
-                    if isinstance(active_request, ResponseRequest):
-                        response = await client.get_response(active_request)
-                    elif isinstance(active_request, EmbeddingRequest):
-                        response = await client.get_embedding(active_request)
-                    elif isinstance(active_request, ImageEmbeddingRequest):
-                        response = await client.get_image_embedding(active_request)
-                    else:
-                        response = await client.get_audio_transcriptions(active_request)
+                async with asyncio.timeout(self.model_for_task.hard_timeout):
+                    async with track_model_task_usage(
+                        self.task_name, model_info.name, model_info.model_identifier, api_provider.name,
+                    ):
+                        if isinstance(active_request, ResponseRequest):
+                            response = await client.get_response(active_request)
+                        elif isinstance(active_request, EmbeddingRequest):
+                            response = await client.get_embedding(active_request)
+                        elif isinstance(active_request, ImageEmbeddingRequest):
+                            response = await client.get_image_embedding(active_request)
+                        else:
+                            response = await client.get_audio_transcriptions(active_request)
                 self._record_success_generation_attempt(
                     api_provider=api_provider,
                     request=active_request,
@@ -1309,6 +1324,11 @@ class LLMOrchestrator:
             except ReqAbortException:
                 raise
 
+            except asyncio.TimeoutError:
+                # Preserve the timeout type for the wrapper's task-specific
+                # diagnostic, rather than misreporting it as an unknown error.
+                raise
+
             except Exception as e:
                 await ensure_attempt_snapshot(e)
                 logger.error(traceback.format_exc())
@@ -1331,8 +1351,11 @@ class LLMOrchestrator:
         client: BaseClient,
         request: ClientRequest,
         model_name: str,
+        wait_for_slot: bool = True,
     ) -> APIResponse:
-        """对 `_attempt_request_on_model` 套一层任务级 hard_timeout。
+        """将单次真实网络请求的 hard_timeout 转换为任务级诊断。
+
+        本地节流排队和重试退避不占用模型生成时限；实际请求在内部单独限时。
 
         单次模型尝试超时时把 TimeoutError 转成 LLMTaskTimeoutError（继承 ModelAttemptFailed），
         由 `_execute_request` 内既有的 `except ModelAttemptFailed` 分支接住，按"切下一个模型"
@@ -1341,10 +1364,9 @@ class LLMOrchestrator:
         """
         timeout_s = self.model_for_task.hard_timeout
         try:
-            return await asyncio.wait_for(
-                self._attempt_request_on_model(api_provider, client, request=request),
-                timeout=timeout_s,
-            )
+            # Pacing and local retry backoff are not model generation time.
+            # Each actual network call owns the timeout inside the attempt.
+            return await self._attempt_request_on_model(api_provider, client, request=request, wait_for_slot=wait_for_slot)
         except asyncio.TimeoutError as e:
             task_display = self.request_type or self.task_name or "未知任务"
             timeout_error = LLMTaskTimeoutError(
@@ -1407,7 +1429,7 @@ class LLMOrchestrator:
         """
         failed_models_this_request: Set[str] = set()
         self._refresh_task_config()
-        max_attempts = 1 if str(model_name or "").strip() else len(self.model_for_task.model_list)
+        max_attempts = 1 if str(model_name or "").strip() else len(self.model_usage)
         last_exception: Optional[Exception] = None
         last_model_name = ""
         cooldown_delays: list[float] = []
@@ -1485,6 +1507,7 @@ class LLMOrchestrator:
                     client,
                     request,
                     model_info.name,
+                    wait_for_slot=max_attempts <= 1 or self.task_name in EMBEDDING_TASK_NAMES,
                 )
                 if self.request_type.startswith("maisaka."):
                     logger.debug(f"LLMOrchestrator[{self.request_type}] 模型 model={model_info.name} 已返回 API 响应")
@@ -1503,6 +1526,14 @@ class LLMOrchestrator:
                         f"LLMOrchestrator[{self.request_type}] 模型 model={model_info.name} 的请求已被外部信号中断"
                     )
                 raise e
+
+            except LocalRateLimitError as e:
+                cooldown_delays.append(e.retry_after)
+                failed_models_this_request.add(model_info.name)
+                self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
+                last_exception = e
+                logger.debug(f"端点仍在本地限速，跳过 {model_info.name} 并轮转，剩余 {e.retry_after:.1f}s")
+                continue
 
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e

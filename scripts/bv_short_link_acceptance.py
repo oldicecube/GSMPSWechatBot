@@ -53,6 +53,13 @@ class B23Acceptance(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(bilibili.extract_short_link(text), expected)
 
+    def test_same_video_in_other_groups_or_platforms_is_not_suppressed(self):
+        for platform, group in [('wechat','one'),('wechat','two'),('qq','qq:123:napcat:group:456')]:
+            context={**self.context,'platform':platform,'group':group}
+            self.assertIn('已加入',bv.handle(SHORT,context))
+            self.assertIn('已在队列',bv.handle(SHORT,context))
+        self.assertEqual(self.queue.qsize(),3)
+
     def test_unrelated_or_spoofed_domains_not_triggered(self):
         for text in ['普通聊天', 'https://b23.tv.evil.test/code', 'https://notb23.tv/code',
                      'https://evil.test/b23.tv/code', 'https://b23.tv@evil.test/code',

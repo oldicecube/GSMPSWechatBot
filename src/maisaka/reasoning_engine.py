@@ -68,6 +68,7 @@ from src.maisaka.builtin_tool.reply import execute_reply, get_reply_options_spec
 from src.maisaka.context.messages import (
     ComplexSessionMessage,
     LLMContextMessage,
+    InternalContextMessage,
     ReferenceMessage,
     SessionBackedMessage,
     ToolResultMediaMessage,
@@ -844,6 +845,14 @@ class MaisakaReasoningEngine:
             # 避免补齐 wait 结果并取消超时任务后，残留等待状态阻止后续消息调度。
             self._runtime._enter_running_state()
             await self._runtime.restore_proactive_user_context()
+            # A quiet group must not require replying to an hours-old user
+            # question merely to share a new, optional autonomous finding.
+            self._runtime._chat_history.append(InternalContextMessage(
+                raw_message=MessageSequence([TextComponent(
+                    f'当前主动回合入口 msg_id={trigger_message.message_id}。这不是群友的新问题；'
+                    '如决定自然发起新话题，可回复此入口，不要回到超过1小时的旧问题。')]),
+                visible_text=f'当前主动回合入口 msg_id={trigger_message.message_id}；仅供新话题，不是旧群友问题。',
+                timestamp=datetime.now(), message_id=trigger_message.message_id, source_kind='proactive_boundary'))
             await self._emit_flow_step("turn.proactive", "主动思考触发", "按已安排的主动触发继续判断当前对话。")
             if self._runtime._has_pending_wait_tool_call():
                 wait_message = self._build_wait_completed_message(has_new_messages=False)
@@ -853,6 +862,11 @@ class MaisakaReasoningEngine:
                 continuation_logical_turn_id = proactive_logical_turn_id
         elif timeout_triggered and self._runtime._has_pending_wait_tool_call():
             trigger_message = self._runtime.message_cache[-1] if self._runtime.message_cache else None
+            from src.maisaka.context.freshness import is_stale_message
+            if trigger_message is not None and is_stale_message(trigger_message):
+                self._runtime._enter_stop_state()
+                logger.info(f"{self._runtime.log_prefix} wait 锚点已超过1小时，结束等待，不重放旧问题")
+                return TurnStartContext([], None, timeout_triggered, proactive_triggered, silent_reply_frequency)
             if trigger_message is None:
                 logger.warning(f"{self._runtime.log_prefix} wait 超时后没有可复用的触发消息，跳过本轮")
                 return TurnStartContext([], None, timeout_triggered, proactive_triggered, silent_reply_frequency)
@@ -977,7 +991,9 @@ class MaisakaReasoningEngine:
                 # speaking.  Do not discard it through the ordinary chat
                 # frequency silence gate; that gate applies to passive turns
                 # only.
-                if turn_start_context.silent_reply_frequency and not turn_start_context.proactive_triggered:
+                from utils.response_window import response_allowed
+                closed_window = self._runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed()
+                if closed_window or (turn_start_context.silent_reply_frequency and not turn_start_context.proactive_triggered):
                     await self._handle_silent_turn(
                         cached_messages=cached_messages,
                         timeout_triggered=turn_start_context.timeout_triggered,
@@ -993,6 +1009,9 @@ class MaisakaReasoningEngine:
                         logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
                     round_index = 0
                     while round_index < self._runtime._max_internal_rounds:
+                        if self._runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
+                            self._runtime._enter_stop_state()
+                            break
                         # 工具执行或整理上下文期间收到的消息，在下一次模型请求前补齐。
                         pending_round_messages = await self._ingest_pending_messages() if round_index > 0 else []
                         if pending_round_messages:

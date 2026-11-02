@@ -29,6 +29,11 @@
       "type": "python_package",
       "name": "httpx",
       "version_spec": ">=0.27,<1.0"
+    },
+    {
+      "type": "python_package",
+      "name": "qrcode",
+      "version_spec": ">=7.4,<9"
     }
   ],
   "plugin_type": "media",

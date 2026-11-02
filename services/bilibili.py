@@ -28,6 +28,7 @@ DEFAULT_USER_AGENT = (
 )
 
 API_VIEW = "https://api.bilibili.com/x/web-interface/view"
+API_TAGS = 'https://api.bilibili.com/x/tag/archive/tags'
 API_PLAYURL = "https://api.bilibili.com/x/player/playurl"
 
 # qn -> 画质名。未登录时实际返回值通常止步于 64（720P），所以只要展示
@@ -238,6 +239,12 @@ def extract_identifier(text):
         return {"bvid": None, "aid": int(av_match.group(1)), "page": page}
 
     return None
+
+
+def fetch_video_tags(info):
+    params = {'bvid': info['bvid']} if info.get('bvid') else {'aid': info['aid']}
+    rows = _api_get(API_TAGS, params)
+    return list(dict.fromkeys(row['tag_name'] for row in rows if isinstance(row, dict) and row.get('tag_name')))
 
 
 def fetch_video_info(identifier):

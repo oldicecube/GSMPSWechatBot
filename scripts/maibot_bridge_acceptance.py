@@ -103,7 +103,7 @@ class ModelFixture(BaseHTTPRequestHandler):
 
 def fixture_context(**values):
     return {'group': GROUP, 'sessionId': 'acceptance@chatroom', 'wxid': 'wxid_acceptance_user', 'user': USER,
-            'serverId': 'acceptance-original', 'content': BODY, 'timestamp': 1793188305, '_ts': 1793188306,
+            'serverId': 'acceptance-original', 'content': BODY, 'timestamp': time.time(), '_ts': time.time(),
             'type': 'group', 'is_group': True, **values}
 
 
@@ -114,7 +114,8 @@ class TranslationAcceptance(unittest.IsolatedAsyncioTestCase):
 
     async def test_text_identity_time_and_metadata(self):
         from src.common.data_models.message_component_data_model import TextComponent
-        m = await self.translator.translate(fixture_context(messageKey='transport-key', localId=55))
+        m = await self.translator.translate(fixture_context(messageKey='transport-key', localId=55,
+                                                            timestamp=1793188305, _ts=1793188306))
         self.assertEqual(m.message_id, 'acceptance-original')
         self.assertEqual(m.message_info.group_info.group_id, 'acceptance@chatroom')
         self.assertEqual(m.message_info.group_info.group_name, GROUP)
@@ -1680,8 +1681,8 @@ def main():
     if not args.live:
         server=ThreadingHTTPServer(('127.0.0.1',0),ModelFixture)
         threading.Thread(target=server.serve_forever,daemon=True).start()
-        for api in cfg['llm']['apis']:
-            api['base_url']=f'http://127.0.0.1:{server.server_port}/v1';api['api_key']='fixture';api['auth_mode']='none';api['timeout_seconds']=5
+        for index,api in enumerate(cfg['llm']['apis']):
+            api['base_url']=f'http://127.0.0.1:{server.server_port}/provider{index}/v1';api['api_key']='fixture';api['auth_mode']='none';api['timeout_seconds']=5
             api['request_min_interval']=0  # fixture server has no upstream anonymous quota
     (instance/'config.json').write_text(json.dumps(cfg,ensure_ascii=False,indent=2),encoding='utf8')
     os.environ['MAIBOT_INSTANCE_DIR']=str(instance);os.environ['MAIBOT_INTERCEPT_SEND']='1';os.chdir(instance)
@@ -1705,8 +1706,10 @@ def main():
         # Independently preserved embedding providers must also stay local.
         path=instance/'config/model_config.toml'
         fixture_models=tomlkit.parse(path.read_text(encoding='utf8'))
-        for provider in fixture_models['api_providers']:
-            provider['base_url']=f'http://127.0.0.1:{server.server_port}/v1'
+        # Distinct fixture paths represent distinct upstream endpoints. Generic
+        # 429 correctly cools all models sharing a real endpoint/key now.
+        for index,provider in enumerate(fixture_models['api_providers']):
+            provider['base_url']=f'http://127.0.0.1:{server.server_port}/provider{index}/v1'
             provider['api_key']='fixture';provider['auth_type']='none';provider['request_min_interval']=0
             provider['embedding_fallback_urls']=[]
         if 'web_search' in fixture_models['model_task_config']:

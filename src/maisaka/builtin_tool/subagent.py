@@ -9,7 +9,7 @@
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import asyncio
 import json
@@ -198,6 +198,7 @@ async def _run_sub_agent_rounds(
     granted_specs: List[ToolSpec],
     tool_usage: Dict[str, int],
     max_rounds: int,
+    result_recorder: Optional[Callable[[str, dict, ToolExecutionResult], None]] = None,
 ) -> SubAgentOutcome:
     """在独立上下文里多轮运行子代理，直到它给出结论或用完轮数。
 
@@ -280,6 +281,8 @@ async def _run_sub_agent_rounds(
                     f"{runtime.log_prefix} 子代理调用工具 {tool_call.func_name} "
                     f"参数={json.dumps(tool_call.args or {}, ensure_ascii=False)[:200]} 成功={result.success}"
                 )
+            if result_recorder is not None:
+                await asyncio.to_thread(result_recorder, tool_call.func_name, tool_call.args or {}, result)
             tool_result_message = _build_tool_result_message(tool_call, result, logical_turn_id)
             sub_agent_history.append(tool_result_message)
             await emit_subagent_tool_result(

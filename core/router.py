@@ -3,7 +3,6 @@ import re
 import os
 import time
 import threading
-from datetime import datetime
 from core.auto_registry import get_raw_message_targets
 from core.followup import peek as peek_followup
 from core.followup import consume as consume_followup
@@ -67,8 +66,8 @@ class Router:
         wxid = msg.get("wxid")
         if self._is_blacklisted(wxid):
             return None
-        if not self._is_in_time_slot():
-            return None
+        # Response hours no longer disable command/raw automation routing.
+        # LLM and automatic reposting enforce the shared window separately.
         target = msg.get('group') or (msg.get('sessionId') if msg.get('platform') == 'qq' else '')
         if not (self._is_target_group(target) or self._is_target_group(msg.get('group_id') or msg.get('sessionId'))):
             return None
@@ -673,36 +672,8 @@ class Router:
     # =========================================================
     def _is_in_time_slot(self):
         """检查当前时间是否在配置的时间段内"""
-        if not self.time_slots:
-            return True  # 如果没有配置时间段，则始终允许
-
-        now = datetime.now().time()
-        now_minutes = now.hour * 60 + now.minute
-
-        for slot in self.time_slots:
-            start_str = slot.get("start", "00:00")
-            end_str = slot.get("end", "23:59")
-
-            try:
-                start_time = datetime.strptime(start_str, "%H:%M").time()
-                end_time = datetime.strptime(end_str, "%H:%M").time()
-
-                start_minutes = start_time.hour * 60 + start_time.minute
-                end_minutes = end_time.hour * 60 + end_time.minute
-
-                # 跨天处理
-                if start_minutes <= end_minutes:
-                    if start_minutes <= now_minutes <= end_minutes:
-                        return True
-                else:
-                    # 跨午夜
-                    if now_minutes >= start_minutes or now_minutes <= end_minutes:
-                        return True
-            except Exception as e:
-                print(f"[ROUTER] 时间段解析错误: {e}")
-                continue
-
-        return False
+        from utils.response_window import response_allowed
+        return response_allowed(self.time_slots)
 
     # =========================================================
     # 💨 速率限制检测

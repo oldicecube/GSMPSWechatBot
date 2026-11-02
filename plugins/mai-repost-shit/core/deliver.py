@@ -125,7 +125,8 @@ async def append_context(ctx: Any, stream_id: str, candidate: Candidate, logger:
     """把搬运记录写进聊天流上下文，让 bot 之后能接上这个话题。"""
     text = (
         f"[我刚刚在群里搬了一条B站视频] {candidate.title}"
-        f"（UP：{candidate.author}，播放 {candidate.play:,}，评论区艾特率 {candidate.at_ratio:.0%}）"
+        f"（UP：{candidate.author}，播放 {candidate.play:,}；"
+        + ('Story标签推荐' if candidate.channel == 'story' else f'评论区艾特率 {candidate.at_ratio:.0%}') + '）'
         f" https://www.bilibili.com/video/{candidate.bvid}"
     )
     try:

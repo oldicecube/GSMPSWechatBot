@@ -54,21 +54,36 @@ def get_person_id(platform: str, user_id: Union[int, str]) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def get_person_id_by_person_name(person_name: str, platform: str = '') -> str:
-    """根据用户名获取用户ID"""
+def exact_person_name_matches(record, name: str, group_id: str = '') -> bool:
+    """Names are exact labels, never substrings, case-folded keys or fuzzy IDs."""
+    if name in {str(record.user_id or ''), str(record.user_nickname or ''), str(record.person_name or '')}:
+        return True
+    try:
+        return any(item['group_cardname'] == name and (not group_id or item['group_id'] == group_id)
+                   for item in _to_group_cardname_records(record.group_cardname))
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def get_person_ids_by_exact_name(person_name: str, platform: str = '', group_id: str = '') -> set[str]:
+    """Expose ambiguity to callers rather than accidentally trusting another alias."""
     try:
         with get_db_session(auto_commit=False) as session:
-            from sqlalchemy import or_
-            statement = select(PersonInfo.person_id).where(or_(col(PersonInfo.person_name) == person_name,
-                col(PersonInfo.user_nickname) == person_name))
+            statement = select(PersonInfo)
             if platform:
                 statement = statement.where(col(PersonInfo.platform) == platform)
-            ids = set(session.exec(statement.limit(2)).all())
-            # A nickname is an alias, never sufficient to merge two accounts.
-            return str(next(iter(ids))) if len(ids) == 1 else ""
+            ids = {record.person_id for record in session.exec(statement).all()
+                   if exact_person_name_matches(record, person_name, group_id)}
+            return {str(value) for value in ids}
     except Exception as e:
         logger.error(f"根据用户名 {person_name} 获取用户ID时出错: {e}")
-        return ""
+        return set()
+
+
+def get_person_id_by_person_name(person_name: str, platform: str = '', group_id: str = '') -> str:
+    """根据完整且唯一的称呼获取人物ID；同名时不选择第一人。"""
+    ids = get_person_ids_by_exact_name(person_name, platform, group_id)
+    return next(iter(ids)) if len(ids) == 1 else ''
 
 
 def resolve_person_id_for_memory(
@@ -77,6 +92,7 @@ def resolve_person_id_for_memory(
     platform: str = "",
     user_id: Union[int, str, None] = None,
     strict_known: bool = False,
+    group_id: str = '',
 ) -> str:
     """解析长期记忆检索/写入使用的人物 ID。
 
@@ -95,7 +111,7 @@ def resolve_person_id_for_memory(
 
     clean_name = str(person_name or "").strip()
     if clean_name:
-        return get_person_id_by_person_name(clean_name, clean_platform)
+        return get_person_id_by_person_name(clean_name, clean_platform, group_id)
 
     return ""
 
@@ -226,7 +242,7 @@ class Person:
             # 如果是群聊，更新群昵称
             if group_id and group_nick_name:
                 person.add_group_nick_name(group_id, group_nick_name)
-            elif nickname_changed:
+            if nickname_changed:
                 person.sync_to_database()
             return person
 

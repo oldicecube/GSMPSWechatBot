@@ -1268,8 +1268,15 @@ class StonePlugin(MaiBotPlugin):
 
     @API('repost.tieba_one', description='统一搬屎：等待贴吧实际发送回执', public=True, timeout_ms=240000)
     async def repost_one(self, stream_id: str = '', **kwargs):
+        return await self._repost_one(stream_id)
+
+    @API('repost.tieba_manual', description='显式手动搬一次贴吧，独立于主动搬运开关', public=True, timeout_ms=240000)
+    async def manual_one(self, stream_id: str = '', **kwargs):
+        return await self._repost_one(stream_id, manual=True)
+
+    async def _repost_one(self, stream_id: str, manual: bool = False):
         from utils.plugin_stream import stream_for
-        if not self.config.plugin.enabled or not self.config.tool.enabled:
+        if not self.config.plugin.enabled or (not manual and not self.config.tool.enabled):
             return {'success': False, 'sent': False, 'reason': 'tieba disabled'}
         stream = await stream_for(self.ctx, stream_id)
         from utils.platform_target import target_key

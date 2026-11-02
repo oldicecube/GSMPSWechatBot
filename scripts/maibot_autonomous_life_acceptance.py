@@ -40,6 +40,7 @@ NOW = datetime(2026, 10, 29, 14, 0, tzinfo=ZoneInfo('Asia/Shanghai'))
 async def run(root):
     mod = load('autonomous_life'); plugin = mod.create_plugin()
     cfg = tomllib.loads((ROOT / 'plugins/autonomous_life/config.toml').read_text(encoding='utf8'))
+    cfg['fun'] = {'enabled': False}
     cfg['project']['enabled'] = False  # General autonomous-life regression, no operator assignment.
     cfg['life']['groups'] = ['test@chatroom']; cfg['life']['share_gap_seconds'] = 1800
     plugin.set_plugin_config(cfg)

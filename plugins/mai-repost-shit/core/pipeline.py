@@ -200,6 +200,8 @@ class Pipeline:
         override_stream: str = "",
         extra_keywords: Sequence[str] = (),
         channel: str = "shi",
+        candidate_override: Optional[Candidate] = None,
+        automatic: bool = False,
     ) -> Dict[str, Any]:
         """跑一轮：挑一条、下下来、发出去。返回本轮报告。
 
@@ -211,9 +213,11 @@ class Pipeline:
         # 一轮没找到就继续找：每次换关键词/翻页重新搜，试到 rounds 轮为止
         rounds = max(1, int(getattr(cfg, "retry_rounds", 1) or 1))
         gap = max(0, int(getattr(cfg, "retry_gap_seconds", 0) or 0))
-        candidate: Optional[Candidate] = None
+        candidate: Optional[Candidate] = candidate_override
         for attempt in range(1, rounds + 1):
             report["attempts"] = attempt
+            if candidate is not None:
+                break
             if channel == "pretty":
                 if self._pretty is None:
                     report["reason"] = "好看频道未初始化"
@@ -246,6 +250,11 @@ class Pipeline:
             targets = [(group_id, group_id) for group_id in cfg.groups]
 
         for stream_id, label in targets:
+            if automatic:
+                from utils.response_window import response_allowed
+                if not response_allowed():
+                    report['reason'] = 'automatic repost outside response window'
+                    return report
             target_label = label
             if not override_stream:
                 resolved = await self._resolve_stream(stream_id)
@@ -280,6 +289,7 @@ class Pipeline:
                     "comment_count": candidate.comment_count,
                     # 好看频道不看艾特率，记录里存收藏率与口径，状态命令按频道显示对应指标
                     "channel": candidate.channel,
+                    "tags": candidate.tags[:20] if candidate.channel == 'story' else [],
                     "favorite_ratio": round(candidate.favorite_ratio, 4),
                     "favorite_metric": candidate.favorite_metric,
                     "sent_at": int(time.time()),
@@ -399,5 +409,6 @@ class Pipeline:
     @staticmethod
     def _candidate_brief(candidate: Candidate) -> Dict[str, Any]:
         data = asdict(candidate)
-        data.pop("tags", None)
+        if candidate.channel != 'story':
+            data.pop("tags", None)
         return data

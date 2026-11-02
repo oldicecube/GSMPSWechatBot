@@ -101,7 +101,7 @@ class MemoryProfileAdminService(KernelServiceBase):
 
         pid = str(person_id or "").strip()
         if not pid and person_keyword:
-            pid = self.person_profile_service.resolve_person_id(str(person_keyword or "").strip())
+            pid = self.person_profile_service.resolve_profile_identity(str(person_keyword or "").strip())
 
         dirty_request = self.metadata_store.get_person_profile_refresh_request(pid) if pid else None
         should_force_refresh = bool(force_refresh)

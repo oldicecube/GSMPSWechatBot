@@ -57,24 +57,28 @@ def mark_rate_limited(provider: Any, model: Any, error: Exception) -> None:
         key = _key(provider, model)
         until = max(time.monotonic()+delay, _BLOCKED.get(key, (0.0,''))[0])
         _BLOCKED[key] = (until, '上游请求限流，等待退避后恢复')
+        # A generic 429 usually applies to the endpoint/key. Changing only the
+        # model name on the same endpoint must not bypass that rate limit.
+        shared = (*key[:2], '*')
+        _BLOCKED[shared] = (max(until, _BLOCKED.get(shared, (0.0, ''))[0]), '此API端点正在限流，优先轮转其他端点')
 
 
 def blocked_reason(provider: Any, model: Any) -> str:
     key = _key(provider, model)
     with _LOCK:
-        entry = _BLOCKED.get(key)
-        if entry is None:
-            return ""
-        if entry[0] <= time.monotonic():
-            del _BLOCKED[key]
-            return ""
-        return entry[1]
+        for candidate in (key, (*key[:2], '*')):
+            entry = _BLOCKED.get(candidate)
+            if entry is not None and entry[0] > time.monotonic():
+                return entry[1]
+            _BLOCKED.pop(candidate, None)
+        return ''
 
 
 def remaining_seconds(provider: Any, model: Any) -> float:
     with _LOCK:
-        entry = _BLOCKED.get(_key(provider, model))
-        return max(0.0, entry[0] - time.monotonic()) if entry else 0.0
+        key = _key(provider, model)
+        return max([0.0, *[entry[0]-time.monotonic() for candidate in (key, (*key[:2], '*'))
+                           if (entry := _BLOCKED.get(candidate)) is not None]])
 
 
 def task_retry_after(model_config: Any, task_name: str) -> float:
@@ -89,7 +93,10 @@ def task_retry_after(model_config: Any, task_name: str) -> float:
         provider = providers.get(model.api_provider) if model else None
         if provider is None:
             return 0.0
-        delay = remaining_seconds(provider, model)
+        if getattr(provider, 'enabled', True) is False:
+            continue
+        from src.llm_models.request_pacing import pacing_remaining
+        delay = max(remaining_seconds(provider, model), pacing_remaining(provider, model))
         if delay <= 0:
             return 0.0
         delays.append(delay)

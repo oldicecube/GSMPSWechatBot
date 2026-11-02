@@ -306,6 +306,8 @@ async def _resolve_reply_quote(
     target_message: SessionMessage,
 ) -> Tuple[bool, Optional[float]]:
     """群聊和私聊分别按固定公式及频率决定引用。"""
+    if target_message.message_info.additional_config.get('proactive_target') is True:
+        return False, 0.0  # Internal proactive anchors have no platform message to quote.
     stream = tool_ctx.runtime.chat_stream
     frequency = (
         config_module.global_config.chat.reply_style.group_quote_frequency if stream.is_group_session
@@ -434,6 +436,9 @@ async def execute_reply(
 
     invocation_arguments = deepcopy(arguments)
     runtime = tool_ctx.runtime
+    from utils.response_window import response_allowed
+    if runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
+        return tool_ctx.build_failure_result('reply', '当前处于LLM不响应时段；插件指令仍可正常使用。')
     # Planner 已经完成了一轮工具可用性判断；把真实交接信息带入
     # replyer，避免 replyer 只看到一句方向指导后自行缩减能力范围。
     try:
@@ -492,6 +497,9 @@ async def execute_reply(
             "reply",
             f"未找到要回复的目标消息，msg_id={to_display_message_id(target_message_id)}",
         )
+    from src.maisaka.context.freshness import is_stale_message
+    if is_stale_message(target_message):
+        return tool_ctx.build_failure_result('reply', '该消息已超过1小时，只可作为背景；请选择当前新消息或主动分享入口。')
 
     # 转发消息展开、重复投递或上游重试可能产生多个不同 msg_id、相同
     # 正文的入站消息。它们不应让 Planner 对同一句话连续发几十次回复。
@@ -718,6 +726,13 @@ async def execute_reply(
     if quote_probability is not None:
         reply_metadata["quote_probability"] = quote_probability
     sent_message_ids: list[str] = []
+    if runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
+        return tool_ctx.build_failure_result('reply', '生成期间进入LLM不响应时段，本次不发送。')
+    if is_stale_message(target_message):
+        return tool_ctx.build_failure_result('reply', '生成期间目标消息已超过1小时，本次不发送旧消息回复。')
+    from utils.fun_share_budget import reserve_for_turn
+    if not reserve_for_turn(tool_ctx):
+        return tool_ctx.build_failure_result('reply', '本轮乐子主动分享受到每日4次或全局分享间隔限制；报告仍保留，待合适时再用。')
     send_results: list[dict[str, Any]] = []
     # 逐段更新回执，后续发送抛错时也保留已经送达的消息，避免误判为完全未发送。
     reply_metadata["sent_message_ids"] = sent_message_ids
@@ -791,12 +806,16 @@ async def execute_reply(
                 previous_sent_message = sent_message
     except Exception:
         logger.exception(f"{tool_ctx.runtime.log_prefix} 发送文字消息时发生异常，目标消息编号={target_message_id}")
+        from utils.fun_share_budget import record_result
+        record_result(tool_ctx, 'sent' if sent_message_ids else 'unknown')
         return tool_ctx.build_failure_result(
             "reply",
             "发送可见回复时发生异常。",
             metadata=reply_metadata,
         )
 
+    from utils.fun_share_budget import record_result
+    record_result(tool_ctx, 'sent' if sent or sent_message_ids else 'failed')
     if not sent:
         return tool_ctx.build_failure_result(
             "reply",

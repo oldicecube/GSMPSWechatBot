@@ -265,24 +265,8 @@ class PersonProfileService:
                 if record:
                     return str(record)
 
-                record = session.exec(
-                    select(PersonInfo.person_id)
-                    .where(
-                        or_(
-                            PersonInfo.person_name == key,
-                            PersonInfo.user_nickname == key,
-                        )
-                    )
-                    .limit(1)
-                ).first()
-                if record:
-                    return str(record)
-
-                record = session.exec(
-                    select(PersonInfo.person_id).where(PersonInfo.group_cardname.contains(key)).limit(1)
-                ).first()
-                if record:
-                    return str(record)
+            from src.person_info.person_info import get_person_id_by_person_name
+            return get_person_id_by_person_name(key)
         except Exception as e:
             logger.warning(f"按别名解析 person_id 失败: identifier={key}, err={e}")
 
@@ -388,6 +372,17 @@ class PersonProfileService:
                 suggestions.append(name)
         return suggestions
 
+    def resolve_profile_identity(self, identifier: str) -> str:
+        token = str(identifier or '').strip()
+        primary = self.resolve_person_id(token)
+        if len(token) == 32 and primary == token.lower():
+            return primary
+        from src.person_info.person_info import get_person_ids_by_exact_name
+        native_ids = get_person_ids_by_exact_name(token)
+        aliases = self.metadata_store.find_exact_profile_alias_ids(token)
+        matches = set(aliases) | native_ids | ({primary} if primary else set())
+        return next(iter(matches)) if len(matches) == 1 else ''
+
     def _get_derived_person_aliases(self, person_id: str) -> Tuple[List[str], str, List[str]]:
         """只从人物主档案中的可信身份字段推导自动别名。"""
         aliases: List[str] = []
@@ -417,7 +412,7 @@ class PersonProfileService:
             seen = set()
             for item in candidates:
                 norm = str(item or "").strip()
-                key = norm.lower()
+                key = norm
                 if not norm or key in seen:
                     continue
                 seen.add(key)
@@ -1144,7 +1139,7 @@ class PersonProfileService:
         """查询或刷新人物画像。"""
         pid = str(person_id or "").strip()
         if not pid and person_keyword:
-            pid = self.resolve_person_id(person_keyword)
+            pid = self.resolve_profile_identity(person_keyword)
 
         if not pid:
             return {
@@ -1156,14 +1151,13 @@ class PersonProfileService:
         if not force_refresh and not self._is_snapshot_stale(latest, ttl_seconds):
             aliases, primary_name, _ = self.get_person_aliases(pid)
             payload = {
+                **(latest or {}),
                 "success": True,
                 "person_id": pid,
                 "person_name": primary_name,
                 "from_cache": True,
-                **(latest or {}),
+                "aliases": aliases,
             }
-            if aliases and not payload.get("aliases"):
-                payload["aliases"] = aliases
             return {
                 **self._apply_manual_override(pid, payload),
             }

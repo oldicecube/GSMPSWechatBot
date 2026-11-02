@@ -27,7 +27,16 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
                 },
                 "person_name": {
                     "type": "string",
-                    "description": "名称/昵称/关键词；通常填这个。",
+                    "description": "完整群昵称或人物画像中明确记录的别称；必须精确且唯一，不支持部分昵称、相似字或模糊关键词。",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "可选：真实QQ号或wxid；与platform组合使用，优先于昵称。不能猜测。",
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["qq", "wechat"],
+                    "description": "user_id对应的平台，默认当前聊天平台。",
                 },
                 "limit": {
                     "type": "integer",
@@ -102,6 +111,17 @@ async def handle_tool(
     del context
     person_id = str(invocation.arguments.get("person_id") or "").strip()
     person_name = str(invocation.arguments.get("person_name") or "").strip()
+    user_id = str(invocation.arguments.get('user_id') or '').strip()
+    platform = str(invocation.arguments.get('platform') or tool_ctx.runtime.chat_stream.platform)
+    if user_id:
+        from src.person_info.person_info import resolve_person_id_for_memory
+        if platform not in {'wechat', 'qq'}:
+            return tool_ctx.build_failure_result(invocation.tool_name, '用户ID必须指定正确的QQ或微信平台')
+        person_id = resolve_person_id_for_memory(platform=platform, user_id=user_id)
+    elif person_name and not person_id:
+        from src.person_info.person_info import resolve_person_id_for_memory
+        person_id = resolve_person_id_for_memory(person_name=person_name, platform=platform,
+            group_id=str(tool_ctx.runtime.chat_stream.group_id or ''))
     if not person_id and not person_name:
         return tool_ctx.build_failure_result(
             invocation.tool_name,

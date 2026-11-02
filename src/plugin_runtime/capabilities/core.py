@@ -9,6 +9,11 @@ from src.config.config import global_config
 
 logger = get_logger("plugin_runtime.integration")
 
+
+async def _fun_control(plugin_id, capability, args):
+    from src.plugin_runtime.fun_system import control
+    return await control(plugin_id, args)
+
 _DEFAULT_PLUGIN_LLM_TASK = "utils"
 
 

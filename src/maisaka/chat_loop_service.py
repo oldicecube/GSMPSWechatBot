@@ -1156,10 +1156,12 @@ class MaisakaChatLoopService:
 
         normalized_injected_items: List[ContextItem] = []
         current_chat_attention = self._build_current_chat_attention_tail_message()
+        from src.maisaka.context.freshness import expired_target_hint
         final_user_messages = [
             *(injected_user_messages or []),
             self._build_current_time_user_message(),
             *(tail_user_messages or []),
+            expired_target_hint(selected_history),
             current_chat_attention,
         ]
         for injected_message in final_user_messages:
