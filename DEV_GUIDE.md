@@ -369,6 +369,8 @@ WEBUI_CONFIG = {
 
 验收至少覆盖：字段可发现和渲染、保存后重新读取一致、执行消费新值、重启绑定合并、共享字段同步、错误类型/越界/未知字段拒绝且不部分落盘、敏感值不泄露、关闭和权限限制阻止触发。自动化测试使用临时实例目录和假发送端，不向真实群发送测试消息。运行 `python -X utf8 scripts/maibot_shell_config_acceptance.py`。
 
+原生插件需要将复杂设置合入自身配置页时，可在 `get_webui_config_schema()` 返回值中声明 `embedded_webui_page: '<page_id>'`，指向该插件 `webui.json` 已注册的 custom 页面。主站复用原有沙箱、主题与 API 权限网关嵌入页面，并从独立导航中隐藏该页；不要改变严格校验的页面 `placement` 协议。普通字段仍走原生 schema 与保存按钮，标签导入、授权等动作必须明确提示即时保存。隐藏旧表单只筛选 schema 的 sections/layout，不删除运行时兼容字段或在保存时丢弃隐藏值。元数据由 Host 注册表生成，后端更新需用户手动重启。
+
 ### 2.10 双平台壳子插件的消息与发送约定
 
 QQ 入站由 `core/shell_platform_bridge.py` 生成 Router 兼容结构，复用原 Dispatcher 执行插件；不复制插件为 MaiBot 原生插件。未被插件消费的消息只进入一次原生 LLM 核心。禁止将 QQ 消息送入微信 LLM 转译入口。

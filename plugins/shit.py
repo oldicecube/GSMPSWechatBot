@@ -41,10 +41,15 @@ def _work(source, context):
     try:
         from llm.core.maibot_runtime import native_runtime
         from core.sender import send
-        result = native_runtime.submit(_invoke(source, context), timeout=360)
-        if not isinstance(result, dict) or result.get('sent') is not True:
+        result = native_runtime.submit(_invoke(source, context), timeout=660)
+        if isinstance(result, dict) and (result.get('unknown') is True or result.get('queued') is True
+                or any(marker in str(result.get('error') or '').lower() for marker in ('e_timeout', 'timed out', '超时'))):
+            print('[SHIT] delivery receipt is unknown; no retry or failure broadcast', flush=True)
+        elif not isinstance(result, dict) or result.get('sent') is not True:
             reason = str(result.get('reason') or result.get('error') or '未找到符合条件的内容') if isinstance(result, dict) else '回执无效'
             send(target=context.get('group') or context.get('sessionId'), mode='wechat_text', content='本次搬屎未确认送达：'+reason[:180])
+    except TimeoutError:
+        print('[SHIT] invocation timed out; delivery receipt is unknown, no retry or failure broadcast', flush=True)
     except Exception as exc:
         print(f'[SHIT] invocation failed: {type(exc).__name__}', flush=True)
         from core.sender import send

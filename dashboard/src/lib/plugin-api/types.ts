@@ -200,6 +200,8 @@ export interface ConfigLayoutSchema {
  * 插件配置 Schema
  */
 export interface PluginConfigSchema {
+  /** Existing plugin custom page rendered inside its configuration editor. */
+  embedded_webui_page?: string
   plugin_id: string
   plugin_info: {
     name: string

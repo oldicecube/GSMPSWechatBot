@@ -76,6 +76,7 @@ import { fetchPluginList, fetchPluginDocument, getPluginRuntimeComponents } from
 import { MarkdownRenderer } from '@/components/markdown-renderer'
 import { PluginStats } from '@/components/plugin-stats'
 import { PluginWebUIManagerPanel } from '@/components/plugin-webui-manager'
+import { PluginInlineSettings } from '@/components/plugin-inline-settings'
 import type {
   InstalledPlugin,
   ConfigFieldSchema,
@@ -1450,6 +1451,11 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
                       onChange={handleFieldChange}
                     />
                   ))}
+                </div>
+              )}
+              {schema.embedded_webui_page && (
+                <div className="mt-4">
+                  <PluginInlineSettings pluginId={plugin.id} pageId={schema.embedded_webui_page} />
                 </div>
               )}
             </>

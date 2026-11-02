@@ -21,6 +21,19 @@ from typing import Any, Dict, List
 from .judge import Candidate
 
 
+def _receipt(result: Any, method: str) -> Dict[str, Any]:
+    """Keep an unresolved platform/RPC receipt distinct from a rejected send."""
+    sent = isinstance(result, dict) and result.get('sent') is True
+    report = {'sent': sent, 'method': method, 'detail': result}
+    if not sent and isinstance(result, dict) and (
+        result.get('unknown') is True or result.get('queued') is True
+        or any(marker in str(result.get('error') or '').lower()
+               for marker in ('e_timeout', 'timed out', '超时'))
+    ):
+        report['unknown'] = True
+    return report
+
+
 def build_forward_messages(
     candidate: Candidate,
     video_path: Path,
@@ -83,12 +96,11 @@ class Deliverer:
         segments.append({'type':'file','data':{'name':video_path.name,'mime_type':'video/mp4',
                                              'url':str(video_path.resolve())}})
         try:
-            result = await self._ctx.send.hybrid(segments,stream_id,return_details=True)
+            result = await self._ctx.send.hybrid(segments,stream_id,return_details=True,timeout_ms=180000)
         except Exception as exc:
-            self._logger.error(f'微信视频投递失败: {type(exc).__name__}')
+            self._logger.error(f'微信视频回执未确认: {type(exc).__name__}: {exc}')
             return {'sent':False,'unknown':True,'method':'wechat_file','error':type(exc).__name__}
-        return {'sent':bool(isinstance(result,dict) and result.get('sent')),
-                'method':'wechat_file','detail':result}
+        return _receipt(result, 'wechat_file')
 
     async def _send_upstream_forward(self, stream_id: str, candidate: Candidate, video_path: Path, cfg: Any, stream: dict) -> Dict[str, Any]:
         """QQ native merged-forward with the destination adapter's own account."""
@@ -104,21 +116,22 @@ class Deliverer:
             candidate, video_path.resolve(), bot_qq, bot_name, cfg.include_header_text
         )
         try:
-            result = await self._ctx.send.forward(messages, stream_id, return_details=True)
+            result = await self._ctx.send.forward(messages, stream_id, return_details=True, timeout_ms=180000)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(f"投递异常（合并转发调用失败，视频 {size_mb:.1f}MB）: {exc!r}")
             return {"sent": False, "unknown": True, "method": "forward", "errors": [repr(exc)]}
 
-        if isinstance(result, dict) and result.get("sent"):
-            return {"sent": True, "method": "forward", "detail": result}
+        report = _receipt(result, 'forward')
+        if report['sent'] or report.get('unknown'):
+            return report
 
         # 失败不往群里说话（群里只会看到搬出来的视频），但日志要写清楚便于排查：
         # 宿主的 result 来自平台批量回执，实测体积过大时 NapCat 会判 FAILED 且 error 为空。
         self._logger.error(
             f"投递失败（合并转发未成功，视频 {size_mb:.1f}MB）：{result}。"
-            "体积过大时 NapCat 会上传失败，可调小 [download].max_size_mb"
+            "请核对实际适配器路由和发送日志；此回执不能单独证明是文件大小问题。"
         )
-        return {"sent": False, "method": "forward", "detail": result}
+        return report
 
 
 async def append_context(ctx: Any, stream_id: str, candidate: Candidate, logger: Any) -> None:

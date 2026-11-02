@@ -8,12 +8,26 @@ import {
   refreshPluginWebUI,
   usePluginWebUI,
   visibleExtensions,
+  navigationExtensions,
+  orderedWorkspaceExtensions,
 } from '@/lib/plugin-webui'
 import type { WebUIExtension } from '@/lib/plugin-webui'
 
 vi.mock('@/lib/http', () => ({ backendApi: { post: vi.fn(), get: vi.fn() } }))
 
 describe('plugin WebUI gateway', () => {
+  it('keeps embedded configuration registered while removing separate navigation entries', () => {
+    const settings: WebUIExtension = {
+      schema_version: 2, plugin_id: 'repost', workspace_title: 'Story', config_page_id: 'story',
+      pages: [{ id: 'story', mode: 'custom', title: 'Story', description: '', placement: 'workspace', icon: 'settings',
+        entry: 'story.html', document_revision: '1', layout: 'document', queries: {}, actions: {}, uploads: {} }],
+    }
+    expect(navigationExtensions([settings])).toEqual([])
+    expect(orderedWorkspaceExtensions([settings], [])).toEqual([])
+    expect(settings.pages).toHaveLength(1)
+    const mixed = { ...settings, pages: [...settings.pages, { ...settings.pages[0], id: 'other' }] }
+    expect(navigationExtensions([mixed])[0].pages.map((page) => page.id)).toEqual(['other'])
+  })
   it('preserves unchanged declarations during navigation registry refresh', async () => {
     const extension: WebUIExtension = {
       schema_version: 2,

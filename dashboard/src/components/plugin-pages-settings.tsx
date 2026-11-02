@@ -9,7 +9,7 @@ import { SectionPanel } from '@/components/ui/management'
 import { OrderControls } from '@/components/ui/order-controls'
 import { DataPanel, PageFrame } from '@/components/ui/surface'
 import { Switch } from '@/components/ui/switch'
-import { orderedWorkspaceExtensions, type WebUIExtension } from '@/lib/plugin-webui'
+import { navigationExtensions, orderedWorkspaceExtensions, type WebUIExtension } from '@/lib/plugin-webui'
 import { MAX_VISIBLE_PLUGIN_TABS, splitWorkspaceTabs } from '@/lib/workspace-tabs'
 
 export interface PluginPagePreferences {
@@ -43,7 +43,7 @@ export function PluginPagesSettings({
     preferences.workspaceOrder ?? preferences.order
   )
   const workspaceIds = new Set(workspaces.map((item) => item.plugin_id))
-  const sidebar = extensions
+  const sidebar = navigationExtensions(extensions)
     .filter((item) => !workspaceIds.has(item.plugin_id))
     .sort((a, b) => {
       const rank = (id: string) => {

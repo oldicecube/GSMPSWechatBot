@@ -115,6 +115,7 @@ export interface CustomPage extends Page {
 }
 export type WebUIPage = DeclarativePage | CustomPage
 export interface WebUIExtension {
+  config_page_id?: string | null
   schema_version: 2
   required_capabilities?: string[]
   plugin_id: string
@@ -283,7 +284,7 @@ export function usePluginWebUI(enabled = false): RegistryState {
 
 export function visibleExtensions(registry: RegistryState): WebUIExtension[] {
   const { hidden, order } = registry.preferences
-  return registry.extensions
+  return navigationExtensions(registry.extensions)
     .filter((extension) => !hidden.includes(extension.plugin_id))
     .sort((a, b) => {
       const rank = (id: string) => {
@@ -294,12 +295,21 @@ export function visibleExtensions(registry: RegistryState): WebUIExtension[] {
     })
 }
 
+/** Embedded configuration pages remain registered for API access, not navigation. */
+export function navigationExtensions(extensions: WebUIExtension[]): WebUIExtension[] {
+  return extensions
+    .map((extension) => extension.config_page_id
+      ? { ...extension, pages: extension.pages.filter((page) => page.id !== extension.config_page_id) }
+      : extension)
+    .filter((extension) => !extension.config_page_id || extension.pages.length > 0)
+}
+
 /** 顶部工作区独立排序；未设置时沿用原有页面顺序。 */
 export function orderedWorkspaceExtensions(
   extensions: WebUIExtension[],
   order: string[]
 ): WebUIExtension[] {
-  return extensions
+  return navigationExtensions(extensions)
     .filter((extension) => extension.pages.some((page) => page.placement === 'workspace'))
     .sort((a, b) => {
       const rank = (id: string) => {

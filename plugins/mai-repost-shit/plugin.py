@@ -283,11 +283,16 @@ class RetrySectionConfig(PluginConfigBase):
 class StorySectionConfig(PluginConfigBase):
     __ui_label__ = 'Story 竖刷推荐'
     __ui_icon__ = 'video'
-    enabled: bool = Field(default=True, description='搬屎使用真正的Story推荐流和标签权重；关闭后使用旧搜索筛选')
-    use_account: bool = Field(default=False, description='使用已授权账号的推荐，请先在Story标签与授权页扫码')
-    expected_uid: str = Field(default='', description='可选：验证授权账号必须严格匹配此UID，不能仅填UID代替授权')
-    seed_aid: int = Field(default=0, ge=0, description='可选：Story入口视频aid，0表示不指定')
-    parse_linked_enabled: bool = Field(default=True, description='/bv所有适配器所有群聊成功解析并发送后，每个不同标签权重加1')
+    enabled: bool = Field(default=True, description='搬屎使用真正的Story推荐流和标签权重；关闭后使用旧搜索筛选',
+                          json_schema_extra={'label': '启用 Story 推荐'})
+    use_account: bool = Field(default=False, description='使用已授权账号的推荐，请先在本页下方扫码授权',
+                              json_schema_extra={'label': '使用授权账号推荐'})
+    expected_uid: str = Field(default='', description='可选：验证授权账号必须严格匹配此UID，不能仅填UID代替授权',
+                              json_schema_extra={'label': '期望账号 UID'})
+    seed_aid: int = Field(default=0, ge=0, description='可选：Story入口视频aid，0表示不指定',
+                          json_schema_extra={'label': '入口视频 aid'})
+    parse_linked_enabled: bool = Field(default=True, description='/bv所有适配器所有群聊成功解析并发送后，每个不同标签权重加1',
+                                      json_schema_extra={'label': '视频解析标签联动'})
 
 
 class ShitpostConfig(PluginConfigBase):
@@ -355,6 +360,15 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
     """定时搬运B站「艾特率超标」视频的插件。"""
 
     config_model = ShitpostConfig
+
+    def get_webui_config_schema(self, **kwargs):
+        schema = super().get_webui_config_schema(**kwargs)
+        # Hide legacy search/judge/timing controls without deleting compatible
+        # values from the actual config. Story uses the native form widgets.
+        schema['sections'] = {'story': schema['sections']['story']}
+        schema['layout'] = {'type': 'auto', 'tabs': []}
+        schema['embedded_webui_page'] = 'story'
+        return schema
 
     def __init__(self) -> None:
         super().__init__()
@@ -904,7 +918,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
             self.ctx.logger.info(f"本轮未搬：{report.get('reason')}")
         return report
 
-    @API('repost.manual_one', description='绕过Planner，在当前真实群发送一次B站搬屎', public=True, timeout_ms=300000)
+    @API('repost.manual_one', description='绕过Planner，在当前真实群发送一次B站搬屎', public=True, timeout_ms=600000)
     async def manual_one(self, stream_id: str = '', **kwargs):
         from utils.plugin_stream import stream_for
         if not self.config.plugin.enabled or not await stream_for(self.ctx, stream_id):
@@ -1226,6 +1240,11 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
                 )
                 if report.get("sent"):
                     continue
+                if report.get('unknown'):
+                    # A timed-out send may complete remotely. Do not claim it
+                    # failed or send the same video again.
+                    self.ctx.logger.warning('手动搬屎回执未确认 stream=%s；不重发、不广播失败', stream_id)
+                    break
                 reason = str(report.get("reason") or "没找到合适的")
                 # 第一条就没搬成才回话；后续条数失败保持安静，避免刷屏
                 if index == 0:
@@ -1258,6 +1277,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         description="立刻按配置搬一条史到指定群（需管理员）",
         pattern=r"^/搬史$",
         permission="operator",
+        timeout_ms=600000,
     )
     async def cmd_share_now(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str, int]:
         """手动触发一次搬运（仍走配置里的目标群）。"""
@@ -1271,6 +1291,8 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         if report.get("sent"):
             candidate = report.get("candidate") or {}
             return True, f"已搬：{candidate.get('title')}", 1
+        if report.get('unknown'):
+            return True, '发送结果仍未确认，请稍后查看群消息；本次不会自动重发。', 1
         return False, f"没搬成：{report.get('reason')}", 0
 
     @Command(
@@ -1278,6 +1300,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         description="立刻搬一条史发到当前会话，用来试效果（需管理员）",
         pattern=r"^/搬史测试$",
         permission="operator",
+        timeout_ms=600000,
     )
     async def cmd_share_here(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str, int]:
         """把一条视频发到当前会话，便于在不打扰群的情况下验证投递链路。"""
@@ -1289,6 +1312,8 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         if report.get("sent"):
             candidate = report.get("candidate") or {}
             return True, f"已发到本会话：{candidate.get('title')}", 1
+        if report.get('unknown'):
+            return True, '发送结果仍未确认，请稍后查看群消息；本次不会自动重发。', 1
         return False, f"没成功：{report.get('reason')}", 0
 
     @staticmethod
@@ -1316,6 +1341,7 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         description="立刻搬一条「好看的」二次元视频到当前会话（需管理员）",
         pattern=r"^/搬好看$",
         permission="operator",
+        timeout_ms=600000,
     )
     async def cmd_pretty_here(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str, int]:
         """把一条好看的二次元视频发到当前会话。"""
@@ -1330,6 +1356,8 @@ class BilibiliShitpostPlugin(MaiBotPlugin):
         if report.get("sent"):
             candidate = report.get("candidate") or {}
             return True, f"已搬：{candidate.get('title')}", 1
+        if report.get('unknown'):
+            return True, '发送结果仍未确认，请稍后查看群消息；本次不会自动重发。', 1
         return False, f"没搬成：{report.get('reason')}", 0
 
     @Command(

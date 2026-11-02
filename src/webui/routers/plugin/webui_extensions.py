@@ -133,6 +133,13 @@ async def _list_extensions() -> Dict[str, Any]:
 
 
 def _serialize_extensions(extensions: Dict[str, Tuple[PluginSupervisor, WebUIExtension]]) -> Dict[str, Any]:
+    def config_page_id(plugin_id, supervisor, extension):
+        registration = getattr(supervisor, '_registered_plugins', {}).get(plugin_id)
+        schema = getattr(registration, 'config_schema', {}) or {}
+        page_id = schema.get('embedded_webui_page')
+        return page_id if isinstance(page_id, str) and any(
+            page.id == page_id and page.mode == 'custom' for page in extension.pages) else None
+
     return {
         "success": True,
         "schema_version": 2,
@@ -140,6 +147,7 @@ def _serialize_extensions(extensions: Dict[str, Tuple[PluginSupervisor, WebUIExt
         "extensions": [
             {
                 "plugin_id": plugin_id,
+                "config_page_id": config_page_id(plugin_id, supervisor, extension),
                 **extension.model_dump(mode="json", exclude={"pages"}),
                 "pages": [
                     {
@@ -149,7 +157,7 @@ def _serialize_extensions(extensions: Dict[str, Tuple[PluginSupervisor, WebUIExt
                     for page in extension.pages
                 ],
             }
-            for plugin_id, (_, extension) in sorted(extensions.items())
+            for plugin_id, (supervisor, extension) in sorted(extensions.items())
         ],
     }
 
