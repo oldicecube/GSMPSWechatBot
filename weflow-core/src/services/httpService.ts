@@ -1657,16 +1657,18 @@ class HttpService {
         }
       }
 
-      if (msg.localType === 47 && options.exportEmojis && msg.emojiCdnUrl) {
-        const result = await chatService.downloadEmoji(msg.emojiCdnUrl, msg.emojiMd5)
-        if (result.success && result.localPath && fs.existsSync(result.localPath)) {
-          const sourceExt = path.extname(result.localPath) || '.gif'
+      if (msg.localType === 47 && options.exportEmojis) {
+        // Forwarded stickers may only have an MD5 and a local cache entry.
+        // Use the existing resolver rather than requiring a CDN URL.
+        const localPath = await chatService.downloadEmojiFile(msg)
+        if (localPath && fs.existsSync(localPath)) {
+          const sourceExt = path.extname(localPath) || '.gif'
           const fileName = `${this.sanitizeFileName(msg.emojiMd5 || `emoji_${msg.localId}`, `emoji_${msg.localId}`)}${sourceExt}`
           const targetDir = path.join(sessionDir, 'emojis')
           const fullPath = path.join(targetDir, fileName)
           this.ensureDir(targetDir)
           if (!fs.existsSync(fullPath)) {
-            fs.copyFileSync(result.localPath, fullPath)
+            fs.copyFileSync(localPath, fullPath)
           }
           const relativePath = `${this.sanitizeFileName(talker, 'session')}/emojis/${fileName}`
           return { kind: 'emoji', fileName, fullPath, relativePath }

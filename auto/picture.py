@@ -5,22 +5,17 @@ WEBUI_CONFIG = {'version': 1,
                                      'default': 60,
                                      'min': 15,
                                      'max': 300,
-                                     'label': '等待下一张图片的时间（秒）'}}}
+                                     'label': '等待下一张图片或表情包的时间（秒）'}}}
 
 import os
-import time
-import io
-
-from PIL import Image
 
 from core.followup import register as register_followup
 from core.shell_plugin_config import settings
 from core.followup import consume as consume_followup
 from core.followup import peek as peek_followup
 from core.sender import send
-from core.weflow_media import extract_timestamp
-from core.weflow_media import find_image_url_by_timestamp
-from core.weflow_media import download_image
+from core.weflow_media import load_visual_bytes
+from utils.symmetry_image import save_symmetry, symmetry_frame
 
 SAVE_DIR = os.path.join("data", "pics")
 INTERCEPT_LLM = True
@@ -69,19 +64,24 @@ def _get_raw(context):
 # 判断图片消息
 # =========================================================
 def _is_image(context):
-    if context.get("is_picture"):
+    if context.get("is_picture") or context.get('is_emoji'):
         return True
     content = context.get("content", "").strip()
 
-    if content == "[图片]":
+    if content in {"[图片]", "[表情包]", "[动画表情]", "[表情]"}:
         return True
 
     raw = _get_raw(context)
 
-    if raw.get("content") == "[图片]":
+    if raw.get('is_picture') or raw.get('is_emoji') or raw.get("content") in {"[图片]", "[表情包]", "[动画表情]", "[表情]"}:
         return True
 
-    return False
+    from llm.core.wechat_translation import wire_fields
+    fields = wire_fields(context)
+    try:
+        return (int(fields.get('localType') or fields.get('local_type') or 0) & 0xffffffff) in {3, 47}
+    except (TypeError, ValueError):
+        return False
 
 
 # =========================================================
@@ -117,114 +117,20 @@ def _parse_symmetry_command(text):
 # =========================================================
 # 统一创建透明画布
 # =========================================================
-def _new_canvas(size):
-    return Image.new("RGBA", size, (0, 0, 0, 0))
-
-
-# =========================================================
-# 左右对称（左边镜像到右边）
-# =========================================================
 def _make_left_right(img):
-    w, h = img.size
-    half = w // 2
-
-    left = img.crop((0, 0, half, h))
-    right = left.transpose(Image.FLIP_LEFT_RIGHT)
-
-    canvas = _new_canvas((w, h))
-
-    canvas.paste(left, (0, 0), left)
-    canvas.paste(right, (half, 0), right)
-
-    if w % 2 == 1:
-        mid = img.crop((half, 0, half + 1, h))
-        canvas.paste(mid, (half, 0), mid)
-
-    return canvas
+    return symmetry_frame(img, 'left_right')
 
 
-# =========================================================
-# 右左对称（右边镜像到左边）
-# =========================================================
 def _make_right_left(img):
-    w, h = img.size
-    half = w // 2
-
-    right_start = half if w % 2 == 0 else half + 1
-
-    right = img.crop((right_start, 0, w, h))
-    left = right.transpose(Image.FLIP_LEFT_RIGHT)
-
-    canvas = _new_canvas((w, h))
-
-    canvas.paste(left, (0, 0), left)
-
-    if w % 2 == 1:
-        mid = img.crop((half, 0, half + 1, h))
-        canvas.paste(mid, (half, 0), mid)
-
-    canvas.paste(right, (right_start, 0), right)
-
-    return canvas
+    return symmetry_frame(img, 'right_left')
 
 
-# =========================================================
-# 上下对称（上边镜像到下边）
-# =========================================================
 def _make_up_down(img):
-    w, h = img.size
-    half = h // 2
-
-    top = img.crop((0, 0, w, half))
-    bottom = top.transpose(Image.FLIP_TOP_BOTTOM)
-
-    canvas = _new_canvas((w, h))
-
-    canvas.paste(top, (0, 0), top)
-    canvas.paste(bottom, (0, half), bottom)
-
-    if h % 2 == 1:
-        mid = img.crop((0, half, w, half + 1))
-        canvas.paste(mid, (0, half), mid)
-
-    return canvas
+    return symmetry_frame(img, 'up_down')
 
 
-# =========================================================
-# 下上对称（下边镜像到上边）
-# =========================================================
 def _make_down_up(img):
-    w, h = img.size
-    half = h // 2
-
-    bottom_start = half if h % 2 == 0 else half + 1
-
-    bottom = img.crop((0, bottom_start, w, h))
-    top = bottom.transpose(Image.FLIP_TOP_BOTTOM)
-
-    canvas = _new_canvas((w, h))
-
-    canvas.paste(top, (0, 0), top)
-
-    if h % 2 == 1:
-        mid = img.crop((0, half, w, half + 1))
-        canvas.paste(mid, (0, half), mid)
-
-    canvas.paste(bottom, (0, bottom_start), bottom)
-
-    return canvas
-
-
-# =========================================================
-# 保存图片（保留透明）
-# =========================================================
-def _save_image(img):
-    filename = f"symmetry_{int(time.time()*1000)}.png"
-    path = os.path.join(SAVE_DIR, filename)
-
-    img.save(path, "PNG")
-
-    return path
+    return symmetry_frame(img, 'down_up')
 
 
 # =========================================================
@@ -279,9 +185,13 @@ def handle_auto(context):
     # -----------------------------------------------------
     # 第二阶段：等待图片
     # -----------------------------------------------------
+    owner = context.get("wxid") or _get_raw(context).get("wxid")
+    state = peek_followup(session_id, wxid=owner)
+    if not state or state.get('target') != 'picture':
+        return None
     state = consume_followup(
         session_id,
-        wxid=context.get("wxid") or _get_raw(context).get("wxid")
+        wxid=owner
     )
 
     if not state:
@@ -306,58 +216,10 @@ def handle_auto(context):
         print(f"[symmetry] 下一条消息不是图片，已释放等待状态 session={session_id}")
         return None
 
-    raw = _get_raw(context)
-    target_ts = extract_timestamp(raw) or extract_timestamp(context)
-
-    print(
-        f"[symmetry] 收到图片，开始处理 "
-        f"session={session_id} mode={mode} ts={target_ts}"
-    )
-
     save_path = None
-
     try:
-        if context.get('platform') == 'qq':
-            binary = context.get('_image_binary') or raw.get('_image_binary')
-            if not isinstance(binary, bytes) or len(binary) > 20*1024*1024:
-                return 'Original QQ image is unavailable; send an image again.'
-            with Image.open(io.BytesIO(binary)) as source:
-                img = source.convert('RGBA')
-        else:
-            image_url, best_diff = find_image_url_by_timestamp(
-                session_id,
-                target_ts,
-                limit=20
-            )
-
-            if not image_url:
-                print("[symmetry] 获取图片失败：未找到匹配图片")
-                return None
-
-            if best_diff is None:
-                print("[symmetry] 未找到可比对时间戳，回退最近图片")
-            else:
-                print(f"[symmetry] 已按时间戳匹配图片 diff={best_diff}")
-
-            # =================================================
-            # 核心修复：
-            # 强制转 RGBA，解决透明 PNG 黑底白图问题
-            # =================================================
-            img = download_image(image_url).convert("RGBA")
-
-        if mode == "left_right":
-            out = _make_left_right(img)
-
-        elif mode == "right_left":
-            out = _make_right_left(img)
-
-        elif mode == "up_down":
-            out = _make_up_down(img)
-
-        else:
-            out = _make_down_up(img)
-
-        save_path = _save_image(out)
+        binary = load_visual_bytes(context)
+        save_path = save_symmetry(binary, mode, SAVE_DIR)
 
         target = context.get("group") or context.get("user")
 
@@ -379,7 +241,7 @@ def handle_auto(context):
     except Exception as e:
         print("[symmetry ERROR]", e)
         _cleanup_file(save_path)
-        return None
+        return '这张图片或表情包未能完成对称，请换一张较小的原图重试。'
 
 
 def allow_llm(context):

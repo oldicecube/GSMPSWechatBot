@@ -11897,6 +11897,7 @@ class ChatService {
    * 下载表情包文件（用于导出，返回文件路径）
    */
   async downloadEmojiFile(msg: Message): Promise<string | null> {
+    if (msg.emojiLocalPath && existsSync(msg.emojiLocalPath)) return msg.emojiLocalPath
     if (!msg.emojiMd5) return null
     let url = msg.emojiCdnUrl
 
@@ -11907,6 +11908,7 @@ class ChatService {
 
     if (!url) {
       await this.fallbackEmoticon(msg)
+      if (msg.emojiLocalPath && existsSync(msg.emojiLocalPath)) return msg.emojiLocalPath
       url = msg.emojiCdnUrl
     }
 

@@ -15,7 +15,7 @@ _routers = {}
 
 
 def native_router_message(message):
-    from src.common.data_models.message_component_data_model import AtComponent, ReplyComponent, ImageComponent, EmojiComponent, VoiceComponent, TextComponent
+    from src.common.data_models.message_component_data_model import AtComponent, ReplyComponent, ImageComponent, EmojiComponent, VoiceComponent, TextComponent, FileComponent
     from src.common.utils.utils_session import SessionUtils
     from src.plugin_runtime.host.message_utils import PluginMessageUtils
     group, user = message.message_info.group_info, message.message_info.user_info
@@ -69,6 +69,14 @@ def native_router_message(message):
             result.update(is_picture=True, is_emoji=isinstance(c, EmojiComponent))
             texts.append('[图片]')
             if c.binary_data: result['_image_binary'] = bytes(c.binary_data)
+        elif isinstance(c, FileComponent) and Path(c.name).suffix.lower() in {'.gif', '.png', '.jpg', '.jpeg', '.webp', '.bmp'}:
+            # Preserve an image uploaded as a file, without decoding it or
+            # flattening an animation before the follow-up plugin receives it.
+            result['is_picture'] = True
+            result['_image_file_url'] = c.url
+            if c.base64_data:
+                result['base64'] = c.base64_data
+            texts.append('[图片文件]')
         elif isinstance(c, VoiceComponent):
             result['is_voice'] = True
             texts.append('[语音]')

@@ -110,8 +110,25 @@ def find_image_url_by_timestamp(session_id, target_ts, limit=20):
     return best_url, best_diff
 
 
-def download_media(url, timeout=15):
+def download_media(url, timeout=15, *, max_bytes=None):
     final_url = _with_base(url)
+    if max_bytes is not None:
+        from urllib.parse import urlsplit
+        base, destination = urlsplit(BASE_URL), urlsplit(final_url)
+        if destination.scheme not in {'http', 'https'}:
+            raise ValueError('Unsupported media download URL')
+        headers = _headers() if (base.scheme, base.netloc) == (destination.scheme, destination.netloc) else {}
+        with requests.get(final_url, headers=headers, timeout=timeout, stream=True) as response:
+            response.raise_for_status()
+            length = response.headers.get('Content-Length')
+            if length and int(length) > max_bytes:
+                raise ValueError('图片或表情包超过 20 MB')
+            content = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ValueError('图片或表情包超过 20 MB')
+            return bytes(content)
     response = requests.get(final_url, headers=_headers(), timeout=timeout)
 
     if response.status_code == 401 and TOKEN:
@@ -123,6 +140,48 @@ def download_media(url, timeout=15):
 
     response.raise_for_status()
     return response.content
+
+
+def load_visual_bytes(context, *, max_bytes=20 * 1024 * 1024):
+    """Read this exact image/sticker, preserving animation; never borrow a recent image."""
+    import base64
+    from llm.core.wechat_translation import wire_fields
+    fields = wire_fields(context)
+    binary = fields.get('_image_binary') or fields.get('binary_data')
+    if isinstance(binary, bytes):
+        if len(binary) > max_bytes:
+            raise ValueError('图片或表情包超过 20 MB')
+        return binary
+    encoded = fields.get('base64')
+    if encoded:
+        if len(encoded) > ((max_bytes + 2) // 3) * 4:
+            raise ValueError('图片或表情包超过 20 MB')
+        binary = base64.b64decode(encoded, validate=True)
+        if len(binary) > max_bytes:
+            raise ValueError('图片或表情包超过 20 MB')
+        return binary
+    if str(fields.get('platform') or fields.get('source_platform') or 'wechat') == 'qq':
+        # Native adapter bytes belong to this message; do not consult WeFlow.
+        url = fields.get('_image_file_url')
+        if url:
+            return download_media(url, max_bytes=max_bytes)
+        raise ValueError('未取得这条 QQ 图片或表情包的原文件，请重新发送')
+    url = fields.get('mediaUrl') or fields.get('media_url')
+    if not url:
+        from core.weflow_client import WeFlowClient
+        client = WeFlowClient(TOKEN, None, None)
+        client.api_base = BASE_URL
+        expected = fields.get('serverId') or fields.get('svrid') or fields.get('server_id')
+        result = client.get_original_message(fields.get('sessionId'),
+            fields.get('localId') or fields.get('local_id'), expected, timeout=25, media=True)
+        original = (result.get('message') or {}) if result.get('ok') else {}
+        actual = original.get('serverIdRaw') or original.get('serverId')
+        if expected and actual and str(expected) != '0' and str(actual) != '0' and str(expected) != str(actual):
+            raise ValueError('取得的原消息 ID 不匹配，已停止处理')
+        url = original.get('mediaUrl') or original.get('media_url')
+    if not url:
+        raise ValueError('未取得这条图片或表情包的原文件，请重新发送')
+    return download_media(str(url), max_bytes=max_bytes)
 
 
 def download_image(url, timeout=15):

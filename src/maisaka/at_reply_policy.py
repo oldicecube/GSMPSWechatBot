@@ -3,7 +3,7 @@
 
 def enabled(runtime):
     from src.config.config import global_config
-    return bool(runtime.chat_stream.platform in {'qq', 'wechat'}
+    return bool(getattr(getattr(runtime, 'chat_stream', None), 'platform', '') in {'qq', 'wechat'}
                 and getattr(global_config.chat.reply_timing, 'reply_only_when_at', False))
 
 
