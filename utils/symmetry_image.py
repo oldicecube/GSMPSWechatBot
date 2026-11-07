@@ -1,6 +1,9 @@
 """Bounded image symmetry with composited GIF frames and a reserved transparent index."""
 from io import BytesIO
 from pathlib import Path
+from dataclasses import dataclass
+import math
+import random
 import uuid
 import warnings
 
@@ -10,6 +13,63 @@ MAX_INPUT_BYTES = 20 * 1024 * 1024
 MAX_FRAMES = 300
 MAX_FRAME_PIXELS = 16_000_000
 MAX_TOTAL_PIXELS = 40_000_000
+MAX_RANDOM_PASSES = 50
+MAX_TRANSFORM_PIXELS = 160_000_000
+
+
+@dataclass(frozen=True)
+class SymmetryAxis:
+    angle: float
+    x: float
+    y: float
+    keep_positive: bool
+
+
+def random_axes(size, iterations, rng=None):
+    if type(iterations) is not int or not 1 <= iterations <= MAX_RANDOM_PASSES:
+        raise ValueError(f'随机对称次数必须是 1–{MAX_RANDOM_PASSES} 的整数')
+    rng = rng or random
+    w, h = size
+    axes = []
+    for _ in range(iterations):
+        angle = rng.uniform(0.0, math.pi)
+        x, y = rng.uniform(0.0, w), rng.uniform(0.0, h)
+        nx, ny = -math.sin(angle), math.cos(angle)
+        # Keep the side containing the canvas centre, reducing empty output
+        # when the random axis passes near an edge of the image.
+        keep_positive = nx * (w / 2 - x) + ny * (h / 2 - y) >= 0
+        axes.append(SymmetryAxis(angle, x, y, keep_positive))
+    return tuple(axes)
+
+
+def reflect_axis(image, axis):
+    """Keep one half-plane and mirror it to the other, using pixel centres."""
+    image = image.convert('RGBA')
+    w, h = image.size
+    nx, ny = -math.sin(axis.angle), math.cos(axis.angle)
+    offset = nx * axis.x + ny * axis.y
+    a, b, e = 1 - 2 * nx * nx, -2 * nx * ny, 1 - 2 * ny * ny
+    mirrored = image.transform(image.size, Image.Transform.AFFINE,
+        (a, b, 2 * offset * nx, b, e, 2 * offset * ny),
+        resample=Image.Resampling.NEAREST, fillcolor=(0, 0, 0, 0))
+    # Project pixel centres onto a two-pixel [0, 255] mask. All samples stay
+    # inside it; the boundary at y=1 exactly selects a half-plane. This avoids
+    # polygon rasterization retaining pixels from the wrong side of the axis.
+    sign = 1 if axis.keep_positive else -1
+    scale = 1.0 / (abs(nx) * w + abs(ny) * h + abs(offset) + 1)
+    selector = Image.new('L', (1, 2), 0)
+    selector.putpixel((0, 1), 255)
+    mask = selector.transform(image.size, Image.Transform.AFFINE,
+        (0, 0, 0.5, sign * nx * scale, sign * ny * scale, 1 - sign * offset * scale),
+        resample=Image.Resampling.NEAREST)
+    return Image.composite(image, mirrored, mask)
+
+
+def random_symmetry_frame(image, axes):
+    result = image
+    for axis in axes:
+        result = reflect_axis(result, axis)
+    return result
 
 
 def symmetry_frame(image, mode):
@@ -59,7 +119,7 @@ def _gif_palette(frame):
     return indexed
 
 
-def save_symmetry(data, mode, output_dir):
+def save_symmetry(data, mode, output_dir, *, iterations=1, rng=None):
     if not isinstance(data, bytes) or not data or len(data) > MAX_INPUT_BYTES:
         raise ValueError('图片或表情包为空，或超过 20 MB')
     with warnings.catch_warnings():
@@ -68,13 +128,20 @@ def save_symmetry(data, mode, output_dir):
             pixels = source.width * source.height
             if pixels > MAX_FRAME_PIXELS or pixels > MAX_TOTAL_PIXELS:
                 raise ValueError('图片尺寸或动画帧数过大，请发送较小的表情包')
+            axes = random_axes(source.size, iterations, rng) if mode == 'random' else ()
+            passes = len(axes) or 1
+            pixel_budget = min(MAX_TOTAL_PIXELS, MAX_TRANSFORM_PIXELS // passes)
+            if pixels > pixel_budget:
+                raise ValueError('图片尺寸与随机次数的组合过大，请减少随机次数或缩小图片')
+            def transform(frame):
+                return random_symmetry_frame(frame, axes) if mode == 'random' else symmetry_frame(frame, mode)
             animated = bool(getattr(source, 'is_animated', False))
             output = BytesIO()
             if animated:
                 loop = source.info.get('loop')
                 duration_default = source.info.get('duration', 100)
                 images, durations = [], []
-                frame_limit = min(MAX_FRAMES, MAX_TOTAL_PIXELS // max(1, pixels))
+                frame_limit = min(MAX_FRAMES, pixel_budget // max(1, pixels))
                 for index in range(frame_limit + 1):
                     # seek() decodes the previous frame's disposal and composes
                     # local frame rectangles; mirroring raw patches leaves trails.
@@ -85,14 +152,14 @@ def save_symmetry(data, mode, output_dir):
                     if index == frame_limit:
                         raise ValueError('图片尺寸或动画帧数过大，请发送较小的表情包')
                     durations.append(int(source.info.get('duration', duration_default)))
-                    images.append(_gif_palette(symmetry_frame(source, mode)))
+                    images.append(_gif_palette(transform(source)))
                 options = {'loop': int(loop)} if loop is not None else {}
                 images[0].save(output, 'GIF', save_all=True, append_images=images[1:],
                     duration=durations, disposal=2, transparency=0, background=0,
                     optimize=False, **options)
                 suffix = '.gif'
             else:
-                symmetry_frame(source, mode).save(output, 'PNG')
+                transform(source).save(output, 'PNG')
                 suffix = '.png'
             if output.tell() > MAX_INPUT_BYTES:
                 raise ValueError('对称结果超过 20 MB，请发送较小的表情包')

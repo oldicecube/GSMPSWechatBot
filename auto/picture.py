@@ -8,6 +8,7 @@ WEBUI_CONFIG = {'version': 1,
                                      'label': '等待下一张图片或表情包的时间（秒）'}}}
 
 import os
+import re
 
 from core.followup import register as register_followup
 from core.shell_plugin_config import settings
@@ -15,7 +16,7 @@ from core.followup import consume as consume_followup
 from core.followup import peek as peek_followup
 from core.sender import send
 from core.weflow_media import load_visual_bytes
-from utils.symmetry_image import save_symmetry, symmetry_frame
+from utils.symmetry_image import save_symmetry, symmetry_frame, MAX_RANDOM_PASSES
 
 SAVE_DIR = os.path.join("data", "pics")
 INTERCEPT_LLM = True
@@ -94,10 +95,20 @@ def _is_image(context):
 def _parse_symmetry_command(text):
     text = text.strip()
 
-    if not text.startswith("/对称"):
+    if not re.match(r'^/对称(?:\s|$)', text):
         return None
 
     cmd = text[len("/对称"):].strip()
+
+    parts = cmd.split()
+    if parts and parts[0] == '随机':
+        if len(parts) == 1:
+            return {'mode': 'random', 'iterations': 1}
+        if len(parts) == 2 and re.fullmatch(r'[0-9]{1,3}', parts[1]):
+            count = int(parts[1])
+            if 1 <= count <= MAX_RANDOM_PASSES:
+                return {'mode': 'random', 'iterations': count}
+        return {'error': f'用法：/对称 随机 [次数]，次数为 1–{MAX_RANDOM_PASSES} 的整数，省略时为 1。随后发送图片或表情包。'}
 
     if cmd == "左右":
         return "left_right"
@@ -165,13 +176,15 @@ def handle_auto(context):
     mode = _parse_symmetry_command(text)
 
     if mode:
+        if isinstance(mode, dict) and mode.get('error'):
+            return mode['error']
         wxid = context.get("wxid") or _get_raw(context).get("wxid")
         
         register_followup(
             session_id=session_id,
             target="picture",
             ttl=settings('gsmps.automation.picture')['followup_ttl_seconds'],
-            payload={"mode": mode},
+            payload=mode if isinstance(mode, dict) else {"mode": mode},
             wxid=wxid
         )
 
@@ -207,7 +220,8 @@ def handle_auto(context):
         "left_right",
         "right_left",
         "up_down",
-        "down_up"
+        "down_up",
+        "random"
     ):
         return None
 
@@ -219,7 +233,7 @@ def handle_auto(context):
     save_path = None
     try:
         binary = load_visual_bytes(context)
-        save_path = save_symmetry(binary, mode, SAVE_DIR)
+        save_path = save_symmetry(binary, mode, SAVE_DIR, iterations=payload.get('iterations', 1))
 
         target = context.get("group") or context.get("user")
 
