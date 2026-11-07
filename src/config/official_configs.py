@@ -616,6 +616,13 @@ class ChatReplyTimingConfig(ConfigBase):
     )
     """开启后，只要消息提到麦麦名字就更容易回复。"""
 
+    reply_only_when_at: bool = Field(
+        default=False,
+        json_schema_extra={"label": {"zh_CN": "仅被 @ 时回复", "en_US": "Reply only when @ mentioned"},
+                           "x-widget": "switch", "x-row": "reply-switches"},
+    )
+    """群聊仅允许真实 @ 消息触发 LLM；暂停普通接话、主动任务及无人输入的等待续聊。"""
+
     inevitable_at_reply: bool = Field(
         default=True,
         json_schema_extra={

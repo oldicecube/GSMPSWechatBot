@@ -987,13 +987,17 @@ class MaisakaReasoningEngine:
                 cached_messages = turn_start_context.cached_messages
                 trigger_message = turn_start_context.trigger_message
 
+                from src.maisaka.at_reply_policy import enabled as at_only, addressed, reply_allowed
+                self._runtime._at_reply_authorized = addressed(cached_messages) if at_only(self._runtime) else False
+
                 # A plugin proactive task is an explicit request to consider
                 # speaking.  Do not discard it through the ordinary chat
                 # frequency silence gate; that gate applies to passive turns
                 # only.
                 from utils.response_window import response_allowed
                 closed_window = self._runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed()
-                if closed_window or (turn_start_context.silent_reply_frequency and not turn_start_context.proactive_triggered):
+                if (closed_window or not reply_allowed(self._runtime)
+                        or (turn_start_context.silent_reply_frequency and not turn_start_context.proactive_triggered)):
                     await self._handle_silent_turn(
                         cached_messages=cached_messages,
                         timeout_triggered=turn_start_context.timeout_triggered,
@@ -1009,6 +1013,9 @@ class MaisakaReasoningEngine:
                         logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
                     round_index = 0
                     while round_index < self._runtime._max_internal_rounds:
+                        if not reply_allowed(self._runtime):
+                            self._runtime._enter_stop_state()
+                            break
                         if self._runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
                             self._runtime._enter_stop_state()
                             break
@@ -1080,6 +1087,7 @@ class MaisakaReasoningEngine:
                             if not state.planner_interrupted:
                                 round_index += 1
                 finally:
+                    self._runtime._at_reply_authorized = False
                     self._reply_options.clear()
                     self._turn_passive_replyer = None
                     self._runtime._chat_loop_service.passive_replyer_override = None
@@ -1131,6 +1139,9 @@ class MaisakaReasoningEngine:
         )
         self._runtime._enter_stop_state()
         silent_reason = "回复频率为 0" if self._runtime.chat_stream.is_group_session else "私聊回复已暂停"
+        from src.maisaka.at_reply_policy import enabled as at_only
+        if at_only(self._runtime):
+            silent_reason = "仅 @ 回复模式，本轮没有新的 @ 请求"
         if self._runtime._running:
             self._runtime._update_stage_status("空闲", f"{silent_reason}，已静默接收消息")
 

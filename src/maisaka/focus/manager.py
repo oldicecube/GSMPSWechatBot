@@ -58,6 +58,9 @@ class FocusModeManager:
         return global_config.experimental.focus_mode
 
     def is_enabled_for_chat(self, *, is_group_chat: Optional[bool] = None) -> bool:
+        # Shared autonomous Focus rounds cannot borrow another chat's @ grant.
+        if getattr(global_config.chat.reply_timing, 'reply_only_when_at', False):
+            return False
         return self.is_enabled() and (is_group_chat is not False or global_config.experimental.focus_on_private)
 
     def is_enabled_for_session(self, session_id: str, *, is_group_chat: Optional[bool] = None) -> bool:

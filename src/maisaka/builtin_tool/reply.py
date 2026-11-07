@@ -439,6 +439,9 @@ async def execute_reply(
     from utils.response_window import response_allowed
     if runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
         return tool_ctx.build_failure_result('reply', '当前处于LLM不响应时段；插件指令仍可正常使用。')
+    from src.maisaka.at_reply_policy import reply_allowed
+    if not reply_allowed(runtime):
+        return tool_ctx.build_failure_result('reply', '仅 @ 回复模式：本轮没有新的 @ 请求，不发送消息。')
     # Planner 已经完成了一轮工具可用性判断；把真实交接信息带入
     # replyer，避免 replyer 只看到一句方向指导后自行缩减能力范围。
     try:
@@ -726,6 +729,8 @@ async def execute_reply(
     if quote_probability is not None:
         reply_metadata["quote_probability"] = quote_probability
     sent_message_ids: list[str] = []
+    if not reply_allowed(runtime):
+        return tool_ctx.build_failure_result('reply', '仅 @ 回复模式已启用，本轮不发送主动消息。')
     if runtime.chat_stream.platform in {'wechat', 'qq'} and not response_allowed():
         return tool_ctx.build_failure_result('reply', '生成期间进入LLM不响应时段，本次不发送。')
     if is_stale_message(target_message):

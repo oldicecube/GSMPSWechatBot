@@ -681,6 +681,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
     ) -> dict[str, Any]:
         """追加一个插件主动聊天任务，并唤醒 Maisaka 主循环。"""
 
+        from src.maisaka.at_reply_policy import enabled
+        if enabled(self):
+            return {'success': False, 'error': '已开启仅 @ 回复，主动聊天暂时停用'}
+
         normalized_plugin_id = str(plugin_id or "").strip() or "unknown"
         normalized_intent = str(intent or "").strip()
         if not normalized_intent:
@@ -831,6 +835,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         logical_turn_id: str | None = None,
     ) -> None:
         """设置主动触发消息，并投递 proactive 内部循环。"""
+        from src.maisaka.at_reply_policy import enabled
+        if enabled(self):
+            return
         if self._focus_group is not None:
             self._focus_group.register_proactive(self, trigger_message)
             return
@@ -1077,6 +1084,9 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         if not self.chat_stream.is_group_session:
             # 私聊只使用暂停开关，忽略旧频率、动态频率规则与插件频率倍率。
             return ChatConfigUtils.get_talk_value(self.session_id, is_group_chat=False)
+        from src.maisaka.at_reply_policy import enabled, addressed
+        if enabled(self):
+            return 1.0 if addressed(self.message_cache[self._last_processed_index:]) else 0.0
         if self._is_focus_mode_active_for_current_chat():
             return 1.0
 
@@ -1216,6 +1226,12 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             message.is_at = True
         if detected_mentioned:
             message.is_mentioned = True
+
+        from src.maisaka.at_reply_policy import enabled, addressed
+        if enabled(self):
+            if addressed([message]):
+                self._arm_forced_turn(message, is_at=True, is_mentioned=message.is_mentioned)
+            return
 
         adapter_forced = message.message_info.additional_config.get("force_reply") is True
         should_force_reply = (
