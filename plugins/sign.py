@@ -3,13 +3,9 @@
 WEBUI_CONFIG = {'version': 1, 'fields': {}}
 
 import random
-from datetime import date
 
 from utils.points_manager import (
     has_signed_today,
-    set_last_sign_at,
-    add_points,
-    get_points
 )
 
 COMMAND = "/sign"
@@ -42,7 +38,5 @@ def handle(content, context):
     return (
         f"✅ 签到成功！\n"
         f"获得积分: +{points_gained}\n"
-        f"当前积分: {total_points:.1f}\n"
-        f"-\n"
-        f"💡 小贴士：你也可以通过 /player fortune 抽取今日运势获得5-10积分哦"
+        f"当前积分: {total_points:.1f}"
     )

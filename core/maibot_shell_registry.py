@@ -193,7 +193,7 @@ def commands(plugin_id=None):
         rows.append(dict(id=command_id(plugin['id']), name=plugin['module'], description=plugin['manifest']['description'],
             plugin_name=plugin['id'], source=SOURCE, external=True, component_type='command',
             pattern='^(?:' + '|'.join(re.escape(c) for c in literals) + ')(?:\\s|$)' if literals else '(自动事件)',
-            aliases=literals, permission='operator' if plugin['module'] in {'ban','rcon','prompt'} else 'public',
+            aliases=literals, permission='operator' if plugin['module'] in {'ban','rcon'} else 'public',
             enabled=plugin['enabled'], trigger_type='command' if literals else 'event'))
     return rows
 
@@ -205,7 +205,9 @@ def allowed(plugin_id, context=None):
             return False
     platform = str((context or {}).get('platform') or 'wechat')
     row = find(plugin_id)
-    if row and platform not in row.get('platforms', ['wechat','qq']):
+    if row is None:
+        return False
+    if platform not in row.get('platforms', ['wechat','qq']):
         return False
     if platform not in {'wechat', 'qq'} or not enabled(plugin_id) or (platform == 'wechat' and not enabled(ADAPTER_ID)):
         return False

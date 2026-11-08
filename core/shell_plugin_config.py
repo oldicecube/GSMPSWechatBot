@@ -97,9 +97,7 @@ def validate(name, value, field):
 
 def validate_combined(plugin_id, values):
     """Cross-field constraints must hold before any management state is written."""
-    if plugin_id == 'gsmps.command.lottery':
-        if not values['min_stake'] <= values['max_stake_per_option'] <= values['daily_total_limit']:
-            raise ValueError('最小投注 ≤ 单项上限 ≤ 每日总额上限')
+    return None
 
 
 def can_invoke(plugin_id, context):

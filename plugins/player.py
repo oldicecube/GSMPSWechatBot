@@ -3,7 +3,7 @@ import os
 import random
 from datetime import datetime
 from llm.core.native_model_bridge import shell_generate
-from utils.points_manager import get_points, add_points
+from utils.points_manager import get_points
 from utils.sqlite_store import (
     load_document, player_stats_all, player_stats_get,
     player_stats_top, player_stats_update,
@@ -386,19 +386,8 @@ def handle(content, context):
         # 生成运势
         fortune_text = build_fortune_text(player_name)
 
-        # 获取随机积分（5-10）
-        points_gained = random.randint(5, 10)
-        add_points(wxid, points_gained)
-        total_points = get_points(wxid)
-
         # 写入最后抽取时间
         player_stats_update(player_name, last_fortune_at=datetime.now().isoformat())
-
-        # 拼接最后的响应，包含积分获得信息
-        fortune_text = fortune_text.replace(
-            "幸运指数：",
-            f"💎 获得积分: +{points_gained} (总计: {total_points:.1f})\n-\n幸运指数："
-        )
 
         return fortune_text
 

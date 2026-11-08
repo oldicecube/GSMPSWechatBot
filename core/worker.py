@@ -83,6 +83,10 @@ class Worker:
                 continue
 
             print("[WORKER] 收到任务")
+            from utils.user_blacklist import is_banned
+            if is_banned(str(msg.get('platform') or 'wechat'), msg.get('wxid')):
+                self._finish_task()
+                continue
             self._listen_group_message(msg)
 
             parsed = self.router.parse(msg)

@@ -1,71 +1,59 @@
-
-# GSMPS WebUI metadata only; execution remains in this shell module.
+"""/ban: block bot access by verified WeChat/QQ ID (not QQ group muting)."""
 WEBUI_CONFIG = {'version': 1, 'fields': {}}
-
-import os
-import json
-import threading
-
-from utils.sqlite_store import load_document, save_document
-
-COMMAND = "/ban"
-BLACKLIST_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "blacklist.json")
+COMMAND = '/ban'
 ADMIN_WXIDS = []
-
-lock = threading.Lock()
 
 
 def init(config=None):
     global ADMIN_WXIDS
-    os.makedirs(os.path.dirname(BLACKLIST_PATH), exist_ok=True)
+    ADMIN_WXIDS = ((config or {}).get('llm') or {}).get('admin_wxids') or []
 
-    if not os.path.exists(BLACKLIST_PATH):
-        with open(BLACKLIST_PATH, "w", encoding="utf-8") as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
 
-    if config:
-        llm_config = config.get("llm") or {}
-        ADMIN_WXIDS = llm_config.get("admin_wxids") or []
+def is_admin(context):
+    from src.config.config import global_config
+    from src.core.local_operator import has_command_permission
+    platform = str(context.get('platform') or 'wechat')
+    actor = str(context.get('user_id') or context.get('wxid') or (context.get('raw') or {}).get('wxid') or '')
+    if platform == 'qq':
+        actor = actor.removeprefix('qq:')
+    scoped = f'{platform}:{actor}'
+    legacy = actor if platform == 'wechat' else 'qq:' + actor
+    return (legacy in ADMIN_WXIDS or scoped in ADMIN_WXIDS
+            or has_command_permission('gsmps.command.ban.invoke', platform, actor,
+                str(context.get('native_session_id') or ''), global_config.plugin.permission,
+                global_config.plugin.command_permissions, local_operator=False))
 
 
 def handle(content, context):
-    wxid = str(context.get("wxid") or context.get("raw", {}).get("wxid") or "").strip()
-    
-    # 检查是否为管理员
-    if wxid not in ADMIN_WXIDS:
-        return None
-
-    if not content:
-        return "用法: /ban <wxid>"
-
-    target_wxid = str(content).strip()
-
-    # 基础验证：wxid 应该以 wxid_ 开头
-    if not target_wxid.startswith("wxid_"):
-        return f"无效的 wxid 格式: {target_wxid}"
-
-    return ban_user(target_wxid)
+    if not is_admin(context):
+        return '你没有权限使用此命令。'
+    from utils.user_blacklist import user_key
+    target = str(content or '').strip()
+    platform = str(context.get('platform') or 'wechat')
+    if target.startswith('qq:'):
+        platform = 'qq'
+    elif target.startswith('wechat:'):
+        platform, target = 'wechat', target.removeprefix('wechat:')
+    elif target.startswith('wxid_'):
+        platform = 'wechat'
+    key = user_key(platform, target)
+    if not key:
+        return '用法：/ban <wxid 或 QQ号>；跨端可用 qq:QQ号、wechat:wxid。此命令禁止使用 bot，不是群禁言。'
+    return ban_user(key)
 
 
 def ban_user(target_wxid):
-    """将用户加入黑名单"""
-    with lock:
-        data = load_blacklist()
-
-        if target_wxid in data:
-            return f"用户 {target_wxid} 已在黑名单中"
-
-        data[target_wxid] = True
-        save_blacklist(data)
-
-    return f"已将 {target_wxid} 加入黑名单"
+    from utils.user_blacklist import add
+    return (f'已将 {target_wxid} 加入 bot 黑名单' if add(target_wxid)
+            else f'用户 {target_wxid} 已在黑名单中')
 
 
 def load_blacklist():
-    """读取黑名单"""
-    return load_document(BLACKLIST_PATH, default={}) or {}
+    from utils.user_blacklist import load
+    return load()
 
 
 def save_blacklist(data):
-    """保存黑名单"""
-    save_document(BLACKLIST_PATH, data)
+    from utils.sqlite_store import save_document
+    from utils.user_blacklist import PATH
+    save_document(PATH, data)

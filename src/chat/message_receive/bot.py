@@ -772,6 +772,9 @@ class ChatBot:
         try:
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
+            from utils.user_blacklist import is_banned
+            if is_banned(message.platform, user_info.user_id):
+                return 'user_blacklisted'
             route_key = RouteKeyFactory.from_session_message(message)
             account_id, scope = route_key.account_id, route_key.scope
 

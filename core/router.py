@@ -529,9 +529,8 @@ class Router:
         if not wxid:
             return False
         try:
-            with open(self.blacklist_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return wxid in data
+            from utils.user_blacklist import is_banned
+            return is_banned('qq' if str(wxid).startswith('qq:') else 'wechat', wxid, path=self.blacklist_file)
         except Exception:
             return False
 
@@ -539,18 +538,8 @@ class Router:
         if not wxid:
             return False
         try:
-            with open(self.blacklist_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-
-        if wxid in data:
-            return True
-
-        data[wxid] = True
-        try:
-            with open(self.blacklist_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            from utils.user_blacklist import add
+            add(wxid, path=self.blacklist_file)
         except Exception:
             return False
 

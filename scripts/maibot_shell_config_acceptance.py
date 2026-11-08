@@ -26,12 +26,12 @@ def check(name, result):
         raise AssertionError(name)
 
 
-def reject(name, plugin_id, payload):
+def reject(name, plugin_id, payload, expected_status=400):
     before = registry.state_path().read_bytes() if registry.state_path().exists() else None
     try:
         save_shell_config(plugin_id, payload)
     except HTTPException as exc:
-        check(name, exc.status_code == 400)
+        check(name, exc.status_code == expected_status)
     else:
         check(name, False)
     after = registry.state_path().read_bytes() if registry.state_path().exists() else None
@@ -52,7 +52,7 @@ def run():
         }), encoding='utf8')
         with patch.dict(os.environ, {'MAIBOT_INSTANCE_DIR': directory}):
             rows = registry.catalog()
-            check('41 external modules + Weflow', len(rows) == 42)
+            check('36 external modules + Weflow after retirement', len(rows) == 37)
             for row in rows:
                 bundle = shell_bundle(row['id'])
                 check('schema ' + row['id'], all(f['name'] and f['ui_type'] for s in bundle['schema']['sections'].values() for f in s['fields'].values()))
@@ -83,7 +83,7 @@ def run():
             reject('oversize text', p, {'settings': {'reply_text': 'x' * 201}})
             reject('list item type', p, {'settings': {'allow_users': [123]}})
             reject('partial invalid patch', p, {'plugin': {'enabled': False}, 'settings': {'cooldown_seconds': -1}})
-            reject('cross field bounds', 'gsmps.command.lottery', {'settings': {'min_stake': 101}})
+            reject('removed lottery cannot be configured', 'gsmps.command.lottery', {'settings': {'min_stake': 101}}, expected_status=404)
             reject('NaN', 'gsmps.command.bv', {'settings': {'max_size_mb': float('nan')}})
             result = save_shell_config('gsmps.command.bv', {'settings': {'queue_limit': 7}})
             effective = cfg.apply_overrides(json.loads((target / 'config.json').read_text(encoding='utf8')))
@@ -114,11 +114,8 @@ def run():
             check('repeat one waits', repeat.handle_auto({**ctx, 'content': 'hello'}) is None)
             check('repeat two waits', repeat.handle_auto({**ctx, 'content': 'hello'}) is None)
             check('repeat third responds', repeat.handle_auto({**ctx, 'content': 'hello'}) == 'hello')
-            save_shell_config('gsmps.command.lottery', {'settings': {'draw_hour': 19, 'draw_minute': 8}})
-            lottery = importlib.import_module('plugins.lottery')
-            check('lottery consumes saved schedule', lottery._draw_time(__import__('datetime').date.today()).strftime('%H:%M') == '19:08')
-            save_shell_config('gsmps.command.lottery', {'settings': {'enabled': False}})
-            check('lottery disabled without touching financial data', lottery.handle('', ctx) == '彩票功能已停用。')
+            check('retired plugins absent from catalog', not any(registry.find('gsmps.command.'+name)
+                  for name in ('lottery','guide','home','notice','prompt','redeem')))
             check('JSON validation', cfg.validate('object', '{"x": [1]}', {'type': 'json'}) == {'x': [1]})
             # Exercise the actual HTTP route contracts used by the WebUI editor.
             from fastapi import FastAPI

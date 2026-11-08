@@ -12,7 +12,7 @@
 
 `config.json` 中对应的旧 `llm.apis`、人设、上下文、学习、记忆、自主行为、表情包目录及聊天节奏配置已删除，旧 `webui` 段及其 JWT 也已删除。启动时不会再从壳子重建或覆盖原生配置，也不会额外启动旧 WebUI。下文涉及这些字段的说明仅用于旧版配置兼容，不适用于当前实例。需要新增端点或修改麦麦设置时直接使用 MaiBot WebUI。
 
-`config.json` 仍保留微信连接、消息路由、管理员权限、群开关、发送限制，以及 `mc`、`rcon`、`bilibili`、`lottery` 等壳子插件实际依赖的参数。壳子插件在 MaiBot WebUI 的管理项使用 `config/gsmps_management.json` 保存覆盖值，执行位置仍在壳子；声明配置项的方法见 `DEV_GUIDE.md` 第 2.9 节。
+`config.json` 仍保留微信连接、消息路由、管理员权限、群开关、发送限制，以及 `mc`、`rcon`、`bilibili` 等壳子插件实际依赖的参数。壳子插件在 MaiBot WebUI 的管理项使用 `config/gsmps_management.json` 保存覆盖值，执行位置仍在壳子；声明配置项的方法见 `DEV_GUIDE.md` 第 2.9 节。
 
 清理脚本 `scripts/clean_adopted_shell_config.py` 默认只预览，使用 `--apply` 才写入，并先备份全部相关配置。为兼容尚未重启的旧进程，尚未进入模型池的端点暂存在 `config/gsmps_model_import_pending.json`；下次启动只合并一次，成功后删除该文件，不改变当前任务顺序。备份位于 `data/backups/adopted-config-cleanup-*`。代码改动需手动重启生效。
 
@@ -39,7 +39,6 @@
 | `music` / `voice_sender` | 否 | 音乐下载与虚拟麦克风语音发送。 |
 | `mc` / `rcon` / `rcon_tools` | 否 | Minecraft 查询与 LLM RCON 工具。 |
 | `tournament` | 否 | 锦标赛统计配置。 |
-| `print_server` | 否 | 打印兑换接口地址、token 和超时。 |
 
 ### 2.1 rate_limit
 
@@ -259,9 +258,9 @@ Autonomy 是独立侧脑链。只有同时满足以下条件才允许真实发�
 - `allowed_groups` 和 `allowed_users` 必须显式配置；空数组表示拒绝。
 - `max_calls_per_request` 默认 2，`timeout_seconds` 默认 8。
 
-### 8.2 打印兑换
+### 8.2 已移除的业务
 
-`print_server.redeem_url`、`redeem_token`、`timeout_seconds` 供 `/redeem` 使用。token 为空时相关命令应明确失败，不应伪造成功。
+`/guide`、`/home`、`/lottery`（含 `/彩票`）、`/notice`、`/prompt`、`/redeem` 已移除，`lottery`、`print_server` 不再由运行插件读取。历史积分、投注等数据保留，不因删除命令而清空。
 
 ### 8.3 语音
 

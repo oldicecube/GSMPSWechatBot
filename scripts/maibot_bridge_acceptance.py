@@ -1612,6 +1612,15 @@ def main():
     instance=ROOT/'temp'/('maibot-live-acceptance-' if args.live else 'maibot-bridge-acceptance-')/datetime.now().strftime('%Y%m%d-%H%M%S')
     (instance/'config').mkdir(parents=True)
     for name in ('bot_config.toml','model_config.toml'):shutil.copy2(ROOT/'config'/name,instance/'config'/name)
+    if not args.live:
+        # This fixture verifies ordinary Planner/Replyer behavior. The dedicated
+        # at_only_reply_acceptance suite covers the deployment's @-only pause.
+        # Change only the copied instance, never the production config.
+        import tomlkit
+        fixture_path=instance/'config/bot_config.toml'
+        fixture_config=tomlkit.parse(fixture_path.read_text(encoding='utf8'))
+        fixture_config['chat']['reply_timing']['reply_only_when_at']=False
+        fixture_path.write_text(tomlkit.dumps(fixture_config),encoding='utf8')
     # External management reads literal module declarations from the instance.
     for folder in ('plugins', 'auto'):
         (instance / folder).mkdir(exist_ok=True)

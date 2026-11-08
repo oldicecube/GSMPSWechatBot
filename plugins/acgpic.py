@@ -139,6 +139,16 @@ def _delete(path):
         pass
 
 
+def fetch_random_image(*, portrait=None):
+    """Return one local wallpaper for reuse by image-rendering plugins."""
+    endpoint = (PORTRAIT_API if portrait else LANDSCAPE_API) if portrait is not None else secrets.choice((LANDSCAPE_API, PORTRAIT_API))
+    url, payload = _request_image_url(endpoint)
+    suffix = str(payload.get('size') or 'jpg').lower().lstrip('.')
+    if suffix not in {'jpg','jpeg','png','gif','webp'}:
+        suffix = 'jpg'
+    return _download(url, suffix)
+
+
 def handle(args, context):
     args = str(args or "").strip()
     context = context if isinstance(context, dict) else {}
@@ -152,15 +162,9 @@ def handle(args, context):
     if not allowed:
         return _error_text(f"本地请求冷却中，请 {max(1, int(wait + 0.99))} 秒后再试")
 
-    endpoint = secrets.choice((LANDSCAPE_API, PORTRAIT_API))
-    suffix = "jpg"
     path = None
     try:
-        url, payload = _request_image_url(endpoint)
-        suffix = str(payload.get("size") or "jpg").lower().lstrip(".")
-        if suffix not in {"jpg", "jpeg", "png", "gif", "webp"}:
-            suffix = "jpg"
-        path = _download(url, suffix)
+        path = fetch_random_image()
         ok, error = send(target=target, file_path=path, mode="wechat_file")
         if not ok:
             return _error_text(f"图片发送失败：{error}")
