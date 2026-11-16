@@ -4,12 +4,14 @@ Anima 图像生成服务核心模块
 """
 
 import json
+import math
 import os
 import time
 import random
 import glob
 import threading
 import requests
+from urllib.parse import urlsplit
 from datetime import datetime
 
 from llm.core.response_parser import load_json_lenient
@@ -48,6 +50,39 @@ class AnimaService:
         except Exception as e:
             self.provider = None
             print(f"[ANIMA] DeepSeekProvider 初始化失败: {e}")
+
+    @staticmethod
+    def _positive_timeout(value):
+        number = float(value)
+        if not math.isfinite(number) or number <= 0 or number > 600:
+            raise ValueError("Anima timeout must be between 0 and 600 seconds")
+        return number
+
+
+    def configure_connection(self, url, generation_timeout=None):
+        """Hot-reload only operator-owned connection settings, never model output."""
+        url = str(url or '').strip().rstrip('/')
+        parsed = urlsplit(url)
+        if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError('ComfyUI 地址必须为不含凭据或查询参数的 HTTP(S) 地址')
+        self.COMFY_URL = url
+        if generation_timeout is not None:
+            self.COMFY_WAIT_TIMEOUT = self._positive_timeout(generation_timeout)
+
+
+    def check_connection(self):
+        """Fail before prompt conversion or billing when ComfyUI is unavailable."""
+        try:
+            response = requests.get(self.COMFY_URL + '/system_stats', timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get('devices'), list):
+                return False, '配置的地址未返回 ComfyUI 状态，请检查服务地址'
+            return True, ''
+        except (requests.RequestException, ValueError, AttributeError):
+            return False, '无法连接 ComfyUI，请确认绘图电脑在线、服务已启动且地址正确'
+
 
     @staticmethod
     def can_start_generate(user_wxid: str) -> tuple[bool, str]:
