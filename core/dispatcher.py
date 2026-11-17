@@ -417,7 +417,8 @@ class Dispatcher:
                 consumed = (bool(auto_results) or bool(context.get('_host_plugin_activity'))) and not forwarded
                 strict_observation = self.prefix_mode == "strict" and not any(context.get(k) for k in
                     ("prefix_used", "directed_to_bot", "reply_to_bot", "is_at", "is_mentioned"))
-                native_result = self.llm_service.ingest_context(context, observe_only=consumed or strict_observation)
+                native_result = (self._observe_plugin_context(context) if consumed or strict_observation
+                                 else self.llm_service.ingest_context(context))
                 return auto_result if consumed else native_result
             if auto_results:
                 auto_result = auto_results[-1]
@@ -484,7 +485,7 @@ class Dispatcher:
         # plugin with the same alias from enqueueing the same job a second time.
         if auto_command_consumed and auto_results:
             if self.llm_service and getattr(self.llm_service, 'native_ingress', False) and llm_enabled:
-                self.llm_service.ingest_context(context, observe_only=True)
+                self._observe_plugin_context(context)
             return auto_results[-1]
 
         # =====================================================
@@ -537,7 +538,7 @@ class Dispatcher:
             if not plugins_only and self.llm_service and getattr(self.llm_service, 'native_ingress', False):
                 observed = {**context, '_host_plugin_activity': dict(plugin_id='shell.' + plugin_name,
                     kind='plugin_trigger', trigger_message_id=str(context.get('serverId') or context.get('messageKey') or ''))}
-                self.llm_service.ingest_context(observed, observe_only=True)
+                self._observe_plugin_context(observed)
             with legacy_plugin_scope(self.llm_service, plugin_name, context):
                 result = plugin.handle(args, context)
             if result is not None:
@@ -555,6 +556,22 @@ class Dispatcher:
             get_logger('gsmps_plugin_execution').exception('Shell command execution failed: command=%s platform=%s',
                 command, platform)
             return tag_plugin_result("插件执行异常", plugin_name, context, self.llm_service)
+
+    def _observe_plugin_context(self, context):
+        """Chat-history bookkeeping must not prevent an authorized shell action.
+
+        Do not retry the action or invent successful persistence. Outbound
+        messages still retain their source metadata through plugin_scope.
+        """
+        try:
+            return self.llm_service.ingest_context(context, observe_only=True)
+        except Exception as exc:
+            from src.common.logger import get_logger
+            get_logger('gsmps_plugin_execution').error(
+                'Plugin context recording failed; continuing shell execution: command=%s platform=%s error_type=%s',
+                context.get('command'), context.get('platform', 'wechat'), type(exc).__name__)
+            return {'accepted': [], 'native_delivery_owned': True, '_llm_ok': False,
+                    'observation_failed': True, 'messages': [], 'should_reply': False}
 
     def _init_llm(self):
         try:
