@@ -68,7 +68,27 @@ sqlite3.DatabaseError: database disk image is malformed   (另有 file is not a 
   结果 `repaired`，`integrity_check=ok`，表 19→20，消息 24417→24409（损坏页内 8 条无法恢复）。
   本地证据（`.gitignore` 忽略）：`docs/maibot-wechat-acceptance/db-repair-selftest-20261118.json`。
 
-**生产库尚未替换**：修复时 bot 仍在运行并独占 `data/MaiBot.db`，脚本按设计拒绝执行。
+## 实际修复结果（2026-11-18 01:37）
+
+用户停止 bot 后执行 `--apply`，结果 `repaired`：
+
+| 项目 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `integrity_check` | 大量 `2nd reference to page` / `Rowid out of order` / `invalid page number` | `ok` |
+| 表数量 | 19（`sqlite_master` 已读不全） | 20（必需表齐全） |
+| `mai_messages` | 24417（含损坏页） | 24409 |
+| `journal_mode` | wal | wal |
+
+替换后独立复检：`PRAGMA integrity_check = ok`，20 张表，24409 条消息；
+用 SQLAlchemy 走 bot 自己的连接做过 INSERT + rollback 写入探测，写入正常且无残留表。
+`scripts/patpat_punishment_acceptance.py` 在修复前因 `file is not a database` 直接崩溃，
+修复后对**真实生产库**运行 **PASS**。
+
+原始损坏库保留在 `temp/db-repair-20261118-013616/damaged/`。
+
+修复过程中还修掉了一个守护脚本的误判：进程检测原先用子串匹配 `webui.py`，
+把 `scripts/napcat_lan_webui.py` 当成了 bot 入口，导致一直拒绝执行；
+现改为比对 `.py` 参数的 basename。
 
 ## 需要用户执行
 

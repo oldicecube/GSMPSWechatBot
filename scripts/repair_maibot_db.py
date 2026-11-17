@@ -34,7 +34,7 @@ REQUIRED_TABLES = {
     "statistics_model_hourly", "statistics_tool_hourly", "tool_records",
 }
 
-BOT_ENTRYPOINTS = ("main.py", "webui.py")
+BOT_ENTRYPOINTS = {"main.py", "webui.py"}
 HEADROOM_BYTES = 250 * 1024 * 1024
 
 
@@ -65,9 +65,13 @@ def running_bot_processes() -> list[dict]:
         if process.info["pid"] == os.getpid():
             continue
         joined = " ".join(cmdline).lower()
-        if not any(entry in joined for entry in BOT_ENTRYPOINTS):
-            continue
         if "python" not in (process.info.get("name") or "").lower() and "python" not in joined:
+            continue
+        # Compare the script basename so helpers such as napcat_lan_webui.py
+        # are not mistaken for the bot entrypoint.
+        scripts = {os.path.basename(str(token).strip(chr(34) + chr(39))).lower()
+                   for token in cmdline if str(token).strip().lower().endswith(".py")}
+        if not (scripts & BOT_ENTRYPOINTS):
             continue
         found.append({"pid": process.info["pid"], "cmdline": " ".join(cmdline)[:240]})
     return found
