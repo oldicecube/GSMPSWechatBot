@@ -1,9 +1,12 @@
 [plugin]
-enabled = true
+enabled = false
 config_version = "1.0.0"
 
 [life]
-groups = ["47447788043@chatroom", "qq:3294652115:napcat-local:group:1020993873"]
+groups = [
+    "47447788043@chatroom",
+    "qq:3294652115:napcat-local:group:1020993873",
+]
 timezone = "Asia/Shanghai"
 wake = "08:30"
 sleep = "00:00"
@@ -18,7 +21,15 @@ share_gap_seconds = 7200
 person_gap_seconds = 259200
 history_hours = 168
 ignored_users = ["wxid_j4m6tul1dm7822"]
-interests = ["Minecraft", "服务器", "开源", "科技", "编程实验", "游戏", "鬼畜整活"]
+interests = [
+    "Minecraft",
+    "服务器",
+    "开源",
+    "科技",
+    "编程实验",
+    "游戏",
+    "鬼畜整活",
+]
 web_enabled = true
 python_enabled = true
 social_enabled = true
@@ -36,3 +47,6 @@ per_turn_calls = 6
 timeout_seconds = 20
 max_chars = 10000
 cache_seconds = 120
+
+[fun]
+enabled = true

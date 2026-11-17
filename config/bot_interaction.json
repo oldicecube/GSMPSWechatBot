@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "platform": "wechat",
+      "group_id": "47447788043@chatroom",
+      "user_id": "wxid_j4m6tul1dm7822",
+      "label": "爱吃白饭的大肥鱼",
+      "is_bot": true,
+      "plugin_refusal_probability": 0.5
+    }
+  ]
+}
