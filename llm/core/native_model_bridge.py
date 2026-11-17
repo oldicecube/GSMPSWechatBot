@@ -5,24 +5,34 @@ import json
 import threading
 
 
-async def generate_native(messages, *, task_name='utils', tools=None, timeout=None):
+async def generate_native(messages, *, task_name='utils', tools=None, timeout=None, response_format=None, temperature=None):
     from src.services.llm_service import LLMServiceClient, _build_prompt_context_factory
     from src.common.data_models.llm_service_data_models import LLMGenerationOptions
     client = LLMServiceClient(task_name, request_type='gsmps.shell.' + task_name)
+    native_format = None
+    if response_format is not None:
+        from src.llm_models.payload_content.resp_format import RespFormat, RespFormatType
+        kind = response_format.get('type')
+        if kind == 'json_schema':
+            native_format = RespFormat(RespFormatType.JSON_SCHEMA, schema=response_format['json_schema'])
+        elif kind == 'json_object':
+            native_format = RespFormat(RespFormatType.JSON_OBJ)
+        else:
+            raise ValueError('Unsupported structured response format')
     result = await client.generate_response_with_context(_build_prompt_context_factory(messages),
-        LLMGenerationOptions(tool_options=tools or None))
+        LLMGenerationOptions(tool_options=tools or None, response_format=native_format, temperature=temperature))
     calls = [SimpleNamespace(id=c.call_id, type='function', function=SimpleNamespace(
         name=c.func_name, arguments=json.dumps(c.args, ensure_ascii=False))) for c in (result.tool_calls or [])]
     return SimpleNamespace(content=result.response or '', tool_calls=calls or None,
                            reasoning_content=result.reasoning or '', native_result=result)
 
 
-def shell_generate(messages, *, task_name='utils', tools=None, timeout=None):
+def shell_generate(messages, *, task_name='utils', tools=None, timeout=None, response_format=None, temperature=None):
     from .maibot_runtime import native_runtime
     native_runtime._ensure_thread()
     if threading.current_thread() is native_runtime._thread:
         raise RuntimeError('Use generate_native() on the native asyncio loop')
-    return native_runtime.submit(generate_native(messages, task_name=task_name, tools=tools),
+    return native_runtime.submit(generate_native(messages, task_name=task_name, tools=tools, response_format=response_format, temperature=temperature),
                                  timeout=timeout or 120)
 
 
@@ -39,6 +49,13 @@ class NativePoolProvider:
 
     def send(self, messages, prompt_cache_key=None, thinking=None, timeout=None):
         return self.send_chat(messages, timeout=timeout).content
+
+    def send_json(self, messages, *, response_format, prompt_cache_key=None, timeout=None, temperature=0.0):
+        # Explicit opt-in only. Existing send/send_chat callers keep their defaults.
+        result = shell_generate(messages, response_format=response_format, temperature=temperature, timeout=timeout)
+        self.last_usage = {name: getattr(result.native_result, name, 0) for name in
+                           ('prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_cache_hit_tokens', 'prompt_cache_miss_tokens')}
+        return result.content
 
     def current_protocol(self):
         return 'maibot'

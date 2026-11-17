@@ -5,10 +5,16 @@
 
 # GSMPS WebUI metadata only; execution remains in this shell module.
 WEBUI_CONFIG = {'version': 1, 'fields': {
+    'output_dir': {'type': 'str', 'default': r'H:\Anima\ComfyUI\output', 'config_path': 'comfy.output_dir', 'label': 'ComfyUI远端映射输出目录'},
     'comfy_url': {'type': 'str', 'default': 'http://127.0.0.1:8188', 'max_length': 500,
                   'label': 'ComfyUI 服务地址', 'config_path': 'comfy.url', 'reload': 'hot',
                   'description': '填写实际绘图电脑的 HTTP 地址；localhost 指 bot 本机。下次请求生效。'},
-    'generation_timeout': {'type': 'int', 'default': 180, 'min': 10, 'max': 600,
+        'reference_wait_seconds': {'type': 'int', 'default': 120, 'min': 30, 'max': 300, 'label': '参考图等待秒数'},
+    'model': {'type': 'str', 'default': 'anima-base-v1.0.safetensors', 'label': 'Base模型文件名'},
+    'clip': {'type': 'str', 'default': 'qwen_3_06b_base.safetensors', 'label': '文本编码器文件名'},
+    'vae': {'type': 'str', 'default': 'qwen_image_vae.safetensors', 'label': 'VAE文件名'},
+    'upscale_model': {'type': 'str', 'default': 'RealESRGAN_x4plus_anime_6B.pth', 'label': '超分模型文件名'},
+'generation_timeout': {'type': 'int', 'default': 180, 'min': 10, 'max': 600,
                            'label': '生成等待上限（秒）', 'config_path': 'anima.generation_timeout', 'reload': 'hot'},
 }}
 
@@ -16,6 +22,7 @@ WEBUI_CONFIG = {'version': 1, 'fields': {
 import os
 import sys
 from core.sender import send
+from anima.commands import HELP, IMAGE_MODES, Request, parse_request
 from utils.points_manager import get_points, try_spend_points
 
 COMMAND = "/anima"
@@ -43,7 +50,7 @@ def init(config):
         print(f"[PLUGIN] /anima 初始化失败: {e}")
 
 
-def handle(content, context):
+def execute_request(content, context, *, spec=None, reference=None, mask_png=None):
     """
     处理 /anima 命令
     
@@ -89,7 +96,7 @@ def handle(content, context):
     try:
         from core.shell_plugin_config import settings
         current = settings('gsmps.command.anima')
-        _anima_service.configure_connection(current['comfy_url'], current['generation_timeout'])
+        configure_service(current)
         ready, reason = _anima_service.check_connection()
         if not ready:
             return f'❌ {reason}\n本次未扣积分。'
@@ -97,7 +104,7 @@ def handle(content, context):
         send(group_name, f"🎨 {nickname} 发起图像生成，处理中...")
         
         # 执行生成流程
-        result = _anima_service.generate(user_prompt)
+        result = _anima_service.generate(user_prompt, spec=spec, reference=reference, mask_png=mask_png)
         
         # 构建响应消息
         if result.get("success"):
@@ -143,3 +150,53 @@ def handle(content, context):
                 print(f'[ANIMA] cache cleanup failed: {type(exc).__name__}', flush=True)
         # 标记生成完成
         _anima_service.mark_done()
+
+
+def configure_service(current):
+    _anima_service.configure_connection(current['comfy_url'], current['generation_timeout'])
+    _anima_service.COMFY_OUTPUT_DIR = current.get('output_dir') or r'H:\Anima\ComfyUI\output'
+    for key in ('model', 'clip', 'vae', 'upscale_model'):
+        if current.get(key):
+            _anima_service.anima_config[key] = current[key]
+
+
+def handle(content, context):
+    """Default text generation; image modes reserve the same per-user follow-up as picture."""
+    if not _anima_service:
+        return "❌ Anima 服务未初始化"
+    from core.followup import register, clear
+    from core.shell_plugin_config import settings
+    from utils.points_manager import binding_required
+    from utils.account_identity import canonical_user
+    try:
+        if str(content).strip() == '取消':
+            clear(context.get('sessionId'), wxid=context.get('wxid'))
+            return '已取消等待图片。'
+        spec = parse_request(content)
+        if spec is None:
+            return HELP
+        error = binding_required(context)
+        if error:
+            return error
+        if get_points(canonical_user(context.get('wxid', 'unknown'))) < POINTS_COST:
+            return f'❌ 积分不足，需 {POINTS_COST} 积分。'
+        if spec.mode not in IMAGE_MODES:
+            return execute_request(spec.prompt, context, spec=spec)
+        if not context.get('sessionId') or not context.get('wxid'):
+            return '❌ 无法识别会话或用户，未进入等待图片状态。'
+        current = settings('gsmps.command.anima')
+        configure_service(current)
+        ready, reason = _anima_service.check_connection()
+        if not ready:
+            return '❌ ' + reason + '\n本次未扣积分。'
+        _anima_service.preflight(spec)
+        ttl = int(current.get('reference_wait_seconds', 120))
+        register(context['sessionId'], 'anima_media', ttl=ttl,
+                 payload={'request': spec.payload(), 'stage': 'image'}, wxid=context['wxid'])
+        extra = ''
+        return f'请在 {ttl} 秒内紧接着发送参考图片或动画表情。动画仅取第一帧，输出静态图。{extra}\n等待阶段不扣积分；/anima 取消 可取消。'
+    except (ValueError, TypeError) as exc:
+        return '❌ ' + str(exc)
+    except Exception as exc:
+        print(f'[ANIMA] request setup failed: {type(exc).__name__}: {exc}')
+        return '❌ 无法准备当前模式，请检查ComfyUI连接与节点配置。本次未扣积分。'

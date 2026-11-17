@@ -1,0 +1,131 @@
+{
+  "source": "D:\\Anima\\!!Anima+AIO+Yuri+261018+Final (1).json",
+  "sha256": "851743d0a6a8a029a966bfd7a5debe5484f1a4eb0d783ea42cc5c9dcb4d01c8f",
+  "author": "By: ??????? (source workflow label)",
+  "source_notes": [
+    {
+      "id": 1417,
+      "title": "常用触发词",
+      "text": [
+        ""
+      ]
+    },
+    {
+      "id": 1418,
+      "title": "画风增强",
+      "text": [
+        ""
+      ]
+    },
+    {
+      "id": 1743,
+      "title": "采样器",
+      "text": [
+        "## 采样器参数推荐\n| # | CFG | Step |\n|---|---|---|\n|没加turbo lora|4~5|>15|\n|加了turbo lora|1|8~10|\n\nSampler和scheduler自己调\n采样器熟悉的话可自行串联高级K采样器"
+      ]
+    },
+    {
+      "id": 1698,
+      "title": "Control Net模式介绍",
+      "text": [
+        "| # | 名称 | 介绍 |\n|---|---|---|\n|Mode1|any-test-like|参考模式，只参考CN image的整体颜色，对角色无参考效果<br>[模型地址](https://huggingface.co/kohya-ss/Anima-LLLite)|\n|Mode2|Inpaint|局部重绘；打开以获得更好的局部重绘效果（但有可能会导致画面颜色变化，可以尝试使用图生图或者局部重绘进行编辑<br>latent设置为1时，降噪拉到1<br>[模型地址](https://huggingface.co/kohya-ss/Anima-LLLite)|\n\n# 如需使用，请勾选对应开关"
+      ]
+    },
+    {
+      "id": 1742,
+      "title": "TE参数设置介绍",
+      "text": [
+        "### 如果报错sageattention，可以绕过下面的Patch Sage Attention KJ节点（shift+B）\n### Artist mixer采用默认参数，如需调整请打开子图调整"
+      ]
+    },
+    {
+      "id": 1796,
+      "title": "模型下载链接",
+      "text": [
+        "# 容易缺失节点连接\n| # | 名称 | 介绍 | 链接 |\n|---|---|---|---|\n|1|Artist Mixer插件|用于混合画师串的工具|https://github.com/An1X3R/Anima-Artist-Mixer|\n|2|Anima LLLite|Anima专用Controlnet组件|https://github.com/kohya-ss/ComfyUI-Anima-LLLite|\n|3|WeiLin-Comfyui-Tools|就用了个Weilin lora stack，如果不需要可以替换回旁边的lora stack<br>这个可以预览lora预览图|https://github.com/weilin9999/WeiLin-Comfyui-Tools|\n\n# 缺少节点的安装方式\n\n| # | 步骤 | 介绍 |\n|---|---|---|\n|1|安装Comfyui Manager|在启动器安装Comfyui manager，通过github rul的方式安装<br>https://github.com/Comfy-Org/ComfyUI-Manager|\n|2|在Comfyui Manager中补齐节点|在Comfyui中使用install missing custom nodes功能安装在comfyui manager里收录的节点|\n|3|在Comfyui Manager中通过github链接安装节点|使用以上链接粘贴进去安装节点，如果报错详见<br>[关于Comfyui Manager如何修改config.ini启用Github URL安装的教程](https://www.bilibili.com/video/BV1Aohn6CEud/)|\n|4|重启Comfyui|重启Comfyui|\n\n简单点可以让DSH或者Workbuddy等Agent工具给你自动装"
+      ]
+    },
+    {
+      "id": 1797,
+      "title": "模型下载链接",
+      "text": [
+        "# 模型下载链接及安装位置\n\n## >>Unet模型、Clip、VAE<<\n| # | 名称 | 介绍 |\n|---|---|---|\n|1|Anima_base_V10|Unet模型|\n|2|qwen_3_06b_base.safetensors|Clip模型|\n|3|qwen_image_vae.safetensors|VAE模型|\n### Civitai下载模型、Clip、VAE [网页链接](https://civitai.red/models/2458426/anima?modelVersionId=2945208)\n（Clip和VAE在Required Component里）\n\n## >>放大模型<<\n\n[RealESRGAN抱脸仓库](https://huggingface.co/spaces/Marne/Real-ESRGAN/tree/main)\n\n## >>Controlnet 模型<<\n| # | 名称 | 介绍 |\n|---|---|---|\n|1|any-test-like|色彩参考生图模型|\n|2|Inpaint|局部重绘模型|\n\n[Anima LLLite抱脸仓库](https://huggingface.co/spaces/Marne/Real-ESRGAN/tree/main)\n\n## >>各类模型、Lora放置位置<<\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 diffusion_models/\n│   │      └── Anima_base.safetensors\n│   ├── 📂 loras/\n│   │      └── 你喜欢的lora\n│   └── 📂 vae/\n│   │      └── qwen_image_vae.safetensors\n│   ├── 📂 clip/\n│   │      └── qwen_3_06b_base.safetensors\n│   ├── 📂 controlnet/\n│   │      └── anima-lllite-any-test-like-v2.safetensors\n│   ├── 📂 upscale_models/\n│   │      └──RealESRGAN_x4plus_anime_6B.pth\n...\n```"
+      ]
+    },
+    {
+      "id": 1798,
+      "title": "模型下载链接",
+      "text": [
+        "## 模型、Lora下载站点\n| # | 名称 | 介绍 |\n|---|---|---|\n|1|Civitai（里)|常用模型、Lora下载站点<br> [站点链接](https://civitai.red/)|\n|2|Civitai（健全）|常用模型、Lora下载站点<br>[站点链接](https://civitai.com/)\n|3|Huggingface|[海外站点链接](https://huggingface.co/)<br>[国内镜像站链接](https://hf-mirror.com/)|\n\n"
+      ]
+    },
+    {
+      "id": 1800,
+      "title": "常见报错问题",
+      "text": [
+        "# 常见报错问题\n\n## 问题-报错信息包含sageattention\n    解决方案：sageattention模式改为disable\n\n## 问题-Latent能不能多选\n    答：不能，需要自行确保该节点的latent模式为单选\n\n## 问题-输入图像报错\n    答：随便粘贴俩图像进去，高版本cfui的通病\n\n## 问题-导入后线都断了\n    答：最有可能是汉化节点的问题，使用comfyui搜索translate节点全部禁用卸载\n\n## 问题-采样出图空白或者全黑\n    答：启动器cross-attention改为尝试使用xformaers\n\n## 问题-节点缺失报错\n    答：右边有缺失节点安装教程\n\n"
+      ]
+    },
+    {
+      "id": 1741,
+      "title": "Latent模式介绍",
+      "text": [
+        "### 1-局部重绘（不好用，如果要用，重绘幅度0.8）\n### 2-图生图 \n### 3-空latent（megapixel调大小）\n### 4-空latent（需要手动调长宽大小）\n\n# 如需使用，请勾选对应开关"
+      ]
+    },
+    {
+      "id": 1416,
+      "title": "常用Lora触发词",
+      "text": [
+        ""
+      ]
+    }
+  ],
+  "mode_mapping": {
+    "txt2img": [
+      118,
+      1428
+    ],
+    "img2img": [
+      118,
+      1426,
+      1608
+    ],
+    "inpaint": [
+      118,
+      1424,
+      1608
+    ],
+    "color": [
+      1038,
+      118
+    ],
+    "control_inpaint": [
+      1039,
+      118,
+      1424
+    ],
+    "artist_mix": [
+      1690,
+      1691,
+      118
+    ],
+    "resize": [
+      1369
+    ],
+    "upscale": [
+      279
+    ]
+  },
+  "adaptations": [
+    "Flatten subgraphs/context/switches into independent API branches",
+    "Keep Base v1.0 and map source-specific model names to installed files",
+    "Disable source TeaCache/Sage/Turbo/2.9B by default",
+    "Default sampling 21 steps, CFG4.4, Euler/simple from source node118",
+    "Preserve user-explicit style; do not adopt demographic or artist exclusions from source sample prompts",
+    "Masks use explicit white-edit black-keep, plus original-image compositing outside mask",
+    "Animated reference uploads are processed as first-frame static images",
+    "resize uses native Lanczos; upscale uses configured ESRGAN-style model, not RTX/SD/VOSR nodes"
+  ],
+  "validation": "Offline graph and workflow contract tests only; target-server preflight via /object_info is mandatory before submission"
+}

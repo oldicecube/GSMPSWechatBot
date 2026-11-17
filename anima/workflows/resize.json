@@ -1,0 +1,29 @@
+{
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "71",
+        0
+      ],
+      "filename_prefix": "Anima/b6e10b2e8d0c7ed4eceae378"
+    }
+  },
+  "50": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference.png"
+    }
+  },
+  "71": {
+    "class_type": "ImageScaleBy",
+    "inputs": {
+      "image": [
+        "50",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "scale_by": 2.0
+    }
+  }
+}

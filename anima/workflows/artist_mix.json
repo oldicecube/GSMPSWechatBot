@@ -1,0 +1,121 @@
+{
+  "44": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "45": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    }
+  },
+  "15": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "text": "worst quality, low quality, blurry, jpeg artifacts"
+    }
+  },
+  "28": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 768,
+      "height": 768,
+      "batch_size": 1
+    }
+  },
+  "19": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "62",
+        0
+      ],
+      "positive": [
+        "62",
+        1
+      ],
+      "negative": [
+        "12",
+        0
+      ],
+      "latent_image": [
+        "28",
+        0
+      ],
+      "seed": 9137097133495575870,
+      "steps": 21,
+      "cfg": 4.4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "19",
+        0
+      ],
+      "vae": [
+        "15",
+        0
+      ]
+    }
+  },
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "Anima/06405d9b2cf418a7313aa440"
+    }
+  },
+  "61": {
+    "class_type": "AnimaArtistPack",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "artist_chain": "wlop, sakimichan",
+      "base_prompt": "masterpiece, best quality, score_7, user prompt"
+    }
+  },
+  "62": {
+    "class_type": "AnimaArtistAdapterMixer",
+    "inputs": {
+      "model": [
+        "44",
+        0
+      ],
+      "artist_pack": [
+        "61",
+        0
+      ],
+      "strength": 1.0,
+      "normalize_weights": true,
+      "alignment_mode": "base_anchored",
+      "enabled": true,
+      "apply_to_uncond": false,
+      "uncond_strength": 0.0
+    }
+  }
+}

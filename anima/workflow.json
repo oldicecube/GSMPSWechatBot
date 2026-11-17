@@ -1,63 +1,56 @@
 {
-  "8": {
+  "44": {
+    "class_type": "UNETLoader",
     "inputs": {
-      "samples": [
-        "19",
-        0
-      ],
-      "vae": [
-        "15",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
     }
   },
-  "11": {
+  "45": {
+    "class_type": "CLIPLoader",
     "inputs": {
-      "text": "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top and denim shorts is standing outdoors. She's holding a rectangular sign out in front of her that reads \"ANIMA\". She's looking at the viewer with a smile. The background features some trees and blue sky with clouds.",
-      "clip": [
-        "45",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Positive Prompt)"
-    }
-  },
-  "12": {
-    "inputs": {
-      "text": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia",
-      "clip": [
-        "45",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Negative Prompt)"
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
     }
   },
   "15": {
+    "class_type": "VAELoader",
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
-    },
-    "class_type": "VAELoader",
-    "_meta": {
-      "title": "加载VAE"
+    }
+  },
+  "11": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "text": "masterpiece, best quality, score_7, user prompt"
+    }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "text": "worst quality, low quality, blurry, jpeg artifacts"
+    }
+  },
+  "28": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 768,
+      "height": 768,
+      "batch_size": 1
     }
   },
   "19": {
+    "class_type": "KSampler",
     "inputs": {
-      "seed": 888518879835997,
-      "steps": 24,
-      "cfg": 5,
-      "sampler_name": "er_sde",
-      "scheduler": "simple",
-      "denoise": 1,
       "model": [
         "44",
         0
@@ -73,56 +66,36 @@
       "latent_image": [
         "28",
         0
+      ],
+      "seed": 4991808908394447781,
+      "steps": 21,
+      "cfg": 4.4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "19",
+        0
+      ],
+      "vae": [
+        "15",
+        0
       ]
-    },
-    "class_type": "KSampler",
-    "_meta": {
-      "title": "K采样器"
-    }
-  },
-  "28": {
-    "inputs": {
-      "width": 1024,
-      "height": 720,
-      "batch_size": 1
-    },
-    "class_type": "EmptyLatentImage",
-    "_meta": {
-      "title": "空Latent图像"
-    }
-  },
-  "44": {
-    "inputs": {
-      "unet_name": "anima-base-v1.0.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "UNet加载器"
-    }
-  },
-  "45": {
-    "inputs": {
-      "clip_name": "qwen_3_06b_base.safetensors",
-      "type": "stable_diffusion",
-      "device": "default"
-    },
-    "class_type": "CLIPLoader",
-    "_meta": {
-      "title": "加载CLIP"
     }
   },
   "47": {
+    "class_type": "SaveImage",
     "inputs": {
-      "filename_prefix": "Anima",
       "images": [
         "8",
         0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "保存图像"
+      ],
+      "filename_prefix": "Anima/acbf0228dfd50f9a17006e4f"
     }
   }
 }

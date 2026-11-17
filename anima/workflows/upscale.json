@@ -1,0 +1,50 @@
+{
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "71",
+        0
+      ],
+      "filename_prefix": "Anima/aaafee2769e3be34753a7482"
+    }
+  },
+  "50": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference.png"
+    }
+  },
+  "72": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "RealESRGAN_x4plus_anime_6B.pth"
+    }
+  },
+  "73": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "72",
+        0
+      ],
+      "image": [
+        "50",
+        0
+      ]
+    }
+  },
+  "71": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "73",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 1536,
+      "height": 1536,
+      "crop": "disabled"
+    }
+  }
+}

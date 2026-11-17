@@ -1,0 +1,38 @@
+{
+  "server": "127.0.0.1:8188",
+  "check": "read_only_object_info_no_generation",
+  "modes": {
+    "txt2img": {
+      "status": "schema_ready",
+      "nodes": 9
+    },
+    "img2img": {
+      "status": "schema_ready",
+      "nodes": 10
+    },
+    "inpaint": {
+      "status": "schema_ready",
+      "nodes": 13
+    },
+    "color": {
+      "status": "missing_dependency",
+      "error": "ComfyUI 缺少节点 AnimaLLLiteApply_sdscripts"
+    },
+    "control_inpaint": {
+      "status": "missing_dependency",
+      "error": "ComfyUI 缺少节点 AnimaLLLiteApply_sdscripts"
+    },
+    "artist_mix": {
+      "status": "missing_dependency",
+      "error": "ComfyUI 缺少节点 AnimaArtistPack"
+    },
+    "resize": {
+      "status": "schema_ready",
+      "nodes": 3
+    },
+    "upscale": {
+      "status": "missing_dependency",
+      "error": "模型列表中没有 RealESRGAN_x4plus_anime_6B.pth，请配置正确的文件名并刷新ComfyUI"
+    }
+  }
+}

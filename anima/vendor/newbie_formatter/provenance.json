@@ -1,0 +1,54 @@
+{
+  "project": "SuzumiyaAkizuki/ComfyUI-NewBie-LLM-Formatter",
+  "revision": "624ccf04cc05cf902b42525074aa9e08561ad8e8",
+  "license": "MIT",
+  "runtime_reused": [
+    "prompt_formats.get_format_spec",
+    "output_contract.parse_envelope",
+    "LOW_ASSEMBLY_PROMPT literal from agent_prompts.py",
+    "tools.execute_search_tags",
+    "tools.execute_get_related_tags",
+    "tools.execute_get_artist_profile",
+    "output_contract.output_instruction",
+    "prompt_formats.get_system_additions",
+    "agent_prompts provenance/failure rule sections (AST literals only)",
+    "prompt_formats Anima syntax/conflict/subject-binding sections without exemplar scenes"
+  ],
+  "excluded": [
+    "NSFW/jailbreaker agent role",
+    "unbounded external tool loop",
+    "NewBie XML and MOSS modes"
+  ],
+  "compatibility": "Existing bot interface, moderation and output screening retained; upstream tag tools use bounded per-call transport and no unbounded retry loop.",
+  "sha256": {
+    "agent_prompts.py": "c585953640cb87547d1c4620aa396f8dfaccb2240da9366bc48a4655cdd2fe55",
+    "LICENSE": "c3844b6d64bf88522233b9a1bdd0da028781f482d918098a2255183c3b5ecb57",
+    "output_contract.py": "222c2e20d559461374319c1d5989ce2034697b65fc7891fe99e4468de39bf120",
+    "prompt_formats.json": "8523f11b9f44d5bb277dcf276b363293fccb046702408af6603eb63e52c7f057",
+    "prompt_formats.py": "12a343436eb57d32033a13ac24c2349e30b014b52cb72aa35996f51b032b81cc",
+    "__init__.py": "d07437f37dcb9499aed82b7b663996553b4fe2dcb5f0e9a00571730b29811bbf",
+    "tools.py": "cd4afa5aa4a350729f4b8721698c313eccf37ae536ec95eead689b25ef0b0609"
+  },
+  "upstream_head_checked_at": "2026-11-17",
+  "upstream_head_matches_revision": true,
+  "reviewed_not_enabled": {
+    "output_contract.response_format_settings": "Partially reused: optional NativePoolProvider.send_json sends json_object for plan/audit and json_schema for assembly/repair when the gateway accepts it; a rejected response_format falls back to prompt-only. The normal send() path and global model transport are unchanged.",
+    "cache.compute_edit/BaselineStore": "Deferred: requires explicit continued-edit semantics and per-session+per-user isolation. Global baseline can leak previous character/style.",
+    "Medium/High agent_loop": "Deferred: current bounded Low flow already covers needed tag lookups; extra loops add unpredictable latency. Native optional concept lookup reuses existing bot search service.",
+    "get_artist_recommendations": "Explicit opt-in only; do not silently choose an unrequested artist.",
+    "reference-image prompt reversal": "Useful future opt-in mode; not auto-enabled because reference details may conflict with user edits and must not be treated as established character identity.",
+    "MOSS Layout/editor/compiler": "Not Anima model input; explicit layout-specific feature only.",
+    "message_protocol Gemini tool history rewrite": "Not needed in current pipeline: no assistant function-call history is sent to the formatter.",
+    "diagnostics.py": "No full import; existing bot diagnostics retained, research transport redacts auth and excludes image request bodies."
+  },
+  "local_adaptations": [
+    "Stage-scoped plan metadata vs visual envelope; final bot interface unchanged",
+    "Strict duplicate-free stage JSON and upstream exact envelope validation",
+    "Source-linked explicit visual fact ledger; no unsolicited staging checklist",
+    "Quote-grounded semantic audit: every issue must quote verbatim text from the current draft; unquotable complaints are discarded instead of triggering a correction. Up to two bounded repairs, each independently rechecked; a correction that drops stated facts is rejected.",
+    "Recovery accepts only moderation and faithful translation, never formatter/tags/metadata",
+    "Optional native search supports short public concepts as well as artist/character names",
+    "Do not inject generic default staging or multi-character example scenes into the system; keep explicit user layout unchanged",
+    "Style/lettering stability negatives (monochrome/sketch/lineart for default anime, text/watermark/signature when unrequested) and light underwear/lingerie guidance only for neutral or unknown-tone topics"
+  ]
+}

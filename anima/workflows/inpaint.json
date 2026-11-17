@@ -1,0 +1,153 @@
+{
+  "44": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "45": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    }
+  },
+  "15": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "text": "masterpiece, best quality, score_7, user prompt"
+    }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "45",
+        0
+      ],
+      "text": "worst quality, low quality, blurry, jpeg artifacts"
+    }
+  },
+  "28": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "pixels": [
+        "50",
+        0
+      ],
+      "vae": [
+        "15",
+        0
+      ],
+      "mask": [
+        "52",
+        0
+      ],
+      "grow_mask_by": 22
+    }
+  },
+  "19": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "44",
+        0
+      ],
+      "positive": [
+        "11",
+        0
+      ],
+      "negative": [
+        "12",
+        0
+      ],
+      "latent_image": [
+        "28",
+        0
+      ],
+      "seed": 512322630189366590,
+      "steps": 21,
+      "cfg": 4.4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.8
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "19",
+        0
+      ],
+      "vae": [
+        "15",
+        0
+      ]
+    }
+  },
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "70",
+        0
+      ],
+      "filename_prefix": "Anima/0c60978978b1791cdd75d596"
+    }
+  },
+  "50": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference.png"
+    }
+  },
+  "51": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "mask.png"
+    }
+  },
+  "52": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "51",
+        0
+      ],
+      "channel": "red"
+    }
+  },
+  "70": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": [
+        "50",
+        0
+      ],
+      "source": [
+        "8",
+        0
+      ],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": [
+        "52",
+        0
+      ]
+    }
+  }
+}
