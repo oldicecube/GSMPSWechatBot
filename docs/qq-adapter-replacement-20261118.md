@@ -99,3 +99,112 @@ port = 3001
   不会被风控，但只能以官方 Bot 身份入群，不能控制个人号，群管能力以平台开放范围为准。
 - 若将来 Milky 成为事实标准，我们只需给适配器再加一个 Milky 传输层（事件走 WS/SSE、API 走 `POST /api/:api`），
   画像层与编解码层可复用，不需要重写。
+
+---
+
+# 附：NapukettoQQ 实测安装与能力矩阵（2026-11-18 夜间）
+
+## 1. 安装位置与环境（与现网隔离）
+
+| 项目 | 值 |
+| --- | --- |
+| 程序目录 | `C:\qq-adapter-lab\qqbot`（D 盘只剩 2.5G，H 盘是网络共享装不了 pnpm 符号链接） |
+| 版本 | `@napuketto/cli 0.6.12` + `@napuketto/adapter 0.16.4` / `kernel 0.12.3` / `loader 0.9.3` / `network 0.3.2` |
+| 数据目录 | `C:\qq-adapter-lab\qqbot\.napuketto\3294652115` |
+| 自带 QQ 原生文件 | `.napuketto\qq-files\9.9.37-54395`（首次启动自动下载 313MB 官方安装包并解出 `wrapper.node`，**不依赖也不修改**现网 `depends-data/napcat/qq-client`） |
+| OneBot HTTP | `127.0.0.1:13010` |
+| OneBot WS（反向，MaiBot 连入） | `127.0.0.1:13011` |
+| token | `a9e8cd3159dcae6bda820f1db1c30946`（与现网 13001 的 token 不同，互不干扰） |
+| 消息格式 | `messagePostFormat = "array"`、`reportSelfMessage = false` |
+
+启动：`scripts\start_qq_napuketto_lab.bat`（内部 `cd /d C:\qq-adapter-lab\qqbot && pnpm start`）。
+注意 PowerShell 执行策略禁止 `pnpm.ps1`，必须走 `cmd`。
+
+首次启动会打印终端二维码并把图片存到
+`.napuketto\3294652115\cache\qrcode.png`，同时日志给出 `https://txz.qq.com/p?k=...` 链接。
+
+> ⚠️ 扫码登录会让同一 QQ 号的现网会话下线。因此**切换前不要扫码**，先按 §5 改适配器配置，再扫码。
+
+## 2. 实测结论（本地模拟对端，未登录 QQ、未发真实消息）
+
+脚本：`scripts/qq_napuketto_compat_acceptance.py`，报告：
+`docs/maibot-wechat-acceptance/qq-napuketto-compat-20261118.json`（20/20 通过）。
+
+覆盖到的链路：
+
+- `get_version_info` 返回 `app_name = "napuketto-qq"` → 适配器判定为通用 `onebot11` 画像（不是 NapCat/SnowLuma）。
+- 入站群消息：`reply`/`at`/`text`/`image` 段结构、Unicode 与换行、QQ 身份字段（`platform=qq`、`account_id`、`group_id`）全部保真。
+- 引用消息：通过 `get_msg` 解析出被引用人、原文与昵称/群名片。
+- 图片：真实 HTTP 下载链路成功，`is_picture = true`。
+- 拍一拍：`notice(notify/poke)` 能被放行并渲染成「X 戳了戳 Y（这是QQ的一个功能…）」，且被作用人被正确标为 `target_id`。
+- 禁言/撤回/精华：`group_ban` 的 operator/target/duration 关系、`group_recall` 文案、`group_essence` → `essence` 归一化均可渲染。
+- 出站：`send_group_msg` 的 `reply`/`at`/`text` 段与回执 `message_id` 正常。
+- 合并转发：使用标准 `messages` 参数键。
+- 未实现动作（`send_poke`）返回 `retcode=1404`，适配器抛错而非静默成功。
+
+## 3. 相比 NapCat 可能缺失/降级的功能
+
+NapukettoQQ OneBot 11 共实现 **81 个动作**（源码 `defineOb11Action` 枚举）。按我们实际用到与可能用到的能力对比：
+
+| 能力 | NapCat | NapukettoQQ | 影响 |
+| --- | --- | --- | --- |
+| 发消息 / 引用 / @ / 图片 / 语音 / 视频 | ✅ | ✅ | 无 |
+| 合并转发（`send_group_forward_msg`） | ✅（`message`） | ✅（**只接受 `messages`**） | 已在通用画像里改成 `messages` |
+| 撤回消息 / 撤回自己的消息 | ✅ | ✅ `delete_msg` | 无 |
+| 单人禁言 / 全体禁言 / 踢人 / 管理员 / 名片 / 群名 / 退群 | ✅ | ✅ | 无 |
+| 群精华 / 群文件（列表/上传/删除/移动/重命名/转存） | ✅ | ✅ | 无 |
+| 表情回应 `set_msg_emoji_like` | ✅ | ✅ | 无 |
+| 好友点赞 `send_like` | ✅ | ✅ | 无 |
+| **主动拍一拍 `send_poke` / `friend_poke` / `group_poke`** | ✅ | ❌ **未实现** | patpat 只能「被动接收拍一拍再回话」，**不能主动回拍或主动戳人**；调用会拿到 1404 错误 |
+| **群公告 `get_group_notice` / `_send_group_notice`** | ✅ | ❌ | 读取/发送群公告不可用 |
+| **群头衔 `set_group_special_title`** | ✅ | ❌ | 设置专属头衔不可用 |
+| 群文件直链 `get_group_file_url` | ✅ | ❌（有 `download_file` / `get_group_file_download_url`） | 部分下载路径需改走 `download_file` |
+| 统一合并转发 `send_forward_msg` | ✅ | ❌（有 group/private 分目标版本） | 适配器本来就走分目标版本，无影响 |
+| 最近会话 `get_recent_contact`、点赞列表 `get_profile_like`、在线设备 `get_online_clients`、表情回应列表 `get_emoji_likes`、群打卡 `set_group_sign`、群头像 `set_group_portrait`、群备注 `set_group_remark`、`get_group_info_ex`、`mark_all_as_read`、`ocr_image`、`get_mini_app_ark`、AI 语音 `send_group_ai_record` | ✅ | ❌ | 我们当前功能未依赖，属潜在缺口 |
+| NapCat 私有 `nc_*` 扩展 | ✅ | ❌ | 本来就没用 |
+| 群名片变更通知 | ✅ `group_card` | ✅ `group_card` | 无 |
+| 群名变更通知 | ✅ `notify.group_name` | ❌（无该子类型） | 群改名不会产生事件 |
+| 精华通知事件名 | `essence` | `group_essence` | 已加别名归一化 |
+| 拍一拍事件 | `notice(notify/poke)` | `notice(notify/poke)`，**源码标注「待真实事件校准」**，每次都会打 `ob11: poke grayTip raw` warn 日志 | 拍一拍可能取不到目标（`target_id` 依赖 `aioOpGrayTipElement.peerUid`），需登录后实测；日志会偏吵 |
+| 语音发送格式 | wav 可直接收 | 通用画像按 wav 处理，未实测 | 语音消息可能需转 silk，待实测 |
+| 群文件消息（入站） | `file` 段 | 适配器入站不认识 `file` 段，回落成 xml 文本 | 收到群文件会显示成占位文本 |
+
+> 结论：**日常聊天、引用、@、图片、撤回、禁言、合并转发、表情回应都可用；「主动拍一拍」「群公告」「群头衔」三项确定缺失。** 其中「主动拍一拍」是唯一会明显影响现有玩法的缺口（patpat 插件的回拍/主动戳人）。
+
+## 4. 本次为兼容新协议端做的代码改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `plugins/MaiBot-SnowLuma-Adapter/profile.py` | 通用 `onebot11` 画像的 `forward_param_key` 由 `message` 改为 `messages`（OneBot 11 规范；NapukettoQQ/LLBot 只接受 `messages`） |
+| `plugins/MaiBot-SnowLuma-Adapter/codecs/notice/helpers.py` | 新增 `normalize_notice_payload` 与 `NOTICE_TYPE_ALIASES`（`group_essence` → `essence`，并补 `sender_id` → `user_id`）、新增 `resolve_event_target_user_id` |
+| `plugins/MaiBot-SnowLuma-Adapter/codecs/notice/message_codec.py` | 通知入口归一化事件名；拍一拍的被作用人改用 `target_id`（此前误用 `user_id`，会把「谁戳谁」记反） |
+| `plugins/MaiBot-SnowLuma-Adapter/filters.py` | 通知开关判定前先做事件名别名归一化 |
+| `plugins/MaiBot-SnowLuma-Adapter/config.toml` | 去掉 UTF-8 BOM（BOM 会让 `tomllib` 报 `Invalid statement (at line 1, column 1)`，导致**整个 QQ 适配器配置加载失败、QQ 侧完全掉线**） |
+| `scripts/qq_napuketto_compat_acceptance.py` | 新增 NapukettoQQ 兼容验收（20 项，本地模拟对端） |
+| `scripts/qq_adapter_onebot11_compat_acceptance.py` | 更新通用画像对合并转发参数键的断言 |
+| `scripts/start_qq_napuketto_lab.bat` | 实验室一键启动脚本 |
+
+## 5. 切换到 NapukettoQQ 的步骤
+
+1. 停掉现网 bot（手动）。
+2. 运行 `scripts\start_qq_napuketto_lab.bat`，用手机 QQ 扫码登录（会顶掉 NapCat 的会话）。
+3. 登录后确认 13010/13011 已监听：
+   `Get-NetTCPConnection -State Listen | ? {$_.LocalPort -in 13010,13011}`
+4. 改 `plugins/MaiBot-SnowLuma-Adapter/config.toml`：
+
+```toml
+[client]
+client_type = "onebot11"      # 也可保持 auto，探测会回落到通用画像
+server = "127.0.0.1"
+port = 13011
+token = "a9e8cd3159dcae6bda820f1db1c30946"
+```
+
+5. 启动 bot，看日志出现 `适配器已连接: ws://127.0.0.1:13011/...` 与画像探测结果。
+6. 想回退：把 `port` 改回 `13001`、`token` 换回 NapCat 的值即可，代码无需回滚。
+
+## 6. 仍未验证的部分（需要真实登录）
+
+- 拍一拍事件的 `target_id` 是否真的能取到（源码自己标注未校准）。
+- 语音发送格式、群文件上传/下载链路。
+- 登录后 OneBot 服务是否在 13010/13011 正常起监听（未登录时不会起）。

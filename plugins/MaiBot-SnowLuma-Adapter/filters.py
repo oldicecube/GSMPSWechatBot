@@ -110,6 +110,10 @@ class QQRegexFilter:
             self._logger.warning(message)
 
 
+# 协议端私有通知事件名 → 标准事件名（与 codecs/notice/helpers.py 保持一致）。
+_NOTICE_TYPE_ALIASES = {"group_essence": "essence"}
+
+
 class QQNoticeFilter:
     """通知事件类型过滤器。
 
@@ -155,6 +159,9 @@ class QQNoticeFilter:
         """
         if not notice_config.enabled:
             return False
+
+        # 协议端私有事件名先归一化再查开关（如 NapukettoQQ 的 group_essence）。
+        notice_type = _NOTICE_TYPE_ALIASES.get(notice_type, notice_type)
 
         if notice_type == "notify":
             if sub_type == "poke":

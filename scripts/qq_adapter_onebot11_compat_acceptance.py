@@ -41,7 +41,9 @@ class OneBot11Compat(unittest.TestCase):
         self.assertEqual(generic.msg_action_style, profile.MSG_ACTION_STYLE_TARGETED)
         self.assertFalse(generic.supports_qzone)
         self.assertFalse(generic.transcode_silk_voice)
-        self.assertEqual(generic.forward_param_key, profile.FORWARD_PARAM_KEY_MESSAGE)
+        # OneBot 11 规范的 send_group_forward_msg 参数是 messages；
+        # NapukettoQQ / LLBot 只接受 messages，传 message 会被 schema 拒绝。
+        self.assertEqual(generic.forward_param_key, profile.FORWARD_PARAM_KEY_MESSAGES)
         self.assertEqual(set(profile.PROFILE_BY_TYPE), {"napcat", "snowluma", "onebot11"})
 
     def test_probe_accepts_new_implementations(self):

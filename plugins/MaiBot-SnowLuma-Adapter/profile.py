@@ -86,12 +86,15 @@ SNOWLUMA_PROFILE = ClientProfile(
 # 通用 OneBot 11 实现（LLBot / NapukettoQQ / 其他标准实现）。
 # 采用 OneBot 11 标准的分目标动作名，与 NapCat 画像一致；不支持 QZone 与
 # SnowLuma 专属的语音转码/分片上传。
+# 合并转发参数键按 OneBot 11 规范取 ``messages``：NapukettoQQ 的
+# send_group_forward_msg / send_private_forward_msg 只接受 ``messages``，
+# 传 ``message`` 会被 schema 校验拒绝（2026-11-18 依据 @napuketto/adapter 实测源码）。
 ONEBOT11_PROFILE = ClientProfile(
     client_type="onebot11",
     expected_app_name="",
     msg_action_style=MSG_ACTION_STYLE_TARGETED,
     split_file_upload=False,
-    forward_param_key=FORWARD_PARAM_KEY_MESSAGE,
+    forward_param_key=FORWARD_PARAM_KEY_MESSAGES,
     record_out_format="wav",
     transcode_silk_voice=False,
     supports_qzone=False,

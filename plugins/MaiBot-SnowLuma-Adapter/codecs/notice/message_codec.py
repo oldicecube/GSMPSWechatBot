@@ -10,7 +10,12 @@ import time
 from ...services import QQQueryService
 from ...types import QQPayload, QQPayloadDict
 from .enricher import QQNoticeEntityResolver
-from .helpers import build_payload_digest, resolve_actor_user_id
+from .helpers import (
+    build_payload_digest,
+    normalize_notice_payload,
+    resolve_actor_user_id,
+    resolve_event_target_user_id,
+)
 from .meta_event_logger import QQMetaEventObserver
 from .renderer import QQNoticeTextRenderer
 
@@ -42,6 +47,7 @@ class QQNoticeCodec:
         Returns:
             Optional[QQPayloadDict]: 成功时返回标准 ``MessageDict``；无法识别时返回 ``None``。
         """
+        payload = normalize_notice_payload(payload)
         notice_type = str(payload.get("notice_type") or "").strip()
         if not notice_type:
             return None
@@ -66,7 +72,7 @@ class QQNoticeCodec:
             "napcat_notice_payload": dict(payload),
             "source_kind": "system_event",
             "event_actor_user_id": user_id,
-            "event_target_user_id": str(payload.get("user_id") or "").strip(),
+            "event_target_user_id": resolve_event_target_user_id(payload),
             "bot_identity_key": f"qq:{self_id}" if self_id else "",
         }
         if group_id and self_id:

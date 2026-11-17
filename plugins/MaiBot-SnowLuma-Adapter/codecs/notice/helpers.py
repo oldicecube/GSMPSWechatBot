@@ -66,6 +66,54 @@ def normalize_payload_value(value: Any) -> Any:
     return str(value)
 
 
+# 不同 OneBot 11 实现对同一类通知的事件名并不统一。NapCat 用 ``essence``，
+# NapukettoQQ 用 ``group_essence`` 且把被操作者放在 ``sender_id``；这里统一归一化，
+# 避免兼容新协议端时通知被静默丢弃。
+NOTICE_TYPE_ALIASES = {"group_essence": "essence"}
+
+
+def normalize_notice_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """把协议端私有的事件名/字段归一化成 Host 认识的标准形态。
+
+    Args:
+        payload: 原始通知事件。
+
+    Returns:
+        Mapping[str, Any]: 归一化后的通知事件；无需归一化时原样返回。
+    """
+
+    raw_notice_type = str(payload.get("notice_type") or "").strip()
+    alias = NOTICE_TYPE_ALIASES.get(raw_notice_type)
+    if alias is None:
+        return payload
+    normalized = dict(payload)
+    normalized["notice_type"] = alias
+    if "user_id" not in normalized and normalized.get("sender_id") is not None:
+        normalized["user_id"] = normalized["sender_id"]
+    return normalized
+
+
+def resolve_event_target_user_id(payload: Mapping[str, Any]) -> str:
+    """解析通知事件中被作用的一方。
+
+    OneBot 11 各实现对 ``user_id`` 的语义并不统一：``group_ban`` 里它是被禁言者，
+    而 ``notify.poke`` 里它是拍一拍的发起者，目标在 ``target_id``（NapCat 与
+    NapukettoQQ 一致）。这里按通知类型归一化，避免把「谁拍了拍谁」记反。
+
+    Args:
+        payload: 原始通知事件。
+
+    Returns:
+        str: 规范化后的被作用用户号；无法确定时返回空字符串。
+    """
+
+    notice_type = str(payload.get("notice_type") or "").strip()
+    sub_type = str(payload.get("sub_type") or "").strip()
+    if notice_type == "notify" and sub_type == "poke":
+        return str(payload.get("target_id") or "").strip()
+    return str(payload.get("user_id") or "").strip()
+
+
 def resolve_actor_user_id(payload: Mapping[str, Any]) -> str:
     """解析通知事件中的操作者用户号。
 
