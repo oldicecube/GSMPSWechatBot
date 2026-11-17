@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.10] — 2026-11-18
+
+### 主要功能
+
+- 协议端兼容：新增通用 `onebot11` 客户端画像，连接建立后对未识别的 OneBot 11 实现（LLBot、NapukettoQQ、自建实现等）
+  回退到标准分目标动作画像，不再因 `app_name` 无法识别而拒绝连接；NapCat / SnowLuma 画像与行为保持不变。
+- 配置：`client.client_type` 新增 `onebot11` 取值，可与 `auto` 搭配实现"换协议端只改地址与 token"。
+
+### 细节
+
+- 对端 `get_version_info` 未返回 `app_name` 时按通用画像连接并记录告警，而不是中断连接。
+
 ## [1.1.9] — 2026-10-26
 
 ### 细节

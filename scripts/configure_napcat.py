@@ -72,7 +72,7 @@ def prepare(root=ROOT, *, source=None, account='', groups=(), owner='', enable=F
     napcat = root / NAPCAT
     cfg_path = dest / 'config.toml'
     if not dest.exists() and (not source or not (source / '_manifest.json').is_file()):
-        raise ValueError('Provide the extracted official v1.1.9 adapter with --source')
+        raise ValueError('Provide the extracted official adapter with --source')
     backup = root / 'temp' / ('napcat-config-backup-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
     for rel in [ADAPTER / 'config.toml', Path('config/adapter_policy.toml'), Path('config/bot_config.toml'),
                 NAPCAT / 'config/onebot11.json', NAPCAT / 'config/webui.json', NAPCAT / 'config/maibot-launch.json']:

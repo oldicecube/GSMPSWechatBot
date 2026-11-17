@@ -83,9 +83,24 @@ SNOWLUMA_PROFILE = ClientProfile(
     supports_qzone=True,
 )
 
+# 通用 OneBot 11 实现（LLBot / NapukettoQQ / 其他标准实现）。
+# 采用 OneBot 11 标准的分目标动作名，与 NapCat 画像一致；不支持 QZone 与
+# SnowLuma 专属的语音转码/分片上传。
+ONEBOT11_PROFILE = ClientProfile(
+    client_type="onebot11",
+    expected_app_name="",
+    msg_action_style=MSG_ACTION_STYLE_TARGETED,
+    split_file_upload=False,
+    forward_param_key=FORWARD_PARAM_KEY_MESSAGE,
+    record_out_format="wav",
+    transcode_silk_voice=False,
+    supports_qzone=False,
+)
+
 PROFILE_BY_TYPE: Dict[str, ClientProfile] = {
     NAPCAT_PROFILE.client_type: NAPCAT_PROFILE,
     SNOWLUMA_PROFILE.client_type: SNOWLUMA_PROFILE,
+    ONEBOT11_PROFILE.client_type: ONEBOT11_PROFILE,
 }
 
 
@@ -130,7 +145,8 @@ def detect_client_type_from_app_name(app_name: str) -> Optional[str]:
         app_name: 对端自报的实现名称。
 
     Returns:
-        Optional[str]: 判定出的客户端类型；无法识别时返回 ``None``（由调用方显式报错）。
+        Optional[str]: 判定出的客户端类型；``app_name`` 为空时返回 ``None``，
+        其余无法识别的实现回退到通用 OneBot 11 画像。
     """
 
     normalized_app_name = str(app_name or "").strip().lower()
@@ -140,7 +156,9 @@ def detect_client_type_from_app_name(app_name: str) -> Optional[str]:
         return SNOWLUMA_PROFILE.client_type
     if "napcat" in normalized_app_name:
         return NAPCAT_PROFILE.client_type
-    return None
+    # 其余 OneBot 11 实现（LLBot / NapukettoQQ / 自建实现等）统一按通用画像处理：
+    # 标准动作名与 NapCat 画像一致，避免每出现一个新实现就无法连接。
+    return ONEBOT11_PROFILE.client_type
 
 
 async def probe_client_profile(
@@ -184,8 +202,9 @@ async def probe_client_profile(
     app_version = str(version_info.get("app_version") or version_info.get("version") or "").strip()
     client_type = detect_client_type_from_app_name(app_name)
     if client_type is None:
-        raise RuntimeError(
-            f"对端 app_name='{app_name or '<空>'}' 无法识别为 napcat 或 snowluma，"
-            "请在 client.client_type 中显式指定，或确认对端为受支持的实现"
+        logger.warning(
+            "对端 get_version_info 未提供 app_name，按通用 OneBot 11 画像连接；"
+            "如需特定实现的行为请在 client.client_type 中显式指定"
         )
+        client_type = ONEBOT11_PROFILE.client_type
     return client_type, app_name, app_version

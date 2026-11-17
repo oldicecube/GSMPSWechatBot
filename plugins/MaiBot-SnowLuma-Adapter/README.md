@@ -1,14 +1,16 @@
 # MaiBot SnowLuma Adapter（统一 QQ 连接器）
 
-连接 SnowLuma / NapCat 的 MaiBot 适配器插件。
+连接任意 OneBot 11 实现的 MaiBot 适配器插件。
 
-1.0 版起，本插件同时支持两类客户端：连接建立后自动判断连接方为 NapCat 还是 Snowluma
+连接建立后通过 `get_version_info` 自动判定对端：`NapCat` / `SnowLuma` 使用各自画像，
+其余标准 OneBot 11 实现（LLBot、NapukettoQQ、自建实现等）回退到通用 `onebot11` 画像。
+也可以在 `[client].client_type` 显式固定为 `napcat` / `snowluma` / `onebot11` / `auto`。
 
 ## 使用方法
 
 1.在 Maibot webui中插件市场下载或者github下载压缩包并解压到插件plugins目录
 
-2.在napcat/snowluma中创建正向ws(ws服务器)连接，记录端口和token连接令牌
+2.在协议端（LLBot + OneBot 11 插件、NapukettoQQ、NapCat、SnowLuma 等）创建正向 ws(ws服务器)连接，记录端口和 token 连接令牌
 
 3.在适配器配置中正确填写对应的端口的token令牌
 

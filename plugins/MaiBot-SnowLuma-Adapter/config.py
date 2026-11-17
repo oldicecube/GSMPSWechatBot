@@ -26,7 +26,7 @@ from .constants import (
 
 LOGGER = logging.getLogger("snowluma_adapter.config")
 
-CLIENT_TYPE_VALUES = Literal["auto", "napcat", "snowluma"]
+CLIENT_TYPE_VALUES = Literal["auto", "napcat", "snowluma", "onebot11"]
 
 
 
@@ -389,7 +389,7 @@ class QQServerConfig(PluginConfigBase):
 
     client_type: CLIENT_TYPE_VALUES = Field(
         default="auto",
-        description="对端客户端类型：auto 连接后自动判定，也可固定为 napcat 或 snowluma。",
+        description="对端客户端类型：auto 连接后自动判定，也可固定为 napcat、snowluma 或 onebot11（通用标准实现）。",
         json_schema_extra={
             "hint": "auto模式会自动确定连接的客户端类型",
             "i18n": _schema_i18n(
@@ -549,7 +549,7 @@ class QQServerConfig(PluginConfigBase):
         """
 
         normalized_value = _normalize_string(value).lower()
-        if normalized_value in {"auto", "napcat", "snowluma"}:
+        if normalized_value in {"auto", "napcat", "snowluma", "onebot11"}:
             return normalized_value  # type: ignore[return-value]
         if normalized_value:
             LOGGER.warning(f"无效的 client_type 值 '{value}'，已回退到 'auto'")
