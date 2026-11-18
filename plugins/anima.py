@@ -16,13 +16,26 @@ WEBUI_CONFIG = {'version': 1, 'fields': {
     'upscale_model': {'type': 'str', 'default': 'RealESRGAN_x4plus_anime_6B.pth', 'label': '超分模型文件名'},
 'generation_timeout': {'type': 'int', 'default': 180, 'min': 10, 'max': 600,
                            'label': '生成等待上限（秒）', 'config_path': 'anima.generation_timeout', 'reload': 'hot'},
+'gi2_api_base': {'type': 'str', 'default': 'https://api.uni-token.com/v1', 'max_length': 300,
+                    'label': 'GPT Image 网关地址', 'config_path': 'anima.gi2_api_base', 'reload': 'hot',
+                    'description': 'OpenAI 兼容网关，形如 https://host/v1；/anima gi2 子命令使用。'},
+'gi2_api_key': {'type': 'str', 'default': '', 'max_length': 300, 'secret': True,
+                   'label': 'GPT Image API Key', 'config_path': 'anima.gi2_api_key', 'reload': 'hot',
+                   'description': '敏感信息，仅保存在本机 config.json，不随仓库提交。'},
+'gi2_model': {'type': 'str', 'default': 'gpt-image-2.6', 'max_length': 100,
+                 'label': 'GPT Image 模型', 'config_path': 'anima.gi2_model', 'reload': 'hot'},
+'gi2_size': {'type': 'str', 'default': '1024x1024', 'max_length': 20,
+                'label': 'GPT Image 尺寸', 'config_path': 'anima.gi2_size', 'reload': 'hot'},
+'gi2_timeout': {'type': 'int', 'default': 300, 'min': 30, 'max': 900,
+                   'label': 'GPT Image 超时（秒）', 'config_path': 'anima.gi2_timeout', 'reload': 'hot'},
 }}
 
 
 import os
 import sys
 from core.sender import send
-from anima.commands import HELP, IMAGE_MODES, Request, parse_request
+from anima.commands import GPT_IMAGE_MODES, HELP, IMAGE_MODES, Request, parse_request
+from anima.gpt_image import GPTImageClient, GPTImageError
 from utils.points_manager import get_points, try_spend_points
 
 COMMAND = "/anima"
@@ -97,12 +110,32 @@ def execute_request(content, context, *, spec=None, reference=None, mask_png=Non
         from core.shell_plugin_config import settings
         current = settings('gsmps.command.anima')
         configure_service(current)
-        ready, reason = _anima_service.check_connection()
+        # gi2 走远端 GPT Image 网关，完全不碰 ComfyUI；其余模式仍走本地工作流。
+        remote = spec is not None and spec.mode in GPT_IMAGE_MODES
+        client = build_gpt_image_client(current) if remote else None
+        ready, reason = client.check() if remote else _anima_service.check_connection()
         if not ready:
             return f'❌ {reason}\n本次未扣积分。'
         # 通知用户开始处理
         send(group_name, f"🎨 {nickname} 发起图像生成，处理中...")
         
+        if remote:
+            reference_png = reference.get('png') if isinstance(reference, dict) else None
+            if spec.mode == 'gi2_img2img' and not reference_png:
+                return '❌ 图生图需要参考图片。本次未扣积分。'
+            try:
+                image_path = client.generate(user_prompt, reference_png=reference_png)
+            except GPTImageError as exc:
+                return f'❌ 生成失败：{exc}\n本次未扣积分。'
+            outcome = send(group_name, file_path=image_path, mode='wechat_file')
+            delivered = isinstance(outcome, tuple) and outcome[0] is True
+            if not delivered:
+                return '⚠️ 图片已生成，但未确认发送成功。本次未扣积分，请检查适配器；不会自动重发。'
+            charged, remaining_points = try_spend_points(user_wxid, POINTS_COST)
+            if not charged:
+                return '✅ 图片已发送；生成期间余额发生变化，本次未扣积分。'
+            return f'✅ 生成完成（GPT Image {client.model}）\n💎 消耗积分: -{POINTS_COST} (剩余: {remaining_points:.1f})'
+
         # 执行生成流程
         result = _anima_service.generate(user_prompt, spec=spec, reference=reference, mask_png=mask_png)
         
@@ -160,6 +193,18 @@ def configure_service(current):
             _anima_service.anima_config[key] = current[key]
 
 
+def build_gpt_image_client(current):
+    """Build the remote GPT Image client from validated WebUI/config fields."""
+    return GPTImageClient(
+        current.get('gi2_api_base'),
+        current.get('gi2_api_key'),
+        model=current.get('gi2_model'),
+        size=current.get('gi2_size'),
+        timeout=current.get('gi2_timeout'),
+        output_dir=_anima_service.output_cache,
+    )
+
+
 def handle(content, context):
     """Default text generation; image modes reserve the same per-user follow-up as picture."""
     if not _anima_service:
@@ -186,10 +231,14 @@ def handle(content, context):
             return '❌ 无法识别会话或用户，未进入等待图片状态。'
         current = settings('gsmps.command.anima')
         configure_service(current)
-        ready, reason = _anima_service.check_connection()
+        if spec.mode in GPT_IMAGE_MODES:
+            ready, reason = build_gpt_image_client(current).check()
+        else:
+            ready, reason = _anima_service.check_connection()
         if not ready:
             return '❌ ' + reason + '\n本次未扣积分。'
-        _anima_service.preflight(spec)
+        if spec.mode not in GPT_IMAGE_MODES:
+            _anima_service.preflight(spec)
         ttl = int(current.get('reference_wait_seconds', 120))
         register(context['sessionId'], 'anima_media', ttl=ttl,
                  payload={'request': spec.payload(), 'stage': 'image'}, wxid=context['wxid'])
@@ -199,4 +248,4 @@ def handle(content, context):
         return '❌ ' + str(exc)
     except Exception as exc:
         print(f'[ANIMA] request setup failed: {type(exc).__name__}: {exc}')
-        return '❌ 无法准备当前模式，请检查ComfyUI连接与节点配置。本次未扣积分。'
+        return '❌ 无法准备当前模式，请检查图像服务连接与节点配置。本次未扣积分。'

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -200,9 +202,12 @@ def test_live_process_with_open_port_is_left_alone(tmp_path: Path, monkeypatch: 
     killed: list[int] = []
     monkeypatch.setattr(qq_adapter_boot, '_terminate_tree', lambda pid: killed.append(pid))
     monkeypatch.setattr(qq_adapter_boot.subprocess, 'Popen', lambda *a, **k: pytest.fail('不应重启'))
+    started: list[Path] = []
+    monkeypatch.setattr(qq_adapter_boot, '_start_watcher', lambda root, settings: started.append(root))
 
     assert qq_adapter_boot.ensure_qq_adapter(tmp_path) is False
     assert killed == []
+    assert started == [tmp_path], '协议端已在运行时仍要挂上登录守护，登录失效后自动重新出码'
 
 
 def _fake_window_process(pid: int = 4242):
@@ -272,50 +277,243 @@ def test_close_qr_window_kills_the_tracked_process(tmp_path: Path, monkeypatch: 
     assert str(tmp_path) not in qq_adapter_boot._QR_WINDOWS
 
 
+
+
+
+@pytest.fixture
+def fast_sleep(monkeypatch: pytest.MonkeyPatch):
+    """把 watcher 的轮询间隔压成 0，避免测试等真秒数。"""
+
+    monkeypatch.setattr(qq_adapter_boot.time, 'sleep', lambda seconds: None)
+
+
+def _prepare_qr(tmp_path: Path, uin: str = '10001') -> Path:
+    qr_dir = tmp_path / '.napuketto' / uin / 'cache'
+    qr_dir.mkdir(parents=True, exist_ok=True)
+    qr = qr_dir / 'qrcode.png'
+    qr.write_bytes(b'fixture-qr')
+    return qr
+
+
+def _state_file(tmp_path: Path) -> Path:
+    return tmp_path / 'depends-data' / 'qq-adapter' / 'status.json'
+
+
 def test_watch_login_pops_the_window_and_closes_it_after_login(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
 ) -> None:
     uin = '10001'
-    qr_dir = tmp_path / '.napuketto' / uin / 'cache'
-    qr_dir.mkdir(parents=True)
-    (qr_dir / 'qrcode.png').write_bytes(b'fixture-qr')
+    _prepare_qr(tmp_path, uin)
 
     opened: list[str] = []
     closed: list[str] = []
-    monkeypatch.setattr(qq_adapter_boot, 'DEFAULT_WATCH_INTERVAL_SEC', 0)
     monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
     monkeypatch.setattr(
         qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
     )
     monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: closed.append(str(root)))
-    states = iter([False, False, True])
-    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', lambda *a, **k: next(states, True))
 
-    qq_adapter_boot._watch_login(tmp_path, tmp_path, uin, 13011, timeout=5, show_window=True)
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] >= 3:
+            stop.set()
+            return True
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010, timeout=None, show_window=True, stop_event=stop
+    )
 
     assert opened == [str(tmp_path / 'depends-data' / 'qq-adapter' / 'qrcode.png')]
     assert closed, '登录成功后必须关闭二维码窗口'
-    state = json.loads((tmp_path / 'depends-data' / 'qq-adapter' / 'status.json').read_text(encoding='utf8'))
+    state = json.loads(_state_file(tmp_path).read_text(encoding='utf8'))
     assert state['state'] == 'logged_in'
 
 
 def test_watch_login_keeps_the_window_closed_when_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
 ) -> None:
     uin = '10001'
-    qr_dir = tmp_path / '.napuketto' / uin / 'cache'
-    qr_dir.mkdir(parents=True)
-    (qr_dir / 'qrcode.png').write_bytes(b'fixture-qr')
+    _prepare_qr(tmp_path, uin)
 
     opened: list[str] = []
-    monkeypatch.setattr(qq_adapter_boot, 'DEFAULT_WATCH_INTERVAL_SEC', 0)
     monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
     monkeypatch.setattr(
         qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
     )
     monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
-    states = iter([False, False, True])
-    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', lambda *a, **k: next(states, True))
 
-    qq_adapter_boot._watch_login(tmp_path, tmp_path, uin, 13011, timeout=5, show_window=False)
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] >= 3:
+            stop.set()
+            return True
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010, timeout=None, show_window=False, stop_event=stop
+    )
     assert opened == []
+
+
+def test_watch_login_repops_the_window_when_the_qr_is_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
+) -> None:
+    """二维码过期换新码时：先关旧窗口，再弹新窗口。"""
+
+    uin = '10001'
+    qr = _prepare_qr(tmp_path, uin)
+
+    opened: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(
+        qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: closed.append(str(root)))
+
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] == 3:
+            qr.write_bytes(b'second-qr')
+            stamp = qr.stat().st_mtime + 5
+            os.utime(qr, (stamp, stamp))
+        if calls['n'] >= 5:
+            stop.set()
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010, timeout=None, show_window=True, stop_event=stop
+    )
+
+    assert len(opened) == 2, '新二维码必须重新弹窗'
+    assert closed, '换码前必须先关掉过期窗口'
+    published = (tmp_path / 'depends-data' / 'qq-adapter' / 'qrcode.png').read_bytes()
+    assert published == b'second-qr'
+
+
+def test_watch_login_rearms_after_login_is_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
+) -> None:
+    """掉线后写 login_lost，并在协议端重新出码时再次弹窗，不需要重启 bot。"""
+
+    uin = '10001'
+    qr = _prepare_qr(tmp_path, uin)
+
+    opened: list[str] = []
+    states: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(
+        qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
+    monkeypatch.setattr(
+        qq_adapter_boot, '_write_state', lambda root, state: states.append(state['state'])
+    )
+
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] <= 2:
+            return True
+        if calls['n'] == 3:
+            return False
+        if calls['n'] == 4:
+            qr.write_bytes(b'reissued-qr')
+            stamp = qr.stat().st_mtime + 5
+            os.utime(qr, (stamp, stamp))
+            return False
+        stop.set()
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010, timeout=None, show_window=True, stop_event=stop
+    )
+
+    assert 'logged_in' in states and 'login_lost' in states
+    assert 'waiting_scan' in states, '重新出码后应再次弹出二维码'
+    assert len(opened) == 2
+
+
+def test_watch_login_respawns_a_dead_adapter_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
+) -> None:
+    """协议端进程退出后由守护线程自愈，不必等用户重启 bot。"""
+
+    uin = '10001'
+    _prepare_qr(tmp_path, uin)
+
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(qq_adapter_boot, '_open_qr_window', lambda root, path, uin: None)
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
+    monkeypatch.setattr(qq_adapter_boot, '_read_pid', lambda root: 4242)
+    monkeypatch.setattr(qq_adapter_boot, '_pid_alive', lambda pid: False)
+
+    respawns: list[int] = []
+
+    def _respawn() -> int:
+        respawns.append(1)
+        return 1
+
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] >= 2:
+            stop.set()
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010,
+        timeout=None, show_window=True, stop_event=stop, respawn=_respawn,
+    )
+
+    assert respawns == [1], '进程死亡后必须重新拉起一次'
+
+
+def test_start_watcher_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一个 root 只允许一个守护线程，避免重复弹窗。"""
+
+    started: list[object] = []
+
+    class _FakeThread:
+        daemon = True
+
+        def __init__(self, *args, **kwargs) -> None:
+            started.append(self)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(qq_adapter_boot.threading, 'Thread', _FakeThread)
+    monkeypatch.setattr(qq_adapter_boot, '_WATCHERS', {})
+
+    settings = {'uin': '10001', 'workdir': str(tmp_path), 'ws_port': 13011, 'http_port': 13010}
+    qq_adapter_boot._start_watcher(tmp_path, settings)
+    qq_adapter_boot._start_watcher(tmp_path, settings)
+
+    assert len(started) == 1
+    qq_adapter_boot._stop_all_watchers()
+
