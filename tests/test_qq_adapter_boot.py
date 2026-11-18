@@ -608,3 +608,14 @@ def test_login_confirmed_accepts_qr_success_state(
     monkeypatch.setattr(qq_adapter_boot, '_port_in_use', lambda *a, **k: False)
 
     assert qq_adapter_boot._login_confirmed(tmp_path, uin, 13011, 13010) is True
+
+
+
+def test_read_pid_tolerates_a_utf8_bom(tmp_path: Path) -> None:
+    """Out-File -Encoding utf8 会写 BOM，不能因此把存活进程当成已死。"""
+
+    state = tmp_path / 'depends-data' / 'qq-adapter'
+    state.mkdir(parents=True)
+    (state / 'adapter.pid').write_bytes('\ufeff424242'.encode('utf-8'))
+
+    assert qq_adapter_boot._read_pid(tmp_path) == 424242

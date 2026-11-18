@@ -135,8 +135,15 @@ def _read_pid(root: Path) -> Optional[int]:
     """Read the pid recorded by a previous startup."""
 
     try:
-        return int((_state_dir(root) / 'adapter.pid').read_text(encoding='utf8').strip())
-    except (OSError, ValueError):
+        text = (_state_dir(root) / 'adapter.pid').read_text(encoding='utf8')
+    except OSError:
+        return None
+    # 手工/脚本写入的 pid 文件可能带 UTF-8 BOM（Out-File -Encoding utf8 就会），
+    # 直接 int() 会失败，进而误判“进程已死”而重复拉起。
+    text = text.lstrip('\ufeff').strip()
+    try:
+        return int(text)
+    except ValueError:
         return None
 
 
