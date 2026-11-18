@@ -240,9 +240,9 @@ min_train_threshold = 40
 [a_memorix.embedding] # 把记忆内容转换为向量时使用的基础设置
 model_name = "auto" # 用于把记忆内容转换成向量的模型，auto 表示自动选择
 dimension = 1024 # 记忆向量的维度，需要与向量化模型保持一致
-dimension_request_mode = "always" # 是否在 embedding 请求中携带维度参数：explicit 仅显式指定时携带，always 总是携带，never 不携带
+dimension_request_mode = "never" # 是否在 embedding 请求中携带维度参数：explicit 仅显式指定时携带，always 总是携带，never 不携带
 batch_size = 8 # 每次向量化请求处理的记忆条数
-max_concurrent = 2 # 同时进行的向量化请求数量
+max_concurrent = 1 # 同时进行的向量化请求数量
 enable_cache = true # 是否缓存向量化结果
 runtime_train_threshold = 256 # 未训练向量池在运行期间触发 SQ8 后台训练所需的最少向量数
 quantization_type = "int8" # 向量压缩方式，当前仅支持 int8(SQ8)

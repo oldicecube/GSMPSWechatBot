@@ -247,9 +247,9 @@ base_url = "https://api.kilo.ai/api/gateway"
 api_key = "placeholder"
 client_type = "openai"
 auth_type = "none"
-timeout = 45
-max_retry = 2
-retry_interval = 2
+timeout = 10
+max_retry = 1
+retry_interval = 1
 embedding_fallback_urls = ["https://ai-gateway.kilo.ai/api/v1"]
 request_min_interval = 1.5
 
@@ -403,7 +403,7 @@ selection_strategy = "sequential"
 hard_timeout = 45.0
 
 [model_task_config.embedding]
-model_list = ["free_nemotron_text_embed_1024"]
+model_list = ["free_bge_m3_ovh_1024"]
 selection_strategy = "sequential"
 hard_timeout = 60.0
 
