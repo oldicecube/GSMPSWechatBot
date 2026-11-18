@@ -101,13 +101,31 @@ def _launch_weflow_setup_wizard():
 def main():
     global _weflow, _dispatcher, _worker
 
-    # NapCat is independent of the bot lifetime. Reuse it if running; otherwise
-    # attempt saved-account login and expose its local QR page when needed.
+    # QQ 协议端独立于 bot 生命周期：NapCat 已停更，默认改由 NapukettoQQ 提供
+    # OneBot 11（见 depends-data/qq-adapter/launch.json）。replace_napcat 为真时
+    # 不再拉 NapCat，避免两套协议端抢同一个 QQ 账号。
+    ensure_qq_adapter = None
     try:
-        from core.napcat_boot import ensure_napcat
-        ensure_napcat(BASE_DIR)
+        from core.qq_adapter_boot import ensure_qq_adapter, is_napcat_superseded
+
+        napcat_superseded = is_napcat_superseded(BASE_DIR)
     except Exception as exc:
-        print('[QQ STARTUP]', type(exc).__name__, 'see depends-data/napcat/config/bootstrap.log', flush=True)
+        napcat_superseded = False
+        ensure_qq_adapter = None
+        print('[QQ STARTUP] qq_adapter_boot 导入失败:', type(exc).__name__, flush=True)
+
+    if not napcat_superseded:
+        try:
+            from core.napcat_boot import ensure_napcat
+            ensure_napcat(BASE_DIR)
+        except Exception as exc:
+            print('[QQ STARTUP]', type(exc).__name__, 'see depends-data/napcat/config/bootstrap.log', flush=True)
+
+    if ensure_qq_adapter is not None:
+        try:
+            ensure_qq_adapter(BASE_DIR)
+        except Exception as exc:
+            print('[QQ STARTUP]', type(exc).__name__, 'see depends-data/qq-adapter/status.json', flush=True)
 
     try:
         config = json.load(open("config.json", encoding="utf-8"))

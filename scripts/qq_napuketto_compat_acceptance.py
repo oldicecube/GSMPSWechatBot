@@ -142,6 +142,18 @@ async def run():
                 time=1794899980,
                 content=[dict(type="text", data=dict(text="聊天记录正文"))],
             )]))
+        if name in ("send_group_msg", "send_private_msg", "set_group_ban", "set_msg_emoji_like"):
+            # 与对端 zod schema 一致：ID / 时长 / 表情 ID 必须是 number，字符串直接 1400。
+            numeric_fields = {
+                "send_group_msg": ("group_id",),
+                "send_private_msg": ("user_id",),
+                "set_group_ban": ("group_id", "user_id", "duration"),
+                "set_msg_emoji_like": ("emoji_id",),
+            }[name]
+            for field in numeric_fields:
+                if field in params and not isinstance(params[field], int):
+                    return dict(status="failed", retcode=1400, data=None,
+                                message=f"参数校验失败: {field} 必须是 number", echo=echo)
         if name == "send_group_msg":
             return ok(dict(message_id=987654321))
         if name == "send_private_msg":
@@ -149,8 +161,8 @@ async def run():
         if name in ("set_group_ban", "delete_msg", "set_msg_emoji_like"):
             return ok(None)
         # NapukettoQQ 未实现的动作：显式失败，避免调用方把静默空响应当成功
-        return dict(status="failed", retcode=1404, data=None,
-                    message="unsupported action: " + name, echo=echo)
+        return dict(status="failed", retcode=404, data=None,
+                    message="unknown action: " + name, echo=echo)
 
     app = web.Application()
     app.router.add_get("/", endpoint)
@@ -282,8 +294,19 @@ async def run():
               params["message"][0] == dict(type="reply", data=dict(id=QUOTE_ID))
               and params["message"][1] == dict(type="at", data=dict(qq=POKER_ID)),
               params["message"][:2])
-        receipt = await transport.call_action(action_name, params)
+        receipt = await action_service.call_action(action_name, params)
         check("outbound_receipt_message_id", receipt["data"]["message_id"] == 987654321)
+        last_send = [item for item in actions if item["action"] == "send_group_msg"][-1]
+        check("outbound_group_id_sent_as_number",
+              isinstance(last_send["params"]["group_id"], int),
+              last_send["params"]["group_id"])
+
+        ban_payload = dict(group_id=int(GROUP_ID), user_id=int(POKER_ID), duration="60")
+        ban_result = await action_service.call_action("set_group_ban", ban_payload)
+        check("outbound_ban_duration_coerced",
+              ban_result["status"] == "ok"
+              and [item for item in actions if item["action"] == "set_group_ban"][-1]["params"]["duration"] == 60,
+              [item for item in actions if item["action"] == "set_group_ban"][-1]["params"])
 
         forward_payload = dict(
             platform="qq",
@@ -294,10 +317,22 @@ async def run():
         )
         forward_actions = outbound.build_outbound_actions(forward_payload, {})
         forward_name, forward_params = forward_actions[0]
-        check("outbound_forward_uses_messages_key",
-              forward_name == "send_group_forward_msg" and "messages" in forward_params
-              and "message" not in forward_params,
-              dict(action=forward_name, keys=sorted(forward_params)))
+        forward_text = forward_params["message"][0]["data"]["text"] if forward_params.get("message") else ""
+        check("outbound_forward_degrades_to_text",
+              forward_name == "send_group_msg" and "转发内容" in forward_text,
+              dict(action=forward_name, text=forward_text))
+        reference_forward = dict(
+            platform="qq",
+            account_id=SELF_ID,
+            message_info=dict(group_info=dict(group_id=GROUP_ID)),
+            raw_message=[dict(type="forward", data=[dict(id="987654321")])],
+        )
+        # 只有消息 ID、没有可发送内容的节点：对端也搬不了，同样降级为文本而不是抛错。
+        reference_actions = outbound.build_outbound_actions(reference_forward, {})
+        check("outbound_forward_never_raises_without_content",
+              reference_actions[0][0] == "send_group_msg"
+              and reference_actions[0][1]["message"][0]["type"] == "text",
+              reference_actions[0][0])
 
         unsupported = None
         try:
@@ -305,7 +340,7 @@ async def run():
         except Exception as exc:  # noqa: BLE001 - 期望显式失败
             unsupported = str(exc)
         check("unsupported_action_fails_loudly",
-              unsupported is not None and "1404" not in unsupported and "unsupported action" in unsupported,
+              unsupported is not None and "unknown action" in unsupported,
               unsupported)
 
         check("transport_clean_shutdown", True)

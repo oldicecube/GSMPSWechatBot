@@ -208,3 +208,120 @@ token = "a9e8cd3159dcae6bda820f1db1c30946"
 - 拍一拍事件的 `target_id` 是否真的能取到（源码自己标注未校准）。
 - 语音发送格式、群文件上传/下载链路。
 - 登录后 OneBot 服务是否在 13010/13011 正常起监听（未登录时不会起）。
+
+## 7. 启动期自动拉起（已接入 bot 生命周期）
+
+`core/qq_adapter_boot.py` 负责在 bot 启动时拉起外部协议端，配置在
+`depends-data/qq-adapter/launch.json`（该目录整体被 `.gitignore` 忽略，属于本机配置）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `enabled` | 总开关，`false` 时完全不处理 |
+| `autostart` | 是否在 bot 启动时自动拉起进程 |
+| `replace_napcat` | 为 `true` 时 `main.py` **不再**调用 `core/napcat_boot.ensure_napcat`，避免两套协议端抢同一个 QQ 账号 |
+| `workdir` | 协议端工作目录（`pnpm start` 的执行目录） |
+| `command` | 启动命令，默认 `pnpm start`；PowerShell 下必须走 `cmd.exe /c`，否则会命中 `pnpm.ps1` 执行策略 |
+| `uin` | 登录 QQ 号，用于定位 `.napuketto/<uin>/cache/qrcode.png` 与日志 |
+| `http_port` / `ws_port` | 反向 HTTP / 反向 WS 端口（当前 13010 / 13011），端口已被占用即视为"协议端在跑"，不重复拉起 |
+| `qr_watch_seconds` | 等待扫码的最长时间（默认 900s） |
+
+启动流程：
+
+1. `main.py` 先读 `launch.json` 判断 `replace_napcat`；为真则跳过 NapCat 自启（
+   `depends-data/napcat/config/maibot-launch.json` 的 `autostart` 也已置为 `false`）。
+2. 调 `ensure_qq_adapter()`：端口未占用且记录的 pid 已不存活时，用
+   `cmd.exe /c <command>` 在 `workdir` 后台启动（`CREATE_NO_WINDOW`，输出重定向到
+   `depends-data/qq-adapter/adapter.log`），pid 写入 `adapter.pid`，状态写入 `status.json`。
+3. 后台线程 `_watch_login` 轮询二维码：把 `.napuketto/<uin>/cache/qrcode.png` 复制到
+   `depends-data/qq-adapter/qrcode.png`，并从 `.napuketto/<uin>/logs/napuketto.log`
+   提取 `https://txz.qq.com/p?k=...` 登录链接，打印到 bot 控制台。
+4. 判定登录成功的信号：`ws_port` 开始监听，或日志出现 `"state":"success"`。
+
+控制台会看到（`[QQ ADAPTER]` 前缀）：
+
+```
+[QQ ADAPTER] 启动协议端: pnpm start (cwd=C:\qq-adapter-lab\qqbot)
+[QQ ADAPTER] 需要扫码登录 QQ 3294652115，二维码 D:\Wechat Bot\depends-data\qq-adapter\qrcode.png
+[QQ ADAPTER] 登录链接（手机 QQ 打开）: https://txz.qq.com/p?k=...
+[QQ ADAPTER] 扫码已登录，OneBot WS 端口 13011 就绪
+```
+
+> 注意：NapukettoQQ 登录会顶掉 NapCat 的会话。切换时不要两套同时在线。
+
+安全旁路：`MAIBOT_INTERCEPT_SEND=1` 或非 Windows 平台时 `ensure_qq_adapter()` 直接返回 `False`，
+不会真的拉起进程（与 `core/napcat_boot` 行为一致），便于测试与离线运行。
+
+**二维码过期自动换新**：若记录的 pid 仍存活但 `ws_port` 没在监听（说明上次扫码没完成、二维码已过期），
+启动时会先 `taskkill /T /F` 结束旧进程树再重新拉起，保证每次重启拿到的都是新二维码，
+而不是复用一张永远扫不进去的旧图。
+
+**登录链接截断**：协议端日志里的 URL 后面常跟着中文括号（`…&f=1600001604）`），
+提取时按 URL 合法字符集截断，控制台与 `status.json` 里都是可直接点开的干净链接。
+
+### 7.1 实测记录（2026-11-18）
+
+在本机用真实 `launch.json` 跑通了一次完整拉起：
+
+```
+[QQ ADAPTER] 启动协议端: pnpm start (cwd=C:\qq-adapter-lab\qqbot)
+[QQ ADAPTER] 需要扫码登录 QQ 3294652115：二维码 D:\Wechat Bot\depends-data\qq-adapter\qrcode.png
+[QQ ADAPTER] 登录链接（手机 QQ 打开）: https://txz.qq.com/p?k=1eAVLuEfDF3KB7V3rOwnB*3jshvPkN91&f=1600001604
+state: waiting_scan
+```
+
+- `depends-data/qq-adapter/qrcode.png` 已生成（147×147 PNG，肉眼可扫）。
+- 测试结束后已结束该进程并清掉 `adapter.pid` / `status.json` / `qrcode.png`，保持干净状态等手动重启。
+
+## 8. 与官方文档对齐后的兼容处理
+
+依据 NapukettoQQ `docs/protocols/onebot11.md`：
+
+### 8.1 错误码
+
+| 场景 | 返回 |
+| --- | --- |
+| 参数校验失败（zod） | HTTP 入口 `400` / WS 入口 **`1400`** |
+| 未知或缺失 action | `404` |
+| 业务错误 | `SEND_FAILED=100`、`PERMISSION_DENIED=101`、`NOT_FOUND=102`、`TIMEOUT=103`、`NOT_LOGIN=104`、`INVALID_PARAM=105`、`INVALID_STATE=106`、`UNKNOWN=999` |
+| WS 鉴权失败 | 以 **`4401`** 关闭连接（token 可用 `Authorization: Bearer`、裸 token、`?access_token=`） |
+
+### 8.2 数值 ID 强转
+
+对端用 zod 严格校验，`group_id` / `user_id` / `target_id` 传字符串会直接 `1400`。
+`profile.py` 的通用 `onebot11` 画像声明 `coerce_numeric_ids=True`，
+`services/action_service.py` 会把 `group_id`、`user_id`、`target_id`、`duration`、`times`、
+`emoji_id`、`emoji_type`、`count`、`file_count` 的纯数字字符串转成 `int`。
+NapCat / SnowLuma 画像保持原样，不受影响。
+
+### 8.3 合并转发降级
+
+官方文档明确：`send_group_forward_msg` 的节点只按 `data.id` 反查已有消息，
+**自造节点（`name`/`uin`/`content`）会被静默跳过**。若照旧发送，会得到"返回成功但群里什么都没有"。
+通用画像因此声明 `forward_supports_synthetic_nodes=False`，
+`codecs/outbound/message_codec.py` 会把合并转发降级为一条文本消息：
+
+```
+[昵称] 内容
+[昵称] 内容
+```
+
+节点构造失败或内容为空时也不再抛错（`outbound_forward_never_raises_without_content`）。
+
+### 8.4 已知缺口（无法通过适配器绕过）
+
+- `group_recall` / `friend_recall` 的 `message_id` 取自 grayTip `msgSeq`，与消息事件的
+  `MessageUnique` 不是同一空间，**不能反查原消息**。
+- `group_title` / `group_sign` 未接线（无事件）。
+- `msg_emoji_like` 无推送回调。
+- 通用 `send_msg` 只覆盖 text/at/face/image/voice/reply/json；`file` / `forward` / `xml` 不走通用发送。
+
+## 9. WebUI 展示与验收
+
+- 适配器在 MaiBot WebUI → 插件管理 / 适配器列表中显示为 **「QQ 适配器（OneBot 11）」**
+  （`_manifest.json` 的 `name`，`plugin_type=adapter`，`id=maibot-team.snowluma-adapter`，
+  版本 `1.1.11`）。改名前叫「SnowLuma 适配器」，容易被误认为只支持已删库的 SnowLuma。
+- 验收脚本：
+  - `python scripts/qq_napuketto_compat_acceptance.py`（23 项，本地模拟 zod 严格校验对端）
+  - `python scripts/qq_adapter_onebot11_compat_acceptance.py`（7 项）
+  - `python scripts/maibot_qq_acceptance.py`（双端路由 / 身份 / 引用 @ 全链路）
+  - `python -m pytest tests -q`（111 项，含新增 `tests/test_qq_adapter_boot.py` 10 项）

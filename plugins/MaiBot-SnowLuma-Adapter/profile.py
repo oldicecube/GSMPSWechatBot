@@ -59,6 +59,13 @@ class ClientProfile:
     record_out_format: str
     transcode_silk_voice: bool
     supports_qzone: bool
+    # 对端是否用严格数值 schema 校验 ID 字段（NapukettoQQ 的 zod schema 只接受 number）。
+    # 为 True 时动作层会把纯数字字符串的 ID 字段转成 int，避免 1400 参数校验失败。
+    coerce_numeric_ids: bool = False
+    # 合并转发能否携带「自造节点（name/uin/content）」。
+    # NapCat 接受自造节点；NapukettoQQ 只按 ``data.id`` 反查已有消息，
+    # 自造节点会被静默跳过，因此该画像下退化为单条文本消息。
+    forward_supports_synthetic_nodes: bool = True
 
 
 NAPCAT_PROFILE = ClientProfile(
@@ -98,7 +105,48 @@ ONEBOT11_PROFILE = ClientProfile(
     record_out_format="wav",
     transcode_silk_voice=False,
     supports_qzone=False,
+    coerce_numeric_ids=True,
+    forward_supports_synthetic_nodes=False,
 )
+
+# 需要 ``number`` 类型 ID 的参数键。NapukettoQQ 用 zod 严格校验，
+# 传字符串会直接 1400 参数校验失败；NapCat 会自行宽松转换。
+NUMERIC_PARAM_KEYS: Tuple[str, ...] = (
+    "group_id",
+    "user_id",
+    "target_id",
+    "duration",
+    "times",
+    "emoji_id",
+    "emoji_type",
+    "count",
+    "file_count",
+)
+
+
+def coerce_numeric_params(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """把纯数字字符串的 ID 类参数转成 ``int``。
+
+    仅用于声明了 ``coerce_numeric_ids`` 的画像（当前是通用 OneBot 11），
+    其它画像保持原有宽松传参行为，避免影响 NapCat / SnowLuma。
+
+    Args:
+        params: 待发送的 OneBot 动作参数。
+
+    Returns:
+        Dict[str, Any]: 归一化后的参数副本（不修改入参）。
+    """
+
+    normalized: Dict[str, Any] = {}
+    for key, value in params.items():
+        if key in NUMERIC_PARAM_KEYS and isinstance(value, str):
+            text = value.strip()
+            if text and (text.isdigit() or (text[0] == "-" and text[1:].isdigit())):
+                normalized[key] = int(text)
+                continue
+        normalized[key] = value
+    return normalized
+
 
 PROFILE_BY_TYPE: Dict[str, ClientProfile] = {
     NAPCAT_PROFILE.client_type: NAPCAT_PROFILE,

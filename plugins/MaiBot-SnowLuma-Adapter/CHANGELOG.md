@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.11] — 2026-11-18
+
+### 主要功能
+
+- 协议端替换：配合 NapukettoQQ（OneBot 11）替换已停止维护的 NapCat / SnowLuma 协议端。
+  适配器在 WebUI 适配器列表中的展示名改为「QQ 适配器（OneBot 11）」，实现名称不再绑定单一协议端。
+
+### 细节
+
+- 参数类型：通用 `onebot11` 画像声明 `coerce_numeric_ids`，动作层把 `group_id` / `user_id` /
+  `target_id` / `duration` / `times` / `emoji_id` 等纯数字字符串转成 `int`，避免 NapukettoQQ
+  的严格 zod 校验返回 1400（参数校验失败）。
+- 合并转发：该画像声明 `forward_supports_synthetic_nodes=False`，由于对端只按 `data.id` 反查已有
+  消息、自造节点会被静默跳过，合并转发自动降级为一条带 `[昵称] 内容` 的文本消息，避免"发送成功
+  但群里什么都没有"的静默丢消息。
+- 连接：`client.client_type=auto` 仍通过 `get_version_info` 探测；无法识别的实现回退通用画像。
+
+
 ## [1.1.10] — 2026-11-18
 
 ### 主要功能

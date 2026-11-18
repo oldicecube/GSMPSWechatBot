@@ -309,15 +309,106 @@ class QQOutboundCodec:
             ValueError: 当私聊出站缺少目标用户 ID 时抛出。
         """
         profile = self._profile_state.profile
-        forward_segments = self._build_forward_message_segments(raw_message, account_id)
+        supports_synthetic = bool(getattr(profile, "forward_supports_synthetic_nodes", True))
+        try:
+            forward_segments = self._build_forward_message_segments(raw_message, account_id)
+        except ValueError:
+            if supports_synthetic:
+                raise
+            # 对端不支持自造节点时，节点构造失败也走文本降级，避免整条消息发不出去。
+            return self._build_forward_as_text(raw_message, target_group_id, target_user_id)
         if not forward_segments:
-            raise ValueError('QQ forward message has no usable nodes')
+            if supports_synthetic:
+                raise ValueError('QQ forward message has no usable nodes')
+            return self._build_forward_as_text(raw_message, target_group_id, target_user_id)
+        if not supports_synthetic and not self._nodes_are_references(forward_segments):
+            # 对端只能按已有消息 ID 转发（NapukettoQQ），自造节点会被静默跳过，
+            # 这里退化成一条可读的文本消息，避免「发送成功但群里什么都没收到」。
+            return self._build_forward_as_text(raw_message, target_group_id, target_user_id)
+
         param_key = profile.forward_param_key
         if target_group_id:
             return "send_group_forward_msg", {"group_id": target_group_id, param_key: forward_segments}
         if not target_user_id:
             raise ValueError("出站私聊消息缺少 target_user_id")
         return "send_private_forward_msg", {param_key: forward_segments, "user_id": target_user_id}
+
+    @staticmethod
+    def _nodes_are_references(forward_segments: List[Dict[str, Any]]) -> bool:
+        """判断合并转发节点是否全部引用已有消息（带 ``data.id``）。"""
+
+        if not forward_segments:
+            return False
+        for node in forward_segments:
+            data = node.get("data") if isinstance(node, Mapping) else None
+            if not isinstance(data, Mapping) or not str(data.get("id") or "").strip():
+                return False
+        return True
+
+    def _build_forward_as_text(
+        self,
+        raw_message: Any,
+        target_group_id: str,
+        target_user_id: str,
+    ) -> OutboundAction:
+        """把无法搬运的合并转发降级成单条文本消息。"""
+
+        lines: List[str] = ["【聊天记录】"]
+        if isinstance(raw_message, list):
+            for item in raw_message:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == "forward":
+                    nodes = item.get("data")
+                    for node in nodes if isinstance(nodes, list) else []:
+                        if not isinstance(node, Mapping):
+                            continue
+                        author = str(node.get("nickname") or node.get("name") or node.get("user_id") or "某人")
+                        lines.append(f"{author}: {self._plain_text_of(node.get('content'))}")
+                    continue
+                lines.append(self._plain_text_of([item]))
+        text = "\n".join(line for line in lines if line.strip())
+        segments = [{"type": "text", "data": {"text": text}}]
+        generic = self._profile_state.profile.msg_action_style == MSG_ACTION_STYLE_GENERIC
+        if target_group_id:
+            if generic:
+                return "send_msg", {"message_type": "group", "group_id": target_group_id, "message": segments}
+            return "send_group_msg", {"group_id": target_group_id, "message": segments}
+        if not target_user_id:
+            raise ValueError("出站私聊消息缺少 target_user_id")
+        if generic:
+            return "send_msg", {"message_type": "private", "user_id": target_user_id, "message": segments}
+        return "send_private_msg", {"message": segments, "user_id": target_user_id}
+
+    @staticmethod
+    def _plain_text_of(segments: Any) -> str:
+        """把消息段压平成一行可读文本。"""
+
+        if isinstance(segments, str):
+            return segments
+        if not isinstance(segments, list):
+            return ""
+        parts: List[str] = []
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                continue
+            data = segment.get("data")
+            segment_type = str(segment.get("type") or "")
+            if segment_type == "text":
+                parts.append(str(data.get("text") if isinstance(data, Mapping) else data or ""))
+            elif segment_type == "at":
+                name = str(data.get("name") or "") if isinstance(data, Mapping) else ""
+                target = str(data.get("qq") or data.get("target_user_id") or "") if isinstance(data, Mapping) else ""
+                parts.append("@" + (name or target))
+            elif segment_type == "image":
+                parts.append("[图片]")
+            elif segment_type == "face":
+                parts.append("[表情]")
+            elif segment_type == "record":
+                parts.append("[语音]")
+            elif segment_type == "video":
+                parts.append("[视频]")
+        return "".join(parts)
 
     @staticmethod
     def _contains_forward_segment(raw_message: Any) -> bool:

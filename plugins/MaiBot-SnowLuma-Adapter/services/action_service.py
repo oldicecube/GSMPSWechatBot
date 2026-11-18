@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 import asyncio
 
+from ..profile import coerce_numeric_params
+
 try:
     from aiohttp import ClientSession, ClientTimeout
 
@@ -49,6 +51,9 @@ class QQActionService:
             RuntimeError: 当动作执行失败或平台返回非成功状态时抛出。
         """
         normalized_params = {str(key): value for key, value in params.items()}
+        if getattr(self._profile_state.profile, "coerce_numeric_ids", False):
+            # 严格数值 schema 的对端（NapukettoQQ）要求 group_id/user_id 等为 number。
+            normalized_params = coerce_numeric_params(normalized_params)
         try:
             response = await self._transport.call_action(action_name, normalized_params)
         except asyncio.CancelledError:
