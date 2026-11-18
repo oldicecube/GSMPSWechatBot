@@ -261,9 +261,9 @@ auth_type = "none"
 api_key = ""
 client_type = "openai"
 timeout = 40
-max_retry = 1
+max_retry = 2
 retry_interval = 2
-request_min_interval = 31.0
+request_min_interval = 62.0
 
 system_messages_at_start = true
 [[api_providers]]
