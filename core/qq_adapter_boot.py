@@ -408,6 +408,34 @@ def _close_all_qr_windows() -> None:
 atexit.register(_close_all_qr_windows)
 
 
+def _session_start_hint(workdir: Path, uin: str) -> Optional[float]:
+    """Timestamp of the adapter session that is running right now.
+
+    A QR image left over from an earlier session (bot restarted, adapter killed
+    mid-scan) can never be scanned again, yet its mtime looks "new" to a freshly
+    started watcher, so it would be published and popped as if it were valid.
+    ``runtime.json`` records ``startedAt`` for the live session, which is exactly
+    the cutoff we need.
+    """
+
+    base = workdir / '.napuketto' / uin
+    try:
+        started = json.loads((base / 'runtime.json').read_text(encoding='utf8')).get('startedAt')
+    except (OSError, ValueError):
+        started = None
+    if started:
+        try:
+            return datetime.fromisoformat(str(started).replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            pass
+    for name in ('runtime.json', 'instance.lock'):
+        try:
+            return (base / name).stat().st_mtime
+        except OSError:
+            continue
+    return None
+
+
 def _watch_login(
     root: Path,
     workdir: Path,
@@ -429,6 +457,7 @@ def _watch_login(
 
     qr_source = workdir / '.napuketto' / uin / 'cache' / 'qrcode.png'
     last_stamp: Optional[float] = None
+    session_start = _session_start_hint(workdir, uin)
     logged_in = False
     warned = False
     warn_at = time.time() + timeout if timeout else None
@@ -463,6 +492,8 @@ def _watch_login(
                 last_stamp = None
                 if respawn() is None:
                     _print('重新拉起协议端失败，60 秒后重试')
+                else:
+                    session_start = _session_start_hint(workdir, uin)
 
         try:
             stamp: Optional[float] = qr_source.stat().st_mtime
@@ -470,7 +501,10 @@ def _watch_login(
             stamp = None
         if stamp is not None and stamp != last_stamp:
             last_stamp = stamp
-            _publish_qr(root, workdir, uin, show_window)
+            if session_start is not None and stamp < session_start - 1.0:
+                _print('忽略上一轮会话遗留的过期二维码，等待协议端生成新码')
+            else:
+                _publish_qr(root, workdir, uin, show_window)
         if warn_at is not None and not warned and time.time() > warn_at:
             warned = True
             _print(f'等待扫码已超过 {int(timeout)}s，仍会持续监听：二维码过期会自动换新码并弹新窗口')

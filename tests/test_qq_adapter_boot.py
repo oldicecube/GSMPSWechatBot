@@ -619,3 +619,76 @@ def test_read_pid_tolerates_a_utf8_bom(tmp_path: Path) -> None:
     (state / 'adapter.pid').write_bytes('\ufeff424242'.encode('utf-8'))
 
     assert qq_adapter_boot._read_pid(tmp_path) == 424242
+def test_session_start_hint_prefers_runtime_json_started_at(tmp_path: Path) -> None:
+    import datetime as _dt
+
+    base = tmp_path / '.napuketto' / '10001'
+    base.mkdir(parents=True)
+    (base / 'runtime.json').write_text(
+        json.dumps({'uin': '10001', 'startedAt': '2026-11-18T17:43:42.911Z'}), encoding='utf8'
+    )
+    (base / 'instance.lock').write_text('{}', encoding='utf8')
+
+    hint = qq_adapter_boot._session_start_hint(tmp_path, '10001')
+
+    expected = _dt.datetime.fromisoformat('2026-11-18T17:43:42.911+00:00').timestamp()
+    assert hint is not None and abs(hint - expected) < 1.0
+
+
+def test_session_start_hint_falls_back_to_instance_lock(tmp_path: Path) -> None:
+    base = tmp_path / '.napuketto' / '10001'
+    base.mkdir(parents=True)
+    lock = base / 'instance.lock'
+    lock.write_text('{}', encoding='utf8')
+
+    assert qq_adapter_boot._session_start_hint(tmp_path, '10001') == lock.stat().st_mtime
+
+
+def test_session_start_hint_is_none_without_session_files(tmp_path: Path) -> None:
+    assert qq_adapter_boot._session_start_hint(tmp_path, '10001') is None
+
+
+def test_watch_login_skips_a_qr_left_over_from_an_earlier_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sleep: None
+) -> None:
+    """A QR written by a dead session must never be popped as if it were valid."""
+
+    import datetime as _dt
+    import time as _time
+
+    uin = '10001'
+    qr = _prepare_qr(tmp_path, uin)
+    stale = _time.time() - 3600
+    os.utime(qr, (stale, stale))
+
+    base = tmp_path / '.napuketto' / uin
+    (base / 'runtime.json').write_text(
+        json.dumps({'uin': uin, 'startedAt': _dt.datetime.now(_dt.timezone.utc).isoformat().replace('+00:00', 'Z')}),
+        encoding='utf8',
+    )
+
+    opened: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(
+        qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
+
+    stop = threading.Event()
+    calls = {'n': 0}
+
+    def _confirmed(*args, **kwargs) -> bool:
+        calls['n'] += 1
+        if calls['n'] >= 3:
+            stop.set()
+        return False
+
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', _confirmed)
+
+    qq_adapter_boot._watch_login(
+        tmp_path, tmp_path, uin, 13011, 13010, timeout=None, show_window=True, stop_event=stop
+    )
+
+    assert opened == [], 'stale QR from an earlier session must not be shown'
+    assert not _state_file(tmp_path).exists(), 'skipped QR must not report waiting_scan'
+
