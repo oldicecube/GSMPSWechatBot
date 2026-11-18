@@ -165,6 +165,8 @@ class PluginRunnerSupervisor:
         self._runner_spawn_timeout: float = (
             runtime_config.runner_spawn_timeout_sec if runner_spawn_timeout_sec is None else runner_spawn_timeout_sec
         )
+        # 重启配额耗尽后的冷却时长；避免一次异常把插件层永久打死。
+        self._RESTART_ROUND_COOLDOWN_SEC: float = 300.0
         self._max_restart_attempts: int = (
             runtime_config.max_restart_attempts if max_restart_attempts is None else max_restart_attempts
         )
@@ -2066,7 +2068,12 @@ class PluginRunnerSupervisor:
                 if not restarted:
                     if self._should_keep_health_loop_after_restart_failure():
                         continue
-                    return
+                    # 重启次数已经耗尽：以前这里直接 return，健康检查循环就此永久退出，
+                    # 一次 Host 卡顿就能让整个插件层「死亡」且再无任何自愈机会。
+                    # 现在改为进入长时间冷却后清零计数继续巡检。
+                    if not await self._cooldown_before_next_restart_round():
+                        return
+                    continue
                 continue
 
             try:
@@ -2081,7 +2088,12 @@ class PluginRunnerSupervisor:
                     if not restarted:
                         if self._should_keep_health_loop_after_restart_failure():
                             continue
-                        return
+                        # 重启次数已经耗尽：以前这里直接 return，健康检查循环就此永久退出，
+                        # 一次 Host 卡顿就能让整个插件层「死亡」且再无任何自愈机会。
+                        # 现在改为进入长时间冷却后清零计数继续巡检。
+                        if not await self._cooldown_before_next_restart_round():
+                            return
+                        continue
             except asyncio.CancelledError:
                 return
             except (RPCError, Exception) as exc:
@@ -2098,7 +2110,12 @@ class PluginRunnerSupervisor:
                 if not restarted:
                     if self._should_keep_health_loop_after_restart_failure():
                         continue
-                    return
+                    # 重启次数已经耗尽：以前这里直接 return，健康检查循环就此永久退出，
+                    # 一次 Host 卡顿就能让整个插件层「死亡」且再无任何自愈机会。
+                    # 现在改为进入长时间冷却后清零计数继续巡检。
+                    if not await self._cooldown_before_next_restart_round():
+                        return
+                    continue
 
     async def _request_runner_health(self, timeout_ms: int) -> HealthPayload:
         """请求 Runner 健康状态，并对宿主失速造成的超时做一次快速复核。
@@ -2142,6 +2159,31 @@ class PluginRunnerSupervisor:
             self._restart_count,
             self._max_restart_attempts,
         )
+        return True
+
+    async def _cooldown_before_next_restart_round(self) -> bool:
+        """重启配额耗尽后进入冷却，冷却结束清零计数并继续巡检。
+
+        Returns:
+            bool: 冷却结束后是否应继续健康检查循环（进程正在关闭则返回 False）。
+        """
+
+        if not self._running or is_shutdown_requested():
+            return False
+        self._logger.warning(
+            "Runner 重启配额已耗尽（%s 次），进入 %s 秒冷却；冷却结束后重新开始自动恢复",
+            self._restart_count,
+            int(self._RESTART_ROUND_COOLDOWN_SEC),
+        )
+        try:
+            await asyncio.sleep(self._RESTART_ROUND_COOLDOWN_SEC)
+        except asyncio.CancelledError:
+            return False
+        if not self._running or is_shutdown_requested():
+            return False
+        self._restart_count = 0
+        self._plugin_recovery_attempts.clear()
+        self._logger.info("Runner 重启冷却结束，恢复健康巡检")
         return True
 
     def _get_missing_recovery_plugins(self, loaded_plugin_ids: List[str]) -> List[str]:

@@ -28,6 +28,11 @@ if not TYPE_CHECKING:
     AiohttpClientWebSocketResponse = Any
 
 
+
+# 连接生命周期回调内部会 await Host RPC；超过这个秒数就放行，
+# 避免 Host 卡顿时把整个重连循环一起挂死。
+_LIFECYCLE_CALLBACK_TIMEOUT = 15.0
+
 class QQTransportClient:
     """OneBot 正向 WebSocket 客户端。"""
 
@@ -324,7 +329,11 @@ class QQTransportClient:
 
         self._connection_active = True
         try:
-            await self._on_connection_opened()
+            await asyncio.wait_for(self._on_connection_opened(), timeout=_LIFECYCLE_CALLBACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._logger.warning(
+                "SnowLuma 适配器连接建立回调超时（Host RPC 未响应），继续保持连接"
+            )
         except Exception as exc:
             self._logger.warning(f"SnowLuma 适配器连接建立回调失败: {exc}")
 
@@ -335,7 +344,14 @@ class QQTransportClient:
 
         self._connection_active = False
         try:
-            await self._on_connection_closed()
+            # 断连回调里会 await Host RPC（update_message_gateway_state）。
+            # 一旦 Host 侧卡住，这里不设上限会把整个重连循环一起挂死，
+            # 协议端明明已经重新登录，插件却永远不会再连回去（2026-11-19 实测）。
+            await asyncio.wait_for(self._on_connection_closed(), timeout=_LIFECYCLE_CALLBACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._logger.warning(
+                "SnowLuma 适配器断连回调超时（Host RPC 未响应），继续重连流程"
+            )
         except Exception as exc:
             self._logger.warning(f"SnowLuma 适配器断连回调失败: {exc}")
 

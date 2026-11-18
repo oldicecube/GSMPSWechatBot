@@ -692,3 +692,22 @@ def test_watch_login_skips_a_qr_left_over_from_an_earlier_session(
     assert opened == [], 'stale QR from an earlier session must not be shown'
     assert not _state_file(tmp_path).exists(), 'skipped QR must not report waiting_scan'
 
+
+
+def test_login_confirmed_rejects_log_success_without_qr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QR 图片缺失时不能凭日志里的 success 认定"已登录"。
+
+    2026-11-19 实测：协议端进程被杀、端口已断，只因二维码文件被清理过，
+    _login_confirmed 返回 True，watcher 永远不再拉起进程，QQ 侧彻底失聪。
+    """
+
+    uin = '10001'
+    log_dir = tmp_path / '.napuketto' / uin / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = log_dir / 'napuketto.log'
+    log.write_text('{"level":30,"state":"success","msg":"QR 登录状态"}' + chr(10), encoding='utf8')
+    monkeypatch.setattr(qq_adapter_boot, '_port_in_use', lambda *a, **k: False)
+
+    assert qq_adapter_boot._login_confirmed(tmp_path, uin, 13011, 13010) is False

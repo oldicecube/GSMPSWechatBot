@@ -8,6 +8,7 @@ from typing import Callable, Iterator, Optional, Set, TextIO
 import asyncio
 import json
 import logging
+import queue
 import threading
 import time
 
@@ -64,11 +65,70 @@ def get_file_handler():
     return _file_handler
 
 
+class NonBlockingStreamHandler(logging.StreamHandler):
+    """把真正写流的动作交给后台线程，避免控制台阻塞拖死调用线程。
+
+    Windows 控制台一旦进入“标记/选择”模式，任何对 stdout/stderr 的写入都会
+    无限期挂住；若 stderr 被重定向到无人读取的管道，缓冲区写满后同样会阻塞。
+    日志是同步调用，一旦 emit 卡住，业务线程（含 maibot 原生核心）会跟着停摆，
+    2026-11-19 实测表现为整条消息管线再无任何日志与回复。
+
+    这里把格式化后的文本塞进有界队列，由 daemon 线程负责落屏：
+    - 调用线程永不阻塞；
+    - 屏幕卡住时队列写满即丢弃并计数，不会拖垮进程（文件日志不受影响）。
+    """
+
+    _QUEUE_MAXSIZE = 2000
+
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        self._queue: "queue.Queue" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._dropped = 0
+        self._writer_thread = threading.Thread(
+            target=self._drain_queue,
+            name="console-log-writer",
+            daemon=True,
+        )
+        self._writer_thread.start()
+
+    def _drain_queue(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            stream, text = item
+            try:
+                stream.write(text)
+                stream.flush()
+            except Exception:
+                # 屏幕写失败不影响业务；文件 handler 已经独立记录。
+                pass
+
+    def emit(self, record):
+        try:
+            text = self.format(record) + self.terminator
+        except Exception:
+            self.handleError(record)
+            return
+        try:
+            self._queue.put_nowait((self.stream, text))
+        except queue.Full:
+            self._dropped += 1
+
+    def flush(self):
+        # 实际的 flush 在后台线程里做，这里绝不阻塞调用线程。
+        return
+
+    def get_dropped_count(self) -> int:
+        """返回因控制台阻塞而被丢弃的日志条数，便于排查。"""
+        return self._dropped
+
+
 def get_console_handler():
     """获取控制台handler单例"""
     global _console_handler
     if _console_handler is None:
-        _console_handler = logging.StreamHandler()
+        _console_handler = NonBlockingStreamHandler()
         # 设置控制台handler的日志级别
         console_level = LOG_CONFIG.get("console_log_level", LOG_CONFIG.get("log_level", "INFO"))
         _console_handler.setLevel(getattr(logging, console_level.upper(), logging.INFO))

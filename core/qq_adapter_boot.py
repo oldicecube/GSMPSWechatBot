@@ -232,7 +232,10 @@ def _login_confirmed(workdir: Path, uin: str, ws_port: Optional[int], http_port:
         qr_mtime = (workdir / '.napuketto' / uin / 'cache' / 'qrcode.png').stat().st_mtime
         log_mtime = log_path.stat().st_mtime
     except OSError:
-        return True
+        # 缺少二维码/日志时无法证明当前会话仍活着：曾经这里返回 True，
+        # 结果协议端进程已经退出、端口也断了，watcher 仍认为"已登录"，
+        # 永远不会重新拉起进程（2026-11-19 实测踩到）。端口才是唯一判据。
+        return False
     return log_mtime >= qr_mtime
 
 
