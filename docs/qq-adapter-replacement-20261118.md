@@ -325,3 +325,30 @@ NapCat / SnowLuma 画像保持原样，不受影响。
   - `python scripts/qq_adapter_onebot11_compat_acceptance.py`（7 项）
   - `python scripts/maibot_qq_acceptance.py`（双端路由 / 身份 / 引用 @ 全链路）
   - `python -m pytest tests -q`（111 项，含新增 `tests/test_qq_adapter_boot.py` 10 项）
+
+## 10. 登录二维码自动弹窗
+
+需要扫码时，bot 会在**新的 cmd 窗口**里弹出二维码，登录成功后窗口自动关闭，
+不用再去翻 `depends-data/qq-adapter/qrcode.png`。
+
+实现：
+
+| 位置 | 作用 |
+| --- | --- |
+| `scripts/show_qq_qr.ps1` | WinForms 窗口，按 3 倍最近邻放大二维码（147→441px，保持可扫），显示群号与"登录成功后自动关闭" |
+| `core/qq_adapter_boot.py::_open_qr_window` | 用 `cmd.exe /c powershell -STA -File ...` + `CREATE_NEW_CONSOLE` 拉起，窗口记录在 `_QR_WINDOWS[root]` |
+| `_close_qr_window` / `_close_all_qr_windows` | 登录成功、二维码刷新、等待超时、解释器退出时 `taskkill /T /F` 关闭窗口进程树 |
+
+行为细节：
+
+- 二维码文件一变（协议端重新出码），先关旧窗口再开新窗口，不会堆一屏过期二维码。
+- `launch.json` 的 `show_qr_window`（默认 `true`）可以关掉弹窗，只保留控制台里的路径与链接。
+- `MAIBOT_INTERCEPT_SEND=1` 或非 Windows 时不会弹窗，测试环境安全。
+- 窗口用独立进程 + 独立控制台，不影响 bot 主控制台输出。
+
+实测（2026-11-18）：真实拉起协议端 → 二维码窗口弹出（pid 记录在状态文件旁）；
+模拟扫码成功（13011 开始监听）后窗口自动关闭，状态从 `waiting_scan` 变为 `logged_in`。
+
+> 注意：`connection_id` 保持 `napcat-local` 不变。它会被写进消息 `scope` 与
+> `qq:3294652115:napcat-local:group:<群号>` 路由 id，插件白名单、历史上下文和记忆都按它索引，
+> 换协议端只改 `port` / `token` 即可，改标签会导致 QQ 侧"像是换了个新群"。

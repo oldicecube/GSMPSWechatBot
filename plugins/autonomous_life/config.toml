@@ -1,5 +1,5 @@
 [plugin]
-enabled = false
+enabled = true
 config_version = "1.0.0"
 
 [life]

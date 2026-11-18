@@ -15,6 +15,7 @@ OneBot 11。它和 NapCat 一样不随 bot 生命周期结束，但需要在 bot
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -31,6 +32,10 @@ STATE_RELATIVE = Path('depends-data/qq-adapter')
 DEFAULT_QR_TIMEOUT_SEC = 900
 DEFAULT_WATCH_INTERVAL_SEC = 3.0
 _LOG_PREFIX = '[QQ ADAPTER]'
+QR_WINDOW_SCRIPT = Path('scripts/show_qq_qr.ps1')
+# root -> 正在显示的二维码窗口进程（cmd -> powershell -> WinForms）
+_QR_WINDOW_LOCK = threading.Lock()
+_QR_WINDOWS: Dict[str, subprocess.Popen] = {}
 
 
 def _print(message: str) -> None:
@@ -207,8 +212,96 @@ def _login_confirmed(workdir: Path, uin: str, ws_port: Optional[int]) -> bool:
     return '"state":"success"' in text or '登录成功' in text
 
 
-def _watch_login(root: Path, workdir: Path, uin: str, ws_port: Optional[int], timeout: float) -> None:
-    """Publish the QR code and login URL while the session is unauthenticated."""
+def _qr_window_supported() -> bool:
+    """Whether a popup window can be shown in this environment."""
+
+    return os.name == 'nt' and os.environ.get('MAIBOT_INTERCEPT_SEND') != '1'
+
+
+def _open_qr_window(root: Path, qr_path: Path, uin: str) -> Optional[subprocess.Popen]:
+    """Pop the login QR code into its own cmd window (Windows only)."""
+
+    if not _qr_window_supported():
+        return None
+    script = Path(root) / QR_WINDOW_SCRIPT
+    if not script.is_file():
+        _print(f'二维码窗口脚本缺失，跳过弹窗: {script}')
+        return None
+    try:
+        process = subprocess.Popen(
+            [
+                'cmd.exe',
+                '/c',
+                'powershell.exe',
+                '-NoProfile',
+                '-STA',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                str(script),
+                '-ImagePath',
+                str(qr_path),
+                '-Uin',
+                str(uin or ''),
+            ],
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _print(f'弹出二维码窗口失败: {exc}')
+        return None
+    with _QR_WINDOW_LOCK:
+        _QR_WINDOWS[str(root)] = process
+    _print(f'已弹出二维码窗口（pid={process.pid}），登录成功后自动关闭')
+    return process
+
+
+def _close_qr_window(root: Path) -> None:
+    """Close the QR window opened for this root, if it is still alive."""
+
+    with _QR_WINDOW_LOCK:
+        process = _QR_WINDOWS.pop(str(root), None)
+    if process is None or process.poll() is not None:
+        return
+    _terminate_tree(process.pid)
+    _print('二维码窗口已关闭')
+
+
+def _close_all_qr_windows() -> None:
+    """Close every QR window (called on interpreter exit)."""
+
+    with _QR_WINDOW_LOCK:
+        processes = list(_QR_WINDOWS.items())
+        _QR_WINDOWS.clear()
+    for _root, process in processes:
+        if process.poll() is None:
+            try:
+                subprocess.run(
+                    ['taskkill', '/PID', str(int(process.pid)), '/T', '/F'],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+atexit.register(_close_all_qr_windows)
+
+
+def _watch_login(
+    root: Path,
+    workdir: Path,
+    uin: str,
+    ws_port: Optional[int],
+    timeout: float,
+    show_window: bool = True,
+) -> None:
+    """Publish the QR code, pop it up in a window, and close it once logged in."""
 
     qr_source = workdir / '.napuketto' / uin / 'cache' / 'qrcode.png'
     qr_target = _state_dir(root) / 'qrcode.png'
@@ -216,6 +309,7 @@ def _watch_login(root: Path, workdir: Path, uin: str, ws_port: Optional[int], ti
     last_stamp: Optional[float] = None
     while time.time() < deadline:
         if _login_confirmed(workdir, uin, ws_port):
+            _close_qr_window(root)
             _print(f'协议端已登录，OneBot WS 端口 {ws_port} 就绪')
             _write_state(root, dict(state='logged_in', uin=uin, ws_port=ws_port))
             return
@@ -234,8 +328,13 @@ def _watch_login(root: Path, workdir: Path, uin: str, ws_port: Optional[int], ti
                 _print(f'需要扫码登录 QQ {uin}：二维码 {qr_target}')
                 if url:
                     _print(f'登录链接（手机 QQ 打开）: {url}')
+                if show_window:
+                    # 新二维码先关掉旧窗口，避免同时挂着一堆过期码
+                    _close_qr_window(root)
+                    _open_qr_window(root, qr_target, uin)
                 _write_state(root, dict(state='waiting_scan', uin=uin, qr_path=str(qr_target), qr_url=url))
         time.sleep(DEFAULT_WATCH_INTERVAL_SEC)
+    _close_qr_window(root)
     _print(f'等待扫码超时（{int(timeout)}s）：协议端仍在后台等待，可重启协议端重新出码')
 
 
@@ -258,6 +357,7 @@ def ensure_qq_adapter(root: Path) -> bool:
     ws_port = settings.get('ws_port')
     http_port = settings.get('http_port')
     timeout = float(settings.get('qr_watch_seconds') or DEFAULT_QR_TIMEOUT_SEC)
+    show_window = settings.get('show_qr_window', True) is not False
 
     if _port_in_use(ws_port) or _port_in_use(http_port):
         _print(f'协议端已在运行（WS {ws_port} / HTTP {http_port} 已监听），跳过启动')
@@ -293,5 +393,9 @@ def ensure_qq_adapter(root: Path) -> bool:
     _write_pid(root, process.pid)
     _write_state(root, dict(state='starting', uin=uin, ws_port=ws_port, pid=process.pid, log=str(log_path)))
     if uin:
-        threading.Thread(target=_watch_login, args=(root, workdir, uin, ws_port, timeout), daemon=True).start()
+        threading.Thread(
+            target=_watch_login,
+            args=(root, workdir, uin, ws_port, timeout, show_window),
+            daemon=True,
+        ).start()
     return True

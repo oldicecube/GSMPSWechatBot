@@ -623,6 +623,38 @@ class ChatReplyTimingConfig(ConfigBase):
     )
     """群聊仅允许真实 @ 消息触发 LLM；暂停普通接话、主动任务及无人输入的等待续聊。"""
 
+    proactive_chat_groups: List[str] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "主动聊天白名单",
+                "en_US": "Proactive chat groups",
+                "ja_JP": "自発チャット対象グループ",
+            },
+            "hint": {
+                "zh_CN": "填写 platform:群号（如 qq:1020993873、wechat:47447788043@chatroom）或 platform:群名。",
+                "en_US": "Format: platform:group_id (qq:1020993873) or platform:group_name.",
+                "ja_JP": "platform:グループID（例 qq:1020993873）または platform:グループ名。",
+            },
+            "i18n": {
+                "label": {
+                    "en": "Proactive chat groups",
+                    "ja": "自発チャット対象グループ",
+                },
+                "hint": {
+                    "en": "Format: platform:group_id (qq:1020993873) or platform:group_name.",
+                    "ja": "platform:グループID（例 qq:1020993873）または platform:グループ名。",
+                },
+            },
+            "x-widget": "custom",
+        },
+    )
+    """开启「仅被 @ 时回复」后，列表内的群聊仍然保留普通接话与主动聊天（插件主动任务同样放行）。
+
+    每项格式为 ``platform:group_id``（推荐，群号不受改群名影响）或 ``platform:群名``；
+    未列出的群聊行为与之前完全一致，仍然只在真实 @ 时回复。私聊不受此列表影响。
+    """
+
     inevitable_at_reply: bool = Field(
         default=True,
         json_schema_extra={

@@ -203,3 +203,119 @@ def test_live_process_with_open_port_is_left_alone(tmp_path: Path, monkeypatch: 
 
     assert qq_adapter_boot.ensure_qq_adapter(tmp_path) is False
     assert killed == []
+
+
+def _fake_window_process(pid: int = 4242):
+    """最小化的 Popen 替身：只提供 pid / poll。"""
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    return _FakeProcess()
+
+
+def test_qr_window_is_disabled_while_intercepting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('MAIBOT_INTERCEPT_SEND', '1')
+    assert qq_adapter_boot._qr_window_supported() is False
+    assert qq_adapter_boot._open_qr_window(tmp_path, tmp_path / 'qrcode.png', '10001') is None
+
+
+def test_open_qr_window_spawns_a_new_console(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('MAIBOT_INTERCEPT_SEND', raising=False)
+    monkeypatch.setattr(qq_adapter_boot.os, 'name', 'nt')
+    monkeypatch.setattr(qq_adapter_boot, '_QR_WINDOWS', {})
+    script = tmp_path / 'scripts' / 'show_qq_qr.ps1'
+    script.parent.mkdir(parents=True)
+    script.write_text('# fixture', encoding='utf8')
+
+    captured: dict = {}
+
+    def _fake_popen(args, **kwargs):
+        captured['args'] = list(args)
+        captured['flags'] = kwargs.get('creationflags')
+        return _fake_window_process()
+
+    monkeypatch.setattr(qq_adapter_boot.subprocess, 'Popen', _fake_popen)
+    process = qq_adapter_boot._open_qr_window(tmp_path, tmp_path / 'qrcode.png', '10001')
+
+    assert process is not None
+    assert captured['args'][:3] == ['cmd.exe', '/c', 'powershell.exe']
+    assert '-File' in captured['args'] and '-ImagePath' in captured['args']
+    assert '10001' in captured['args']
+    assert captured['flags'] == getattr(qq_adapter_boot.subprocess, 'CREATE_NEW_CONSOLE', 0)
+    assert qq_adapter_boot._QR_WINDOWS[str(tmp_path)] is process
+
+
+def test_open_qr_window_skips_when_script_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('MAIBOT_INTERCEPT_SEND', raising=False)
+    monkeypatch.setattr(qq_adapter_boot.os, 'name', 'nt')
+    monkeypatch.setattr(qq_adapter_boot, '_QR_WINDOWS', {})
+    monkeypatch.setattr(
+        qq_adapter_boot.subprocess, 'Popen', lambda *a, **k: pytest.fail('不应拉起窗口')
+    )
+    assert qq_adapter_boot._open_qr_window(tmp_path, tmp_path / 'qrcode.png', '10001') is None
+
+
+def test_close_qr_window_kills_the_tracked_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    process = _fake_window_process(5150)
+    monkeypatch.setattr(qq_adapter_boot, '_QR_WINDOWS', {str(tmp_path): process})
+    killed: list[int] = []
+    monkeypatch.setattr(qq_adapter_boot, '_terminate_tree', lambda pid: killed.append(pid))
+
+    qq_adapter_boot._close_qr_window(tmp_path)
+
+    assert killed == [5150]
+    assert str(tmp_path) not in qq_adapter_boot._QR_WINDOWS
+
+
+def test_watch_login_pops_the_window_and_closes_it_after_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uin = '10001'
+    qr_dir = tmp_path / '.napuketto' / uin / 'cache'
+    qr_dir.mkdir(parents=True)
+    (qr_dir / 'qrcode.png').write_bytes(b'fixture-qr')
+
+    opened: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, 'DEFAULT_WATCH_INTERVAL_SEC', 0)
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(
+        qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: closed.append(str(root)))
+    states = iter([False, False, True])
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', lambda *a, **k: next(states, True))
+
+    qq_adapter_boot._watch_login(tmp_path, tmp_path, uin, 13011, timeout=5, show_window=True)
+
+    assert opened == [str(tmp_path / 'depends-data' / 'qq-adapter' / 'qrcode.png')]
+    assert closed, '登录成功后必须关闭二维码窗口'
+    state = json.loads((tmp_path / 'depends-data' / 'qq-adapter' / 'status.json').read_text(encoding='utf8'))
+    assert state['state'] == 'logged_in'
+
+
+def test_watch_login_keeps_the_window_closed_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uin = '10001'
+    qr_dir = tmp_path / '.napuketto' / uin / 'cache'
+    qr_dir.mkdir(parents=True)
+    (qr_dir / 'qrcode.png').write_bytes(b'fixture-qr')
+
+    opened: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, 'DEFAULT_WATCH_INTERVAL_SEC', 0)
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(
+        qq_adapter_boot, '_open_qr_window', lambda root, path, uin: opened.append(str(path))
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
+    states = iter([False, False, True])
+    monkeypatch.setattr(qq_adapter_boot, '_login_confirmed', lambda *a, **k: next(states, True))
+
+    qq_adapter_boot._watch_login(tmp_path, tmp_path, uin, 13011, timeout=5, show_window=False)
+    assert opened == []

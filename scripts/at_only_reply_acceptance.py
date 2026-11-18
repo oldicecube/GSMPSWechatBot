@@ -119,12 +119,67 @@ class AtOnly(unittest.IsolatedAsyncioTestCase):
         engine._handle_silent_turn.assert_not_awaited()
         self.assertFalse(obj._at_reply_authorized)
 
+    def test_whitelisted_groups_keep_proactive_chat(self):
+        """白名单群聊脱离 @-only：频率回落到 talk_value，@ 仍然即时触发。"""
+        from src.config.config import global_config
+        talk_value = float(global_config.chat.reply_timing.talk_value)
+        with patch('utils.response_window.response_allowed', return_value=True):
+            for platform, group_id in (('qq', '1020993873'), ('wechat', '47447788043@chatroom')):
+                obj = runtime(platform)
+                obj.chat_stream.group_id = group_id
+                obj.chat_stream.group_name = 'GDUT SIE Minecraft Public Server'
+                obj.message_cache = [message()]
+                obj._last_processed_index = 0
+                obj._is_focus_mode_active_for_current_chat = lambda: False
+                obj._talk_frequency_adjust = 1.0
+                obj._get_base_reply_frequency = Runtime._get_base_reply_frequency.__get__(obj)
+                obj.session_id = f'fixture-{platform}-{group_id}'
+                self.assertFalse(policy.enabled(obj))
+                self.assertTrue(policy.reply_allowed(obj))
+                self.assertAlmostEqual(Runtime._get_effective_reply_frequency(obj), talk_value)
+                # 白名单群聊里 @ 不再靠频率=1，而是走「@ 强制触发」通道
+                obj._arm_forced_turn = Mock()
+                with patch('src.maisaka.runtime.is_mentioned_bot_in_message', return_value=(False, False, 0.0)):
+                    Runtime._update_message_trigger_state(obj, message(at=True))
+                obj._arm_forced_turn.assert_called_once()
+
+    def test_other_groups_and_private_stay_at_only(self):
+        for platform, group_id in (('wechat', '47799335844@chatroom'), ('qq', '100200300')):
+            obj = runtime(platform)
+            obj.chat_stream.group_id = group_id
+            obj.chat_stream.group_name = '某个没上白名单的群'
+            obj.message_cache = [message()]
+            obj._last_processed_index = 0
+            self.assertTrue(policy.enabled(obj))
+            with patch('utils.response_window.response_allowed', return_value=True):
+                self.assertEqual(Runtime._get_effective_reply_frequency(obj), 0)
+        private = runtime('wechat')
+        private.chat_stream.is_group_session = False
+        private.chat_stream.group_id = None
+        self.assertTrue(policy.enabled(private))
+        self.assertFalse(policy._proactive_entry(private))
+
+    def test_whitelist_matches_group_name_and_stays_scoped_to_platform(self):
+        obj = runtime('qq')
+        obj.chat_stream.group_id = '1020993873'
+        obj.chat_stream.group_name = 'GDUT SIE Minecraft Public Server'
+        self.assertEqual(policy._proactive_entry(obj), 'qq:1020993873')
+        # 同名但不同平台不能互相借道
+        wechat_same_name = runtime('wechat')
+        wechat_same_name.chat_stream.group_id = '47799335844@chatroom'
+        wechat_same_name.chat_stream.group_name = 'GDUT SIE Minecraft Public Server'
+        self.assertEqual(policy._proactive_entry(wechat_same_name), '')
+        self.assertTrue(policy.enabled(wechat_same_name))
+
     def test_model_field_defaults_and_live_pause_settings(self):
         from src.config.official_configs import ChatReplyTimingConfig
         self.assertFalse(ChatReplyTimingConfig().reply_only_when_at)
         import tomllib
         timing=tomllib.loads((ROOT/'config/bot_config.toml').read_text(encoding='utf8'))['chat']['reply_timing']
         self.assertTrue(timing['reply_only_when_at']);self.assertTrue(timing['inevitable_at_reply'])
+        self.assertEqual(ChatReplyTimingConfig().proactive_chat_groups, [])
+        self.assertEqual(sorted(timing['proactive_chat_groups']),
+                         ['qq:1020993873','wechat:47447788043@chatroom'])
         self.assertTrue(timing['private_reply_paused']);self.assertFalse(timing['mentioned_bot_reply'])
 
 if __name__=='__main__':unittest.main(verbosity=2)
