@@ -376,3 +376,43 @@ NapCat / SnowLuma 画像保持原样，不受影响。
   再带重试复制；句柄迟迟不释放时退化为唯一文件名 `qrcode-<ts>.png`，保证新码一定发布得出去。
 - `test_watch_login_*` 系列用例覆盖：首次弹窗、登录关窗、换码重弹、掉线后重新出码、进程死亡自愈、
   同一 root 只有一个守护线程。
+
+### 10.2 故障复盘：适配器每 4 秒重启、端口永不监听（2026-11-19）
+
+现象：用户在窗口里扫码登录成功，但 bot 一直报“适配器连接失败”，`13010/13011` 始终不监听。
+
+排查证据链：
+
+1. `adapter.log` 里每 4 秒出现一组 `wrapper 装配完成` → `快速登录成功` → `自建宿主进程退出 code=1`；
+   5656 行日志里 `onebot/13010/13011/listen` **0 次命中** —— 说明根本没走到监听。
+2. `netstat` 上连 `TIME_WAIT` 都没有，排除端口占用。
+3. Clash Verge 的 `enable_tun_mode=false`，系统代理只影响走代理的程序，排除网络接管。
+4. 真正的错误在 `C:\qq-adapter-lab\qqbot\.napuketto\3294652115\napuketto-boot.log`：
+
+```
+bootstrap: 登录成功 uin=3294652115 nick=まひるん
+bootstrap: QQ session 就绪（getMsgService 可用）
+bootstrap: 协议装配失败: adapterCore.ProtocolConfig is not a constructor
+bootstrap: 协议服务装配失败，引导中止
+```
+
+根因：**依赖版本不匹配**。`@napuketto/adapter@0.16.4` 的 `dist/core/index.mjs` 只导出
+`ActionRegistry / BaseProtocolAdapter / ConfigBase / createServerSchema / runAction`，**没有 `ProtocolConfig`**；
+而 `@napuketto/loader@0.9.3` 的 `self-host.cjs` 里写死了 `new adapterCore.ProtocolConfig(...)`。
+于是登录成功 → 协议装配抛错 → 引导中止 → exit(1) → supervisor 每 4 秒重拉，形成死循环。
+
+修复：把 `@napuketto/cli` 升到 `^0.6.16`，连带解析出配套的
+`adapter@0.18.1 / loader@0.10.1 / kernel@0.15.0 / network@0.4.1`（该版本 adapter 的 core 重新导出了 `ProtocolConfig`）。
+修复后 `13010/13011` 立即监听，`get_login_info` 返回 3294652115/まひるん、`get_status` 返回 `online:true`。
+
+顺带修掉一个掩盖故障的判断 bug：`_login_confirmed` 原先把 `'登录成功'` 当作兜底判据，
+而 QQ 每次启动都打 `快速登录成功`，导致崩溃重启循环被误判成“已登录”。现在只认扫码的
+`"state":"success"`，端口监听仍是第一判据。
+
+排查这类问题最快的三个入口：
+
+| 位置 | 看什么 |
+| --- | --- |
+| `<lab>/.napuketto/<uin>/napuketto-boot.log` | 宿主 bootstrap 阶段的真实异常（协议装配、wrapper dlopen、session 激活） |
+| `depends-data/qq-adapter/adapter.log` | CLI/supervisor 层的启动、退出码、重启节奏 |
+| `netstat -ano \| findstr 13010` | 是否真的进入监听；有监听但 bot 连不上才是 token/鉴权问题 |

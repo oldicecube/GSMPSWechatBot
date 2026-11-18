@@ -572,3 +572,39 @@ def test_publish_qr_falls_back_when_the_target_file_stays_locked(
     published = Path(state['qr_path'])
     assert published.name.startswith('qrcode-')
     assert published.read_bytes() == b'fresh'
+
+
+
+def test_login_confirmed_ignores_fast_login_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QQ 启动时的“快速登录成功”不能当成 OneBot 已就绪。"""
+
+    uin = '10001'
+    _prepare_qr(tmp_path, uin)
+    log_dir = tmp_path / '.napuketto' / uin / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / 'napuketto.log').write_text(
+        '{"level":30,"msg":"快速登录成功","uin":"10001"}' + chr(10), encoding='utf8'
+    )
+    monkeypatch.setattr(qq_adapter_boot, '_port_in_use', lambda *a, **k: False)
+
+    assert qq_adapter_boot._login_confirmed(tmp_path, uin, 13011, 13010) is False
+
+
+def test_login_confirmed_accepts_qr_success_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫码成功的 QR 状态仍然可以作为端口之外的兜底判据。"""
+
+    uin = '10001'
+    _prepare_qr(tmp_path, uin)
+    log_dir = tmp_path / '.napuketto' / uin / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = log_dir / 'napuketto.log'
+    log.write_text('{"level":30,"state":"success","msg":"QR 登录状态"}' + chr(10), encoding='utf8')
+    stamp = log.stat().st_mtime + 5
+    os.utime(log, (stamp, stamp))
+    monkeypatch.setattr(qq_adapter_boot, '_port_in_use', lambda *a, **k: False)
+
+    assert qq_adapter_boot._login_confirmed(tmp_path, uin, 13011, 13010) is True

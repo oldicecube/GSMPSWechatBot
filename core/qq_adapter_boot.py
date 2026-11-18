@@ -217,7 +217,9 @@ def _login_confirmed(workdir: Path, uin: str, ws_port: Optional[int], http_port:
         return True
     log_path = workdir / '.napuketto' / uin / 'logs' / 'napuketto.log'
     text = _tail(log_path).replace(' ', '')
-    if '"state":"success"' not in text and '登录成功' not in text:
+    # 只认扫码登录的 QR 状态成功。QQ 每次启动都会打“快速登录成功”，
+    # 用它当判据会把崩溃重启循环误判成已登录（2026-11-18 实测踩到）。
+    if '"state":"success"' not in text:
         return False
     try:
         qr_mtime = (workdir / '.napuketto' / uin / 'cache' / 'qrcode.png').stat().st_mtime
