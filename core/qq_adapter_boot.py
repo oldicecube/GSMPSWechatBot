@@ -227,25 +227,50 @@ def _login_confirmed(workdir: Path, uin: str, ws_port: Optional[int], http_port:
     return log_mtime >= qr_mtime
 
 
+def _copy_qr(source: Path, target: Path, attempts: int = 6, delay: float = 0.4) -> Optional[Path]:
+    """Copy a fresh QR, tolerating the old window still holding the file open.
+
+    Windows 上二维码窗口用 PowerShell 载入 PNG 后会一直持有文件句柄，直接 copy 会得到
+    ``WinError 32``。这里先重试（关窗后句柄释放有延迟），仍然失败就退化成唯一文件名，
+    保证新码一定发布得出去。
+    """
+
+    for attempt in range(attempts):
+        try:
+            shutil.copy2(source, target)
+            return target
+        except OSError:
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay)
+    fallback = target.with_name(f'qrcode-{int(time.time())}{target.suffix}')
+    try:
+        shutil.copy2(source, fallback)
+    except OSError as exc:
+        _print(f'复制登录二维码失败: {exc}')
+        return None
+    _print(f'旧二维码文件仍被占用，改用新文件名: {fallback.name}')
+    return fallback
+
+
 def _publish_qr(root: Path, workdir: Path, uin: str, show_window: bool) -> bool:
     """Copy the newest QR into the state dir, print its URL and pop the window."""
 
     qr_source = workdir / '.napuketto' / uin / 'cache' / 'qrcode.png'
     qr_target = _state_dir(root) / 'qrcode.png'
-    try:
-        shutil.copy2(qr_source, qr_target)
-    except OSError as exc:
-        _print(f'复制登录二维码失败: {exc}')
+    if show_window:
+        # 必须先关旧窗口：窗口进程会锁住正在显示的 PNG，不先释放就 copy 不动。
+        _close_qr_window(root)
+    published = _copy_qr(qr_source, qr_target)
+    if published is None:
         return False
     url = _latest_login_url(workdir, uin)
-    _print(f'需要扫码登录 QQ {uin}：二维码 {qr_target}')
+    _print(f'需要扫码登录 QQ {uin}：二维码 {published}')
     if url:
         _print(f'登录链接（手机 QQ 打开）: {url}')
     if show_window:
-        # 新二维码先关掉旧窗口，避免同时挂着一堆过期码
-        _close_qr_window(root)
-        _open_qr_window(root, qr_target, uin)
-    _write_state(root, dict(state='waiting_scan', uin=uin, qr_path=str(qr_target), qr_url=url))
+        _open_qr_window(root, published, uin)
+    _write_state(root, dict(state='waiting_scan', uin=uin, qr_path=str(published), qr_url=url))
     return True
 
 

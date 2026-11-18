@@ -517,3 +517,58 @@ def test_start_watcher_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert len(started) == 1
     qq_adapter_boot._stop_all_watchers()
 
+
+
+def test_publish_qr_closes_the_old_window_before_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """窗口进程锁着 PNG：必须先关窗再复制，否则 WinError 32。"""
+
+    qr_dir = tmp_path / '.napuketto' / '10001' / 'cache'
+    qr_dir.mkdir(parents=True)
+    (qr_dir / 'qrcode.png').write_bytes(b'fresh')
+
+    order: list[str] = []
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: order.append('close'))
+    monkeypatch.setattr(qq_adapter_boot, '_open_qr_window', lambda root, path, uin: order.append('open'))
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    real_copy = qq_adapter_boot.shutil.copy2
+
+    def _copy(src, dst, *args, **kwargs):
+        order.append('copy')
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(qq_adapter_boot.shutil, 'copy2', _copy)
+
+    assert qq_adapter_boot._publish_qr(tmp_path, tmp_path, '10001', True) is True
+    assert order == ['close', 'copy', 'open']
+
+
+def test_publish_qr_falls_back_when_the_target_file_stays_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """句柄迟迟不释放时改用唯一文件名，保证新码一定能发布。"""
+
+    qr_dir = tmp_path / '.napuketto' / '10001' / 'cache'
+    qr_dir.mkdir(parents=True)
+    (qr_dir / 'qrcode.png').write_bytes(b'fresh')
+
+    monkeypatch.setattr(qq_adapter_boot, '_close_qr_window', lambda root: None)
+    monkeypatch.setattr(qq_adapter_boot, '_open_qr_window', lambda root, path, uin: None)
+    monkeypatch.setattr(qq_adapter_boot, '_latest_login_url', lambda workdir, uin: '')
+    monkeypatch.setattr(qq_adapter_boot.time, 'sleep', lambda seconds: None)
+    real_copy = qq_adapter_boot.shutil.copy2
+
+    def _copy(src, dst, *args, **kwargs):
+        if Path(dst).name == 'qrcode.png':
+            raise OSError(32, 'The process cannot access the file')
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(qq_adapter_boot.shutil, 'copy2', _copy)
+
+    assert qq_adapter_boot._publish_qr(tmp_path, tmp_path, '10001', True) is True
+    state = json.loads(_state_file(tmp_path).read_text(encoding='utf8'))
+    assert state['state'] == 'waiting_scan'
+    published = Path(state['qr_path'])
+    assert published.name.startswith('qrcode-')
+    assert published.read_bytes() == b'fresh'
