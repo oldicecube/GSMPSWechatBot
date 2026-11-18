@@ -112,16 +112,19 @@ def player_list():
     return data.get("players", [])
 
 
-def player_snapshot(host=None, port=None, timeout=3):
-    """Read one server's complete player sample without changing default routing.
+def player_snapshot_detail(host=None, port=None, timeout=3):
+    """Read one server's complete player sample and say why it failed.
 
-    None means unknown (timeout, incomplete/hidden sample), never empty/offline.
-    Keep status(), player_list(), RCON and other plugins on their existing host.
+    Returns (names, None) on success and (None, reason) when the answer is
+    unknown (unreachable, timeout, incomplete/hidden sample). An empty list is a
+    real "nobody online" answer and never a failure, so a failed read can never
+    be mistaken for everyone leaving. status(), player_list(), RCON and other
+    plugins keep using their existing host.
     """
     address = str(host or _game_host or '').strip()
     target_port = port if host else (_game_port if port is None else port)
     if not address:
-        return None
+        return None, 'mc.host is not configured'
     try:
         server = (JavaServer.lookup(address, timeout=timeout) if target_port is None
                   else JavaServer(address, int(target_port), timeout=timeout))
@@ -129,8 +132,14 @@ def player_snapshot(host=None, port=None, timeout=3):
         sample = response.players.sample or []
         online = int(response.players.online)
         if len(sample) < online:
-            return None
+            return None, 'incomplete sample (sample %d < online %d; server hides the player list)' % (len(sample), online)
         names = {str(item.name).strip() for item in sample if item.name != _fake_name}
-        return sorted(name for name in names if name)
-    except Exception:
-        return None
+        return sorted(name for name in names if name), None
+    except Exception as exc:
+        return None, '%s: %s' % (type(exc).__name__, exc)
+
+
+def player_snapshot(host=None, port=None, timeout=3):
+    """Names of the players online, or None when the sample is unknown."""
+    names, _reason = player_snapshot_detail(host=host, port=port, timeout=timeout)
+    return names

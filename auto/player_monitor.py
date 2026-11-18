@@ -119,13 +119,22 @@ class ServerMonitor:
         self.uncertain = False
         self.starts = login_times if server_id == 'main' else {}
         self._names = {}
+        self._last_reason = None
 
     def poll(self, sender, *, now=None, interval=10):
-        snapshot = mc_api.player_snapshot(host=self.host)
+        snapshot, reason = mc_api.player_snapshot_detail(host=self.host)
         if snapshot is None:
             self.uncertain = True
-            print(f'[MC {self.server_id}] player snapshot unavailable/incomplete; no offline or reward inference')
+            reason = reason or 'unknown'
+            if reason != self._last_reason:
+                self._last_reason = reason
+                target = self.host or 'primary'
+                print(f'[MC {self.server_id}] player snapshot unavailable ({target}): {reason}'
+                      f' -> no offline or reward inference until it recovers')
             return
+        if self._last_reason is not None:
+            self._last_reason = None
+            print(f'[MC {self.server_id}] player snapshot recovered')
         self.accept(snapshot, sender, now=time.time() if now is None else now, interval=interval)
 
     def accept(self, snapshot, sender, *, now, interval=10):

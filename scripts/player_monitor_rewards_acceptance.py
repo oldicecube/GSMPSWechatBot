@@ -231,7 +231,7 @@ class RewardAcceptance(unittest.TestCase):
         primary = monitor.ServerMonitor('main')
         sender = Mock()
         event.accept(['Ice'], sender, now=self.now)
-        with patch.object(mc_api, 'player_snapshot', return_value=None):
+        with patch.object(mc_api, 'player_snapshot_detail', return_value=(None, 'synthetic failure')):
             event.poll(sender, now=self.now + 3600)
         sender.assert_not_called()
         primary.accept(['Ice'], sender, now=self.now + 3600)
