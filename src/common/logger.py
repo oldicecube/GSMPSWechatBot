@@ -6,9 +6,13 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional, Set, TextIO
 
 import asyncio
+import atexit
+import io
 import json
 import logging
+import os
 import queue
+import sys
 import threading
 import time
 
@@ -63,6 +67,129 @@ def get_file_handler():
         file_level = LOG_CONFIG.get("file_log_level", LOG_CONFIG.get("log_level", "INFO"))
         _file_handler.setLevel(getattr(logging, file_level.upper(), logging.INFO))
     return _file_handler
+
+
+class NonBlockingTextStream(io.TextIOBase):
+    """把 stdout/stderr 的写入转交后台线程，保证 print() 永不阻塞。
+
+    Windows 控制台一旦被选中（进入标记/快速编辑模式），或输出被重定向到无人
+    读取的管道，任何对 stdout/stderr 的写入都会无限期挂起。日志 handler 已经
+    改成队列，但代码里还有大量裸 ``print()``：一旦其中一个卡住，并且恰好发生在
+    持有日志 handler 锁的路径上（例如日志轮转清理），整个日志系统会死锁，
+    所有线程连带停摆。2026-11-19 用 py-spy 实测到 player-monitor 线程卡在
+    ``print()``、maibot-native-core 卡在 ``_cleanup_old_files`` 的 ``print()``。
+
+    这里给真实流套一层有界队列：写不进去就丢弃并计数，绝不阻塞调用方。
+    """
+
+    _QUEUE_MAXSIZE = 4096
+
+    def __init__(self, raw):
+        super().__init__()
+        self._raw = raw
+        self._queue: "queue.Queue" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._dropped = 0
+        self._writer = threading.Thread(
+            target=self._drain,
+            name="stdio-writer",
+            daemon=True,
+        )
+        self._writer.start()
+
+    def _drain(self):
+        while True:
+            chunk = self._queue.get()
+            if chunk is None:
+                return
+            try:
+                self._raw.write(chunk)
+                self._raw.flush()
+            except Exception:
+                # 屏幕/管道写失败不影响业务。
+                pass
+
+    def write(self, text):
+        if not text:
+            return 0
+        try:
+            self._queue.put_nowait(str(text))
+        except queue.Full:
+            self._dropped += 1
+        return len(text)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        # 真正的 flush 在后台线程里做，这里绝不阻塞。
+        return
+
+    def isatty(self):
+        try:
+            return bool(self._raw.isatty())
+        except Exception:
+            return False
+
+    def fileno(self):
+        return self._raw.fileno()
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    @property
+    def encoding(self):
+        return getattr(self._raw, "encoding", "utf-8")
+
+    @property
+    def errors(self):
+        return getattr(self._raw, "errors", "replace")
+
+    @property
+    def buffer(self):
+        return getattr(self._raw, "buffer", None)
+
+    @property
+    def dropped(self):
+        return self._dropped
+
+
+def install_non_blocking_stdio():
+    """把 sys.stdout / sys.stderr 换成非阻塞代理（幂等）。"""
+
+    if os.environ.get("MAIBOT_BLOCKING_STDIO"):
+        return False
+    changed = False
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or isinstance(stream, NonBlockingTextStream):
+            continue
+        try:
+            stream.fileno()
+        except Exception:
+            # pytest 捕获对象之类没有真实 fd，保持原样。
+            continue
+        wrapped = NonBlockingTextStream(stream)
+        atexit.register(_drain_on_exit, wrapped)
+        setattr(sys, name, wrapped)
+        changed = True
+    return changed
+
+
+def _drain_on_exit(stream: "NonBlockingTextStream", timeout: float = 1.0) -> None:
+    """退出前尽量把队列里的最后几行吐出来，但绝不无限等待。"""
+
+    try:
+        stream._queue.put_nowait(None)
+    except queue.Full:
+        pass
+    try:
+        stream._writer.join(timeout)
+    except Exception:
+        pass
 
 
 class NonBlockingStreamHandler(logging.StreamHandler):
@@ -231,12 +358,11 @@ class TimestampedFileHandler(logging.Handler):
             for old_file in log_files[self.backup_count :]:
                 try:
                     old_file.unlink()
-                    print(f"[日志清理] 删除旧文件: {old_file.name}")
-                except Exception as e:
-                    print(f"[日志清理] 删除失败 {old_file}: {e}")
+                except Exception:
+                    pass
 
-        except Exception as e:
-            print(f"[日志清理] 清理过程出错: {e}")
+        except Exception:
+            pass
 
     def emit(self, record):
         """发出日志记录"""
@@ -833,6 +959,9 @@ class ModuleColoredConsoleRenderer:
 
 # 配置标准logging以支持文件输出和压缩
 # 使用单例handler避免重复创建
+# print() 也必须非阻塞，否则日志轮转里的 print 会把整条日志链锁死。
+install_non_blocking_stdio()
+
 file_handler = get_file_handler()
 console_handler = get_console_handler()
 
