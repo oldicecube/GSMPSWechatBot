@@ -18,8 +18,9 @@ def node(kind, **inputs):
 
 
 def custom_node(kind, schema, **overrides):
+    hint = overrides.pop("_hint", "")
     if kind not in schema:
-        raise ValueError("ComfyUI 缺少节点 " + kind)
+        raise ValueError("ComfyUI 缺少节点 " + kind + ("。" + hint if hint else ""))
     required = schema[kind].get("input", {}).get("required", {})
     inputs = dict(overrides)
     for key, spec in required.items():
@@ -32,9 +33,9 @@ def custom_node(kind, schema, **overrides):
     return node(kind, **inputs)
 
 
-def require_model(schema, kind, field, name):
+def require_model(schema, kind, field, name, hint=""):
     info = schema.get(kind)
-    if not info: raise ValueError("ComfyUI 缺少节点 " + kind)
+    if not info: raise ValueError("ComfyUI 缺少节点 " + kind + ("。" + hint if hint else ""))
     spec = info.get("input",{}).get("required",{}).get(field) or info.get("input",{}).get("optional",{}).get(field)
     choices = None
     if spec and isinstance(spec[0],list):
@@ -42,7 +43,8 @@ def require_model(schema, kind, field, name):
     elif spec and spec[0] == "COMBO" and len(spec)>1:
         choices = spec[1].get("options")
     if choices is not None and name not in choices:
-        raise ValueError("模型列表中没有 " + name + "，请配置正确的文件名并刷新ComfyUI")
+        raise ValueError("模型列表中没有 " + name + "，请配置正确的文件名并刷新ComfyUI"
+                         + ("（" + hint + "）" if hint else ""))
 
 
 def build_graph(spec, prompt, config, schema, image_name=None, mask_name=None, size=None):
@@ -100,8 +102,8 @@ def build_graph(spec, prompt, config, schema, image_name=None, mask_name=None, s
         if len(artists)<2: raise ValueError("画师混合需在提示词中明确写出至少两位画师；不会自动添加画师")
         base=prompt["positive_prompt"]
         for artist in artists: base=base.replace("@"+artist,"")
-        graph["61"]=custom_node("AnimaArtistPack",schema,clip=["45",0],artist_chain=", ".join(artists),base_prompt=base)
-        graph["62"]=custom_node("AnimaArtistAdapterMixer",schema,model=["44",0],artist_pack=["61",0],strength=1.0,normalize_weights=True,alignment_mode="base_anchored",enabled=True,apply_to_uncond=False,uncond_strength=0.0)
+        graph["61"]=custom_node("AnimaArtistPack",schema,_hint=DEPENDENCIES["artist_mix"],clip=["45",0],artist_chain=", ".join(artists),base_prompt=base)
+        graph["62"]=custom_node("AnimaArtistAdapterMixer",schema,_hint=DEPENDENCIES["artist_mix"],model=["44",0],artist_pack=["61",0],strength=1.0,normalize_weights=True,alignment_mode="base_anchored",enabled=True,apply_to_uncond=False,uncond_strength=0.0)
         graph["19"]["inputs"].update(model=["62",0],positive=["62",1])
     if mode in {"resize","upscale"}:
         if not image_name: raise ValueError("此模式需要参考图")
@@ -109,7 +111,7 @@ def build_graph(spec, prompt, config, schema, image_name=None, mask_name=None, s
             graph["71"]=node("ImageScaleBy",image=["50",0],upscale_method="lanczos",scale_by=opts.get("scale",2.0))
         else:
             name=config.get("upscale_model","RealESRGAN_x4plus_anime_6B.pth")
-            require_model(schema,"UpscaleModelLoader","model_name",name)
+            require_model(schema,"UpscaleModelLoader","model_name",name,hint=DEPENDENCIES["upscale"])
             graph["72"]=node("UpscaleModelLoader",model_name=name)
             graph["73"]=node("ImageUpscaleWithModel",upscale_model=["72",0],image=["50",0])
             graph["71"]=node("ImageScale",image=["73",0],upscale_method="lanczos",width=round(width*opts.get("scale",2)),height=round(height*opts.get("scale",2)),crop="disabled")

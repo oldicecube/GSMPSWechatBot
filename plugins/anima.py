@@ -39,7 +39,13 @@ from anima.gpt_image import GPTImageClient, GPTImageError
 from utils.points_manager import get_points, try_spend_points
 
 COMMAND = "/anima"
-POINTS_COST = 8  # 成功送图或 LLM 明确拒绝收费，其他异常不收费
+POINTS_COST = 8  # 本地 ComfyUI 工作流：成功送图或 LLM 明确拒绝收费，其他异常不收费
+POINTS_COST_GI2 = 40  # gi2 走远端 GPT Image 付费网关，单独计价
+
+
+def _points_cost(spec):
+    """按模式返回本次应扣积分：gi2 系走远端付费网关，单价更高。"""
+    return POINTS_COST_GI2 if (spec is not None and spec.mode in GPT_IMAGE_MODES) else POINTS_COST
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
@@ -90,10 +96,11 @@ def execute_request(content, context, *, spec=None, reference=None, mask_png=Non
     nickname = context.get("user", "未知用户")
     group_name = context.get("group", "")
     
-    # 检查积分是否充足
+    # 检查积分是否充足（gi2 走远端付费网关，单价不同）
+    cost = _points_cost(spec)
     current_points = get_points(user_wxid)
-    if current_points < POINTS_COST:
-        return f"❌ 积分不足！生成一张图像需要消耗 {POINTS_COST} 积分，你当前有 {current_points:.1f} 积分。"
+    if current_points < cost:
+        return f"❌ 积分不足！生成一张图像需要消耗 {cost} 积分，你当前有 {current_points:.1f} 积分。"
     
     # 检查是否可以开始生成
     can_generate, msg = _anima_service.can_start_generate(user_wxid)
@@ -131,10 +138,10 @@ def execute_request(content, context, *, spec=None, reference=None, mask_png=Non
             delivered = isinstance(outcome, tuple) and outcome[0] is True
             if not delivered:
                 return '⚠️ 图片已生成，但未确认发送成功。本次未扣积分，请检查适配器；不会自动重发。'
-            charged, remaining_points = try_spend_points(user_wxid, POINTS_COST)
+            charged, remaining_points = try_spend_points(user_wxid, cost)
             if not charged:
                 return '✅ 图片已发送；生成期间余额发生变化，本次未扣积分。'
-            return f'✅ 生成完成（GPT Image {client.model}）\n💎 消耗积分: -{POINTS_COST} (剩余: {remaining_points:.1f})'
+            return f'✅ 生成完成（GPT Image {client.model}）\n💎 消耗积分: -{cost} (剩余: {remaining_points:.1f})'
 
         # 执行生成流程
         result = _anima_service.generate(user_prompt, spec=spec, reference=reference, mask_png=mask_png)
@@ -150,19 +157,19 @@ def execute_request(content, context, *, spec=None, reference=None, mask_png=Non
                 return '⚠️ 图片已生成，但未确认发送成功。本次未扣积分，请检查适配器；不会自动重发。'
             # Atomically settle once, after physical delivery; failures never
             # fall into an exception branch that performs a second debit.
-            charged, remaining_points = try_spend_points(user_wxid, POINTS_COST)
+            charged, remaining_points = try_spend_points(user_wxid, cost)
             if not charged:
                 return '✅ 图片已发送；生成期间余额发生变化，本次未扣积分。'
             
-            return f"✅ 生成完成，用时 {elapsed} 秒\n💎 消耗积分: -{POINTS_COST} (剩余: {remaining_points:.1f})"
+            return f"✅ 生成完成，用时 {elapsed} 秒\n💎 消耗积分: -{cost} (剩余: {remaining_points:.1f})"
         else:
             error = result.get("error", "未知错误")
             
             # 检查是否被拒绝
             if result.get("rejected") is True:
-                charged, remaining_points = try_spend_points(user_wxid, POINTS_COST)
+                charged, remaining_points = try_spend_points(user_wxid, cost)
                 if charged:
-                    return f"⛔ 生成请求被拒绝：{error}\n💎 消耗积分: -{POINTS_COST} (剩余: {remaining_points:.1f})"
+                    return f"⛔ 生成请求被拒绝：{error}\n💎 消耗积分: -{cost} (剩余: {remaining_points:.1f})"
                 return f"⛔ 生成请求被拒绝：{error}\n余额发生变化，本次未扣积分。"
             error_msg = f"❌ 生成失败：{error}"
             
@@ -223,8 +230,9 @@ def handle(content, context):
         error = binding_required(context)
         if error:
             return error
-        if get_points(canonical_user(context.get('wxid', 'unknown'))) < POINTS_COST:
-            return f'❌ 积分不足，需 {POINTS_COST} 积分。'
+        cost = _points_cost(spec)
+        if get_points(canonical_user(context.get('wxid', 'unknown'))) < cost:
+            return f'❌ 积分不足，需 {cost} 积分。'
         if spec.mode not in IMAGE_MODES:
             return execute_request(spec.prompt, context, spec=spec)
         if not context.get('sessionId') or not context.get('wxid'):
