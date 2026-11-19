@@ -101,9 +101,11 @@ def _launch_weflow_setup_wizard():
 def main():
     global _weflow, _dispatcher, _worker
 
-    # QQ 协议端独立于 bot 生命周期：NapCat 已停更，默认改由 NapukettoQQ 提供
-    # OneBot 11（见 depends-data/qq-adapter/launch.json）。replace_napcat 为真时
-    # 不再拉 NapCat，避免两套协议端抢同一个 QQ 账号。
+    # QQ 协议端独立于 bot 生命周期：默认由 NapCat 提供 OneBot 11（真实 QQ 客户端
+    # + 注入，头像/群成员/资料服务完整，收发均可用，见 depends-data/napcat/config
+    # /maibot-launch.json）。若 depends-data/qq-adapter/launch.json 仍以
+    # replace_napcat=true 启用，则改由备用协议端（NapukettoQQ）接管，此时不再拉
+    # NapCat，避免两套协议端抢同一个 QQ 账号。
     ensure_qq_adapter = None
     try:
         from core.qq_adapter_boot import ensure_qq_adapter, is_napcat_superseded

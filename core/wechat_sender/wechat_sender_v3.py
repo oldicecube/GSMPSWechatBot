@@ -126,8 +126,23 @@ class WeChatSenderV3(MessageSenderInterface):
             logger.error(f"查找个人微信进程失败: {e}")
             return False
 
+    @staticmethod
+    def _window_area(hwnd) -> int:
+        """窗口可视面积（用于在多个候选窗口中挑主窗口）。"""
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            width, height = right - left, bottom - top
+            return max(0, width) * max(0, height)
+        except Exception:
+            return 0
+
     def _find_wechat_windows(self) -> bool:
-        """查找个人微信窗口"""
+        """查找个人微信窗口
+
+        微信 4.x 主窗口类名是 Qt51514QWindowIcon，不再有 WeChatMainWndForPC。
+        仅靠「第一个有标题的窗口」容易选到提示气泡/悬浮窗，SetForegroundWindow 会
+        报 1400（句柄无效）。这里按「经典类名 > 已知主窗口标题 > 可视面积最大」排序。
+        """
         try:
             if not self.wechat_pid:
                 logger.error("请先查找个人微信进程")
@@ -144,22 +159,33 @@ class WeChatSenderV3(MessageSenderInterface):
                 logger.error("未找到个人微信窗口")
                 return False
 
-            # 查找主窗口（通常类名包含WeChatMainWndForPC）
+            # 1) 经典微信主窗口类名
             main_windows = [w for w in wechat_windows if 'WeChatMainWndForPC' in w['class']]
             if main_windows:
-                self.main_window_hwnd = main_windows[0]['hwnd']
-                logger.info(f"找到个人微信主窗口: {main_windows[0]['title']}")
-            else:
-                # 备选方案：选择第一个有标题的窗口
-                titled_windows = [w for w in wechat_windows if w['title'].strip()]
-                if titled_windows:
-                    self.main_window_hwnd = titled_windows[0]['hwnd']
-                    logger.info(f"使用备选个人微信窗口: {titled_windows[0]['title']}")
-                else:
-                    logger.error("无法确定个人微信主窗口")
-                    return False
+                chosen = max(main_windows, key=lambda w: self._window_area(w['hwnd']))
+                self.main_window_hwnd = chosen['hwnd']
+                logger.info(f"找到个人微信主窗口: {chosen['title']}")
+                return True
 
-            return self.main_window_hwnd is not None
+            # 2) 微信 4.x：标题为「微信 / WeChat」的 Qt 窗口
+            titled_windows = [w for w in wechat_windows if w['title'].strip()]
+            preferred = [w for w in titled_windows
+                         if w['title'].strip() in ('微信', 'WeChat', 'Weixin')]
+            if preferred:
+                chosen = max(preferred, key=lambda w: self._window_area(w['hwnd']))
+                self.main_window_hwnd = chosen['hwnd']
+                logger.info(f"找到个人微信主窗口(Qt): {chosen['title']} class={chosen['class']}")
+                return True
+
+            # 3) 备选：可视面积最大的有标题窗口
+            if titled_windows:
+                chosen = max(titled_windows, key=lambda w: self._window_area(w['hwnd']))
+                self.main_window_hwnd = chosen['hwnd']
+                logger.info(f"使用备选个人微信窗口: {chosen['title']} class={chosen['class']}")
+                return True
+
+            logger.error("无法确定个人微信主窗口")
+            return False
 
         except Exception as e:
             logger.error(f"查找个人微信窗口失败: {e}")
@@ -229,21 +255,61 @@ class WeChatSenderV3(MessageSenderInterface):
         )
         return False
 
-    def activate_application(self) -> bool:
-        """激活个人微信窗口（使用三层降级策略）"""
+    def _window_handle_alive(self) -> bool:
+        """句柄是否仍指向一个有效窗口（微信重启/窗口重建后旧句柄会失效）。"""
+        if self.dry_run:
+            return True
+        if not self.main_window_hwnd:
+            return False
         try:
-            # dry-run：拦截所有对微信窗口的真实操作
-            if self.dry_run:
-                logger.info("[dry-run] 拦截微信窗口激活，不执行任何真实窗口操作")
-                return True
+            return bool(win32gui.IsWindow(self.main_window_hwnd))
+        except Exception:
+            return False
 
-            if not self.main_window_hwnd:
-                logger.error("个人微信窗口句柄不存在")
+    def _refresh_windows(self) -> bool:
+        """重新发现微信进程与窗口（句柄失效、微信重启后的自愈入口）。"""
+        if self.dry_run:
+            return True
+        previous = self.main_window_hwnd
+        try:
+            self.main_window_hwnd = None
+            if not self.find_target_process() or not self._find_wechat_windows():
+                self.main_window_hwnd = previous
                 return False
+            logger.info(f"已重新发现个人微信窗口: hwnd={self.main_window_hwnd}")
+            return True
+        except Exception as e:
+            self.main_window_hwnd = previous
+            logger.warning(f"重新发现微信窗口失败: {e}")
+            return False
 
-            # 检查会话是否活动（远程桌面是否已断开）
-            if not self._check_session_active():
-                logger.error("远程桌面已断开，无法激活窗口。请重新连接远程桌面后再试。")
+    def activate_application(self) -> bool:
+        """激活个人微信窗口；句柄失效时自动重新发现窗口并重试一次。"""
+        if self.dry_run:
+            logger.info("[dry-run] 拦截微信窗口激活，不执行任何真实窗口操作")
+            return True
+
+        # 检查会话是否活动（远程桌面是否已断开）
+        if not self._check_session_active():
+            logger.error("远程桌面已断开，无法激活窗口。请重新连接远程桌面后再试。")
+            return False
+
+        if self._activate_once():
+            return True
+
+        # 句柄可能已失效（微信重启、窗口重建、explorer 重启）：重新发现后再试一次
+        logger.warning("个人微信窗口激活失败，尝试重新发现窗口后重试")
+        if self._refresh_windows() and self._activate_once():
+            return True
+
+        logger.error("微信窗口未获得前台焦点，停止发送快捷键")
+        return False
+
+    def _activate_once(self) -> bool:
+        """单次激活尝试（三层降级）；失败返回 False，不抛异常。"""
+        try:
+            if not self._window_handle_alive():
+                logger.warning(f"个人微信窗口句柄无效或不存在: hwnd={self.main_window_hwnd}")
                 return False
 
             # 检查窗口是否最小化，如果是则恢复
@@ -289,14 +355,12 @@ class WeChatSenderV3(MessageSenderInterface):
                     logger.info("个人微信窗口已激活 (ShowWindow + SetForegroundWindow)")
                     return True
             except Exception as e3:
-                logger.error(f"所有窗口激活方法均失败: {e3}")
-                return False
+                logger.warning(f"所有窗口激活方法均失败: {e3}")
 
-            logger.error("微信窗口未获得前台焦点，停止发送快捷键")
             return False
 
         except Exception as e:
-            logger.error(f"激活个人微信窗口失败: {e}")
+            logger.warning(f"激活个人微信窗口失败: {e}")
             return False
 
     def search_group(self, group_name: str) -> bool:
