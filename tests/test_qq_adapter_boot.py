@@ -711,3 +711,48 @@ def test_login_confirmed_rejects_log_success_without_qr(
     monkeypatch.setattr(qq_adapter_boot, '_port_in_use', lambda *a, **k: False)
 
     assert qq_adapter_boot._login_confirmed(tmp_path, uin, 13011, 13010) is False
+
+def test_napcat_running_probes_webui_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NapCat 在线判定只看 WebUI 端口，避免误判成备用端已在跑。"""
+
+    seen: list[int] = []
+
+    def _probe(port, host='127.0.0.1'):
+        seen.append(port)
+        return True
+
+    monkeypatch.setattr(qq_adapter_boot, '_port_in_use', _probe)
+    assert qq_adapter_boot._napcat_running() is True
+    assert seen == [qq_adapter_boot.NAPCAT_WEBUI_PORT]
+
+
+def test_spawn_adapter_skips_when_napcat_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NapCat 在跑时，备用协议端的任何一次拉起（含看门狗重试）都必须被拦下。"""
+
+    monkeypatch.setattr(qq_adapter_boot, '_napcat_running', lambda *a, **k: True)
+
+    def _boom(*args, **kwargs):  # pragma: no cover - 被调用即失败
+        raise AssertionError('NapCat 在线时不应拉起备用协议端')
+
+    monkeypatch.setattr(qq_adapter_boot.subprocess, 'Popen', _boom)
+    settings = {'workdir': str(tmp_path), 'command': 'pnpm start'}
+    assert qq_adapter_boot._spawn_adapter(tmp_path, settings) is None
+
+
+def test_ensure_qq_adapter_skips_when_napcat_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """即使 launch.json 仍是启用状态，NapCat 在线也不应重复登录同一账号。"""
+
+    _write_launch(tmp_path)
+    monkeypatch.delenv('MAIBOT_INTERCEPT_SEND', raising=False)
+    monkeypatch.setattr(qq_adapter_boot.os, 'name', 'nt')
+    monkeypatch.setattr(qq_adapter_boot, '_napcat_running', lambda *a, **k: True)
+
+    def _boom(*args, **kwargs):  # pragma: no cover - 被调用即失败
+        raise AssertionError('NapCat 在线时不应拉起备用协议端')
+
+    monkeypatch.setattr(qq_adapter_boot.subprocess, 'Popen', _boom)
+    assert qq_adapter_boot.ensure_qq_adapter(tmp_path) is False

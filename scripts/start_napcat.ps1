@@ -8,7 +8,7 @@ function Start-LoginWatch {
     if ($NoWatch -or $PlanOnly) { return }
     $watchPath = Join-Path $PSScriptRoot 'napcat_login_watch.py'
     $pythonPath = (Get-Command 'python.exe' -ErrorAction Stop).Source
-    Start-Process -FilePath $pythonPath -ArgumentList @('-X', 'utf8', ('"' + $watchPath + '"'), '--watch') -WorkingDirectory $taskRoot -WindowStyle Hidden
+    Start-Process -FilePath $pythonPath -ArgumentList @('-X', 'utf8', ('"' + $watchPath + '"'), '--qr-window') -WorkingDirectory $taskRoot -WindowStyle Hidden
     $lanConfig = Join-Path $napcatRoot 'config\lan-webui.json'
     if (Test-Path -LiteralPath $lanConfig) {
         $lanSettings = Get-Content -LiteralPath $lanConfig -Raw -Encoding UTF8 | ConvertFrom-Json

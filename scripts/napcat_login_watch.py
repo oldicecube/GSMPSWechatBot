@@ -76,11 +76,100 @@ def watch(client, *, seconds=600, interval=2, now=time.monotonic, sleep=time.sle
     return {'online':False,'qr_opened':shown,'error':last_error or 'LoginPending'}
 
 
+
+QR_IMAGE = ROOT / 'depends-data' / 'napcat' / 'cache' / 'qrcode.png'
+QR_WINDOW_SCRIPT = ROOT / 'scripts' / 'show_qq_qr.ps1'
+
+
+def _close_window(proc) -> None:
+    """关掉上一个二维码窗口（尽力而为）。"""
+
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+
+
+def _open_window(proc, image, uin, popen):
+    """新开一个二维码窗口，返回新的进程句柄。"""
+
+    _close_window(proc)
+    if not image.is_file():
+        return None
+    args = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            str(QR_WINDOW_SCRIPT), '-ImagePath', str(image), '-Scale', '4']
+    if uin:
+        args += ['-Uin', str(uin)]
+    try:
+        return popen(args, cwd=str(ROOT))
+    except Exception:
+        return None
+
+
+def qr_window_loop(client, *, seconds=86400, interval=3, now=time.monotonic,
+                   sleep=time.sleep, popen=None, image=None):
+    """常驻守护：未登录时弹二维码窗口，二维码刷新就换新窗口，登录成功即关窗。
+
+    对应需求「二维码过期自动刷新、自动关闭旧登录窗口弹出新窗口，登录失效时也要
+    重新弹窗」。窗口由 scripts/show_qq_qr.ps1 提供（独立 cmd 窗口）。
+    """
+
+    import subprocess
+    popen = popen or subprocess.Popen
+    image = image or QR_IMAGE
+    deadline = now() + seconds
+    last_stamp = None
+    proc = None
+    shown = 0
+    last_error = ''
+    while now() < deadline:
+        try:
+            state = client.status()
+            if state.get('isLogin'):
+                _close_window(proc)
+                client.remember()
+                return {'online': True, 'qr_windows': shown}
+            stamp = None
+            try:
+                stamp = image.stat().st_mtime_ns
+            except OSError:
+                stamp = None
+            if stamp is not None and stamp != last_stamp:
+                uin = ''
+                try:
+                    uin = str((client.call('QQLogin/GetQQLoginInfo') or {}).get('uin') or '')
+                except Exception:
+                    uin = ''
+                proc = _open_window(proc, image, uin, popen)
+                last_stamp = stamp
+                shown += 1
+        except Exception as exc:
+            last_error = type(exc).__name__
+            client.credential = ''
+        sleep(interval)
+    _close_window(proc)
+    return {'online': False, 'qr_windows': shown, 'error': last_error or 'LoginPending'}
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--watch',action='store_true')
+    parser.add_argument('--qr-window',action='store_true',dest='qr_window',
+                        help='常驻守护：自动弹出/刷新二维码窗口，登录成功后关闭')
     args=parser.parse_args()
     client=LoginClient()
+    if args.qr_window:
+        lock_path=ROOT/'depends-data/napcat/config/login-watch.lock'
+        with lock_path.open('a+b') as lock:
+            import msvcrt
+            try:
+                lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
+            except OSError:return 0
+            result=qr_window_loop(client)
+            (lock_path.parent/'login-watch-status.json').write_text(json.dumps(result)+'\n',encoding='utf8')
+        return 0
     if not args.watch:
         state=client.status()
         print(json.dumps({'online':bool(state.get('isLogin')),'phase':state.get('loginPhase'),

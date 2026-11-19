@@ -1,7 +1,11 @@
-"""Start the external QQ protocol backend (NapukettoQQ) alongside the bot.
+"""Start the optional backup QQ protocol backend (NapukettoQQ) alongside the bot.
 
-历史背景：NapCat / SnowLuma 停更后，QQ 侧改由独立的 NapukettoQQ 进程提供
-OneBot 11。它和 NapCat 一样不随 bot 生命周期结束，但需要在 bot 启动时自动拉起：
+当前默认协议端是 NapCat（见 ``core/napcat_boot.py``）：它加载真实 QQ 客户端，
+头像/资料/群成员服务完整，收发都可用。NapukettoQQ 只是备用后端，并且与 NapCat
+互斥——两套协议端登录同一 QQ 账号会互相踢下线（表现为突然弹二维码重新登录、
+之后发不出消息）。因此只要 NapCat 的 WebUI 端口还在监听，这里就不拉起备用端。
+
+备用端自身不随 bot 生命周期结束，需要在 bot 启动时自动拉起：
 
 1. 进程：``pnpm start``（PowerShell 执行策略禁 ``pnpm.ps1``，必须走 ``cmd``）。
 2. 登录：首次/掉线时需要扫码。NapukettoQQ 会把二维码写到
@@ -31,6 +35,8 @@ CONFIG_RELATIVE = Path('depends-data/qq-adapter/launch.json')
 STATE_RELATIVE = Path('depends-data/qq-adapter')
 DEFAULT_QR_TIMEOUT_SEC = 900
 DEFAULT_WATCH_INTERVAL_SEC = 3.0
+# NapCat WebUI 端口：监听即说明 NapCat 进程在跑，此时不得再拉起备用协议端。
+NAPCAT_WEBUI_PORT = 6099
 _LOG_PREFIX = '[QQ ADAPTER]'
 QR_WINDOW_SCRIPT = Path('scripts/show_qq_qr.ps1')
 # root -> 正在显示的二维码窗口进程（cmd -> powershell -> WinForms）
@@ -92,6 +98,16 @@ def _port_in_use(port: Optional[int], host: str = '127.0.0.1', timeout: float = 
             return True
     except (OSError, ValueError):
         return False
+
+
+def _napcat_running(host: str = '127.0.0.1') -> bool:
+    """NapCat 是否在运行（以 WebUI 端口是否监听为准）。
+
+    两套协议端登录同一账号会互踢：NapCat 被踢后会回到等待扫码状态，
+    微信/QQ 消息随之全部发不出去。这里用端口探测做互斥判定。
+    """
+
+    return _port_in_use(NAPCAT_WEBUI_PORT, host)
 
 
 def _pid_alive(pid: Optional[int]) -> bool:
@@ -292,6 +308,9 @@ def _spawn_adapter(root: Path, settings: Dict[str, Any]) -> Optional[int]:
     workdir = Path(str(settings.get('workdir') or '')).expanduser()
     if not workdir.is_dir():
         _print(f'协议端目录不存在: {workdir}')
+        return None
+    if _napcat_running():
+        _print('NapCat 正在运行（6099 已监听），跳过备用协议端，避免两套协议端互踢 QQ 账号')
         return None
     state = _state_dir(root)
     log_path = state / 'adapter.log'
@@ -579,6 +598,10 @@ def ensure_qq_adapter(root: Path) -> bool:
         _print(f'协议端已在运行（WS {ws_port} / HTTP {http_port} 已监听），跳过启动')
         _write_state(root, dict(state='running', uin=uin, ws_port=ws_port))
         _start_watcher(root, settings)
+        return False
+
+    if _napcat_running():
+        _print('NapCat 正在运行（6099 已监听），备用协议端不启动')
         return False
 
     pid = _read_pid(root)
