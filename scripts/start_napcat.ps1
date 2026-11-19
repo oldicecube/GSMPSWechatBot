@@ -1,4 +1,4 @@
-param([ValidatePattern('^$|^[0-9]{5,12}$')][string]$Account = '', [switch]$PlanOnly,
+﻿param([ValidatePattern('^$|^[0-9]{5,12}$')][string]$Account = '', [switch]$PlanOnly,
       [switch]$IfConfigured, [switch]$Background, [switch]$NoWatch)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -8,7 +8,7 @@ function Start-LoginWatch {
     if ($NoWatch -or $PlanOnly) { return }
     $watchPath = Join-Path $PSScriptRoot 'napcat_login_watch.py'
     $pythonPath = (Get-Command 'python.exe' -ErrorAction Stop).Source
-    Start-Process -FilePath $pythonPath -ArgumentList @('-X', 'utf8', ('"' + $watchPath + '"'), '--qr-window') -WorkingDirectory $taskRoot -WindowStyle Hidden
+    Start-Process -FilePath $pythonPath -ArgumentList @('-X', 'utf8', ('"' + $watchPath + '"'), '--guard') -WorkingDirectory $taskRoot -WindowStyle Hidden
     $lanConfig = Join-Path $napcatRoot 'config\lan-webui.json'
     if (Test-Path -LiteralPath $lanConfig) {
         $lanSettings = Get-Content -LiteralPath $lanConfig -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -36,6 +36,23 @@ $qqPath = Join-Path $napcatRoot 'qq-client\Files\QQ.exe'
 if (-not (Test-Path -LiteralPath $qqPath)) {
     throw 'Prepared QQ NT client is missing from depends-data\napcat\qq-client\Files\QQ.exe.'
 }
+if (-not $PlanOnly) {
+    $liveQq = Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine.Contains($qqPath) }
+    if ($liveQq) {
+        Write-Host 'NapCat QQ client is already running. Refusing to start a second instance.'
+        Start-LoginWatch
+        exit 0
+    }
+}
+$launcherMutex = $null
+if (-not $PlanOnly) {
+    $launcherMutex = New-Object System.Threading.Mutex($false, 'Global\GSMPSWechatBotNapCatLauncher')
+    if (-not $launcherMutex.WaitOne(0)) {
+        Write-Host 'Another NapCat launcher is already active. Refusing to start a second client.'
+        exit 0
+    }
+}
 $env:NAPCAT_PATCH_PACKAGE = Join-Path $napcatRoot 'qqnt.json'
 $env:NAPCAT_LOAD_PATH = Join-Path $napcatRoot 'loadNapCat.js'
 $env:NAPCAT_INJECT_PATH = Join-Path $napcatRoot 'NapCatWinBootHook.dll'
@@ -61,4 +78,4 @@ if ($Background) {
 Write-Host 'Starting NapCat for interactive QQ login. MaiBot and WeChat processes are unchanged.'
 Start-LoginWatch
 Push-Location -LiteralPath $napcatRoot
-try { & $launcherPath $qqPath $env:NAPCAT_INJECT_PATH @loginArgs } finally { Pop-Location }
+try { & $launcherPath $qqPath $env:NAPCAT_INJECT_PATH @loginArgs } finally { Pop-Location; if ($launcherMutex) { try { $launcherMutex.ReleaseMutex() } catch {}; $launcherMutex.Dispose() } }

@@ -109,58 +109,155 @@ def _open_window(proc, image, uin, popen):
         return None
 
 
-def qr_window_loop(client, *, seconds=86400, interval=3, now=time.monotonic,
-                   sleep=time.sleep, popen=None, image=None):
-    """常驻守护：未登录时弹二维码窗口，二维码刷新就换新窗口，登录成功即关窗。
+def _append_event(event, *, root=ROOT):
+    """记录登录状态变化，便于定位“掉线”原因；绝不写入凭据。"""
 
-    对应需求「二维码过期自动刷新、自动关闭旧登录窗口弹出新窗口，登录失效时也要
-    重新弹窗」。窗口由 scripts/show_qq_qr.ps1 提供（独立 cmd 窗口）。
-    """
+    path = root / 'depends-data/napcat/config/login-events.jsonl'
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf8') as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + '\n')
+    except OSError:
+        pass
+
+
+CONSOLE_LOG_RELATIVE = Path('depends-data/napcat/config/napcat-console.log')
+
+
+def _console_tail(root=ROOT, limit=262144):
+    path = root / CONSOLE_LOG_RELATIVE
+    try:
+        with path.open('rb') as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            return handle.read().decode('utf8', 'replace')
+    except OSError:
+        return ''
+
+
+def _drop_reason(tail=''):
+    for line in reversed([item.strip() for item in tail.splitlines() if item.strip()][-600:]):
+        lowered = line.lower()
+        if ('登录态已失效' in line or '被踢' in line or '另一设备' in line
+                or 'kickedoffline' in lowered or 'kicked' in lowered):
+            return line[-240:]
+    return ''
+
+
+def _webui_alive(host='127.0.0.1', port=6099, timeout=1.0):
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _relaunch_napcat(*, root=ROOT, popen=None):
+    """后台重启 NapCat/QQ 客户端，并把控制台日志保留下来供下次掉线定位。"""
 
     import subprocess
     popen = popen or subprocess.Popen
-    image = image or QR_IMAGE
-    deadline = now() + seconds
-    last_stamp = None
+    log = root / CONSOLE_LOG_RELATIVE
+    log.parent.mkdir(parents=True, exist_ok=True)
+    inner = ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'
+             + str(root / 'scripts/start_napcat.ps1') + '" -NoWatch'
+             + ' >> "' + str(log) + '" 2>&1')
+    return popen(['cmd.exe', '/c', inner], cwd=str(root), stdin=subprocess.DEVNULL,
+                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+
+def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
+                   sleep=time.sleep, popen=None, image=None, root=ROOT, port=6099):
+    """常驻守护：登录后继续监控；掉线时重弹二维码，客户端退出时自动拉起。"""
+
+    import subprocess
+    popen = popen or subprocess.Popen
+    image = image or root / 'depends-data/napcat/cache/qrcode.png'
+    status_path = root / 'depends-data/napcat/config/login-watch-status.json'
+    deadline = None if not seconds else now() + seconds
     proc = None
+    last_stamp = None
     shown = 0
+    logged_in = None
+    offline_since = None
+    last_relaunch = None
     last_error = ''
-    while now() < deadline:
+    while deadline is None or now() < deadline:
+        online = False
+        state = {}
         try:
             state = client.status()
-            if state.get('isLogin'):
+            online = bool(state.get('isLogin'))
+        except Exception as exc:
+            last_error = type(exc).__name__
+            client.credential = ''
+        if online != logged_in:
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+            if online:
                 _close_window(proc)
+                proc = None
                 client.remember()
-                return {'online': True, 'qr_windows': shown}
+                offline_since = None
+                _append_event({'at': stamp, 'online': True}, root=root)
+            else:
+                offline_since = now()
+                _append_event({'at': stamp, 'online': False,
+                               'phase': state.get('loginPhase') if state else 'webui_unavailable',
+                               'error': state.get('loginError') if state else last_error,
+                               'reason': _drop_reason(_console_tail(root))}, root=root)
+            logged_in = online
+        if not online:
+            if offline_since is None:
+                offline_since = now()
+            if (not _webui_alive(port=port) and now() - offline_since >= 20
+                    and (last_relaunch is None or now() - last_relaunch >= 300)):
+                try:
+                    _relaunch_napcat(root=root, popen=popen)
+                    last_relaunch = now()
+                    last_stamp = None
+                    _append_event({'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+                                   'event': 'relaunch'}, root=root)
+                except Exception as exc:
+                    last_error = type(exc).__name__
             stamp = None
             try:
                 stamp = image.stat().st_mtime_ns
             except OSError:
                 stamp = None
-            if stamp is not None and stamp != last_stamp:
+            window_alive = proc is not None and getattr(proc, 'poll', lambda: 1)() is None
+            if stamp is not None and (stamp != last_stamp or not window_alive):
                 uin = ''
                 try:
                     uin = str((client.call('QQLogin/GetQQLoginInfo') or {}).get('uin') or '')
                 except Exception:
                     uin = ''
-                proc = _open_window(proc, image, uin, popen)
+                proc = _open_window(proc if window_alive else None, image, uin, popen)
                 last_stamp = stamp
                 shown += 1
-        except Exception as exc:
-            last_error = type(exc).__name__
-            client.credential = ''
+        try:
+            status_path.write_text(json.dumps({'online': online, 'qr_windows': shown,
+                                               'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+                                               'error': last_error}, ensure_ascii=False) + '\n',
+                                   encoding='utf8')
+        except OSError:
+            pass
         sleep(interval)
     _close_window(proc)
-    return {'online': False, 'qr_windows': shown, 'error': last_error or 'LoginPending'}
+    return {'online': bool(logged_in), 'qr_windows': shown, 'error': last_error}
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--watch',action='store_true')
     parser.add_argument('--qr-window',action='store_true',dest='qr_window',
-                        help='常驻守护：自动弹出/刷新二维码窗口，登录成功后关闭')
+                        help='常驻守护：掉线自动弹二维码、客户端退出自动拉起')
+    parser.add_argument('--guard',action='store_true',dest='guard',
+                        help='同 --qr-window（供启动脚本使用）')
     args=parser.parse_args()
     client=LoginClient()
-    if args.qr_window:
+    if args.qr_window or args.guard:
         lock_path=ROOT/'depends-data/napcat/config/login-watch.lock'
         with lock_path.open('a+b') as lock:
             import msvcrt
