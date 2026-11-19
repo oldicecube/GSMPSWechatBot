@@ -80,6 +80,38 @@ class Guard(unittest.TestCase):
         self.assertEqual(len(relaunched), 1)
         self.assertIn('/c', relaunched[0])
 
+    def test_latest_login_url_uses_newest_console_line(self):
+        console = self.root / 'depends-data/napcat/config/napcat-console.log'
+        console.write_text(
+            '二维码解码URL: https://txz.qq.com/p?k=OLD&f=1600001604\n'
+            '二维码解码URL: https://txz.qq.com/p?k=NEW*2&f=1600001604\n', encoding='utf8')
+        self.assertEqual(guard._latest_login_url(self.root),
+                         'https://txz.qq.com/p?k=NEW*2&f=1600001604')
+
+    def test_guard_reopens_window_when_login_url_changes(self):
+        self.client.status.return_value = {'isLogin': False, 'loginPhase': 'waiting_qrcode'}
+        self.client.call.return_value = {}
+        urls = iter(['u1', 'u1', 'u2', 'u2'])
+        opened = []
+
+        def _render(url, target):
+            target.write_bytes(url.encode())
+            return target
+
+        def _open(proc, image, uin, popen):
+            opened.append(image.read_bytes())
+            return _Proc()
+
+        with patch.object(guard, '_latest_login_url', side_effect=lambda root: next(urls)), \
+             patch.object(guard, '_render_login_qr', side_effect=_render), \
+             patch.object(guard, '_open_window', side_effect=_open), \
+             patch.object(guard, '_close_window'), \
+             patch.object(guard, '_webui_alive', return_value=True):
+            guard.qr_window_loop(self.client, seconds=12, interval=3, now=self._now,
+                                 sleep=self._sleep, popen=lambda *a, **k: _Proc(),
+                                 root=self.root, port=6099)
+        self.assertEqual(opened, [b'u1', b'u2'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

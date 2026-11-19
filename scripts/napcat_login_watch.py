@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import time
 import urllib.parse
@@ -145,6 +146,40 @@ def _drop_reason(tail=''):
     return ''
 
 
+def _latest_login_url(root=ROOT):
+    """从 NapCat 控制台日志里取最新二维码链接，避免显示过期二维码。"""
+
+    marker = 'https://txz.qq.com/p?k='
+    allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/?=&%-._~*+!$,;@#[]')
+    latest = ''
+    for line in _console_tail(root).splitlines():
+        index = line.find(marker)
+        if index < 0:
+            continue
+        candidate = line[index:]
+        end = len(candidate)
+        for position, char in enumerate(candidate):
+            if char not in allowed:
+                end = position
+                break
+        latest = candidate[:end].strip() or latest
+    return latest
+
+
+def _render_login_qr(url, target):
+    """把最新登录链接重新编码成二维码图片，返回图片路径。"""
+
+    import qrcode
+    if target.is_file() and target.stat().st_size > 0:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    code = qrcode.QRCode(border=2, box_size=10)
+    code.add_data(url)
+    code.make(fit=True)
+    code.make_image(fill_color='black', back_color='white').save(target)
+    return target
+
+
 def _webui_alive(host='127.0.0.1', port=6099, timeout=1.0):
     import socket
     try:
@@ -184,7 +219,10 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
     offline_since = None
     last_relaunch = None
     last_error = ''
+    debug = bool(os.environ.get('NAPCAT_GUARD_DEBUG'))
     while deadline is None or now() < deadline:
+        if debug:
+            print('guard loop start', time.strftime('%H:%M:%S'), flush=True)
         online = False
         state = {}
         try:
@@ -222,20 +260,44 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
                 except Exception as exc:
                     last_error = type(exc).__name__
             stamp = None
-            try:
-                stamp = image.stat().st_mtime_ns
-            except OSError:
-                stamp = None
+            display_image = image
+            login_url = _latest_login_url(root)
+            if login_url:
+                digest = hashlib.sha1(login_url.encode('utf8')).hexdigest()
+                try:
+                    display_image = _render_login_qr(
+                        login_url, root / ('depends-data/napcat/cache/qrcode-guard-'
+                                           + digest[:12] + '.png'))
+                    stamp = digest
+                except Exception:
+                    stamp = None
+            if stamp is None:
+                try:
+                    stamp = hashlib.sha1(image.read_bytes()).hexdigest()
+                except OSError:
+                    stamp = None
             window_alive = proc is not None and getattr(proc, 'poll', lambda: 1)() is None
+            if debug:
+                print('qr state', (stamp or '')[:8], (last_stamp or '')[:8], window_alive,
+                      hashlib.sha1(login_url.encode('utf8')).hexdigest()[:8],
+                      login_url.split('k=')[-1][:10], flush=True)
             if stamp is not None and (stamp != last_stamp or not window_alive):
                 uin = ''
                 try:
                     uin = str((client.call('QQLogin/GetQQLoginInfo') or {}).get('uin') or '')
                 except Exception:
                     uin = ''
-                proc = _open_window(proc if window_alive else None, image, uin, popen)
+                proc = _open_window(proc if window_alive else None, display_image, uin, popen)
                 last_stamp = stamp
                 shown += 1
+                try:
+                    cache_dir = root / 'depends-data/napcat/cache'
+                    stale = sorted(cache_dir.glob('qrcode-guard-*.png'),
+                                   key=lambda item: item.stat().st_mtime, reverse=True)[6:]
+                    for old_image in stale:
+                        old_image.unlink()
+                except OSError:
+                    pass
         try:
             status_path.write_text(json.dumps({'online': online, 'qr_windows': shown,
                                                'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
@@ -243,6 +305,8 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
                                    encoding='utf8')
         except OSError:
             pass
+        if debug:
+            print('guard loop end', online, shown, last_error, flush=True)
         sleep(interval)
     _close_window(proc)
     return {'online': bool(logged_in), 'qr_windows': shown, 'error': last_error}
