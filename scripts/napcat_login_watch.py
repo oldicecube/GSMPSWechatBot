@@ -301,6 +301,7 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
         try:
             state = client.status()
             online = bool(state.get('isLogin'))
+            last_error = ''
         except Exception as exc:
             last_error = type(exc).__name__
             client.credential = ''
