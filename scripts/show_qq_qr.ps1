@@ -24,15 +24,20 @@ if (-not (Test-Path -LiteralPath $ImagePath)) {
 }
 
 $img = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $ImagePath))
-$w = [int]($img.Width * $Scale)
-$h = [int]($img.Height * $Scale)
+$working = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$maxSide = [Math]::Min(420, [Math]::Max(240, $working.Height - 160))
+$factor = [Math]::Min([double]$Scale, [double]$maxSide / [Math]::Max($img.Width, $img.Height))
+$factor = [Math]::Max($factor, 0.5)
+$w = [int]($img.Width * $factor)
+$h = [int]($img.Height * $factor)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = if ($Uin) { "QQ login - $Uin" } else { "QQ login" }
 $form.StartPosition = 'CenterScreen'
-$form.TopMost = $true
+$form.TopMost = $false
 $form.FormBorderStyle = 'FixedSingle'
 $form.MaximizeBox = $false
+$form.ShowInTaskbar = $true
 $form.MinimizeBox = $false
 $form.BackColor = [System.Drawing.Color]::White
 $form.ClientSize = New-Object System.Drawing.Size(($w + 40), ($h + 96))
