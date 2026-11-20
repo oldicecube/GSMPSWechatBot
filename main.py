@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import sys
@@ -29,6 +30,24 @@ sys.path.append(BASE_DIR)
 _weflow: WeFlowCore | None = None
 _dispatcher: Dispatcher | None = None
 _worker: Worker | None = None
+_qq_adapter_stopped = False
+
+
+def _stop_qq_adapter():
+    """Close the QQ adapter processes launched together with this bot."""
+
+    global _qq_adapter_stopped
+    if _qq_adapter_stopped:
+        return
+    _qq_adapter_stopped = True
+    try:
+        from core.napcat_boot import stop_napcat
+        stop_napcat(BASE_DIR)
+    except Exception as exc:
+        print('[QQ SHUTDOWN]', type(exc).__name__, flush=True)
+
+
+atexit.register(_stop_qq_adapter)
 
 
 def _request_process_restart():
@@ -54,6 +73,9 @@ def _request_process_restart():
                 _weflow.stop()
         except Exception:
             pass
+        _stop_qq_adapter()
+        global _qq_adapter_stopped
+        _qq_adapter_stopped = False
         os.execv(sys.executable, [sys.executable, *sys.argv])
 
     threading.Thread(target=restart, name="webui-requested-restart", daemon=True).start()
@@ -83,6 +105,7 @@ def graceful_shutdown(signum, frame):
             _weflow.stop()
         except Exception:
             pass
+    _stop_qq_adapter()
     sys.exit(0)
 
 
@@ -101,9 +124,9 @@ def _launch_weflow_setup_wizard():
 def main():
     global _weflow, _dispatcher, _worker
 
-    # QQ 协议端独立于 bot 生命周期：默认由 NapCat 提供 OneBot 11（真实 QQ 客户端
+    # QQ 协议端随 bot 生命周期：默认由 NapCat 提供 OneBot 11（真实 QQ 客户端
     # + 注入，头像/群成员/资料服务完整，收发均可用，见 depends-data/napcat/config
-    # /maibot-launch.json）。若 depends-data/qq-adapter/launch.json 仍以
+    # /maibot-launch.json）。主进程退出时由 atexit/信号处理和父进程看门狗关闭。若 depends-data/qq-adapter/launch.json 仍以
     # replace_napcat=true 启用，则改由备用协议端（NapukettoQQ）接管，此时不再拉
     # NapCat，避免两套协议端抢同一个 QQ 账号。
     ensure_qq_adapter = None

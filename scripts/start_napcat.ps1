@@ -1,10 +1,20 @@
 ﻿param([ValidatePattern('^$|^[0-9]{5,12}$')][string]$Account = '', [switch]$PlanOnly,
-      [switch]$IfConfigured, [switch]$Background, [switch]$NoWatch)
+      [switch]$IfConfigured, [switch]$Background, [switch]$NoWatch, [int]$ParentPid = 0)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $napcatRoot = Join-Path $taskRoot 'depends-data\napcat'
 $launchConfig = Join-Path $napcatRoot 'config\maibot-launch.json'
+function Start-ParentWatchdog {
+    if ($PlanOnly -or $ParentPid -le 0) { return }
+    $watchPath = Join-Path $PSScriptRoot 'napcat_parent_watch.ps1'
+    if (-not (Test-Path -LiteralPath $watchPath)) { return }
+    $existing = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($watchPath) -and $_.CommandLine.Contains("-ParentPid $ParentPid") }
+    if ($existing) { return }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $watchPath + '"'), '-ParentPid', $ParentPid, '-Root', ('"' + $taskRoot + '"')) -WorkingDirectory $taskRoot -WindowStyle Hidden
+}
 function Start-LoginWatch {
+    Start-ParentWatchdog
     if ($NoWatch -or $PlanOnly) { return }
     $watchPath = Join-Path $PSScriptRoot 'napcat_login_watch.py'
     $pythonPath = (Get-Command 'python.exe' -ErrorAction Stop).Source
@@ -63,6 +73,7 @@ if ($PlanOnly) {
 if ($Background) {
     $helperArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-NoWatch')
     if ($Account) { $helperArgs += @('-Account', $Account) }
+    if ($ParentPid -gt 0) { $helperArgs += @('-ParentPid', $ParentPid) }
     Start-Process -FilePath 'powershell.exe' -ArgumentList $helperArgs -WorkingDirectory $napcatRoot -WindowStyle Hidden
     Start-LoginWatch
     exit 0

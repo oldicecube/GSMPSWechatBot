@@ -92,7 +92,9 @@ class Recovery(unittest.TestCase):
             self.assertTrue(ensure_napcat(self.root))
         args,kwargs=spawn.call_args
         self.assertIn(str(self.root/'scripts/start_napcat.ps1'),args[0])
-        self.assertEqual(args[0][-2:],['-IfConfigured','-Background'])
+        self.assertIn('-IfConfigured',args[0]);self.assertIn('-Background',args[0])
+        parent_index=args[0].index('-ParentPid')
+        self.assertTrue(args[0][parent_index+1].isdigit())
         self.assertEqual(kwargs['creationflags'],subprocess.CREATE_NO_WINDOW)
         self.assertEqual(kwargs['cwd'],str(self.root))
     def test_disabled_boot_leaves_separately_managed_client_alone(self):
