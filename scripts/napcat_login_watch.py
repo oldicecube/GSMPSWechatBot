@@ -199,8 +199,80 @@ def _relaunch_napcat(*, root=ROOT, popen=None):
     inner = ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'
              + str(root / 'scripts/start_napcat.ps1') + '" -NoWatch'
              + ' >> "' + str(log) + '" 2>&1')
-    return popen(['cmd.exe', '/c', inner], cwd=str(root), stdin=subprocess.DEVNULL,
+    return popen('cmd.exe /c ' + inner, cwd=str(root), stdin=subprocess.DEVNULL,
                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+
+def _terminate_qq_client(root=ROOT):
+    """结束本仓库内由 NapCat 注入的 QQ 主进程，用于重新生成登录二维码。"""
+
+    import subprocess
+    qq_path = str(root / 'depends-data/napcat/qq-client/Files/QQ.exe')
+    napcat_root = str(root / 'depends-data/napcat')
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='QQ.exe'\" | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and "
+        "$_.CommandLine.Contains('" + qq_path + "') } | "
+        "ForEach-Object { taskkill /PID $_.ProcessId /T /F | Out-Null }; "
+        "Get-CimInstance Win32_Process -Filter \"Name='NapCatWinBootMain.exe'\" | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine.Contains('" + napcat_root + "') } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                        '-Command', script], cwd=str(root), stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=20, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except Exception:
+        pass
+
+
+def _restart_client_for_qr(root, previous_url='', *, popen=None, wait=40.0,
+                           now=time.monotonic, sleep=time.sleep):
+    """重启 QQ 客户端以强制生成新的登录二维码，返回新的登录链接。"""
+
+    for _attempt in range(2):
+        _terminate_qq_client(root)
+        sleep(6)
+        try:
+            _relaunch_napcat(root=root, popen=popen)
+        except Exception:
+            pass
+        ready_deadline = now() + 25
+        while now() < ready_deadline:
+            sleep(1)
+            if _webui_alive():
+                break
+        else:
+            continue
+        deadline = now() + wait
+        while now() < deadline:
+            sleep(1)
+            candidate = _latest_login_url(root)
+            if candidate and candidate != previous_url:
+                return candidate
+        candidate = _latest_login_url(root)
+        if candidate and candidate != previous_url:
+            return candidate
+        return ''
+    return ''
+
+
+def _refresh_login_qr(client, root, previous_url='', *, wait=4.0, interval=0.5,
+                      now=time.monotonic, sleep=time.sleep):
+    """重新打开二维码窗口前，主动让 NapCat 生成一张新的登录码。"""
+
+    try:
+        client.call('QQLogin/RefreshQRcode')
+    except Exception:
+        return ''
+    deadline = now() + wait
+    while now() < deadline:
+        sleep(interval)
+        candidate = _latest_login_url(root)
+        if candidate and candidate != previous_url:
+            return candidate
+    return ''
 
 
 def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
@@ -215,6 +287,7 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
     proc = None
     last_stamp = None
     shown = 0
+    opened_once = False
     logged_in = None
     offline_since = None
     last_relaunch = None
@@ -259,9 +332,18 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
                                    'event': 'relaunch'}, root=root)
                 except Exception as exc:
                     last_error = type(exc).__name__
+            login_url = _latest_login_url(root)
+            window_alive = proc is not None and getattr(proc, 'poll', lambda: 1)() is None
+            if not window_alive:
+                if opened_once:
+                    refreshed = _restart_client_for_qr(root, login_url, popen=popen,
+                                                       now=now, sleep=sleep)
+                else:
+                    refreshed = _refresh_login_qr(client, root, login_url, now=now, sleep=sleep)
+                if refreshed:
+                    login_url = refreshed
             stamp = None
             display_image = image
-            login_url = _latest_login_url(root)
             if login_url:
                 digest = hashlib.sha1(login_url.encode('utf8')).hexdigest()
                 try:
@@ -276,7 +358,6 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
                     stamp = hashlib.sha1(image.read_bytes()).hexdigest()
                 except OSError:
                     stamp = None
-            window_alive = proc is not None and getattr(proc, 'poll', lambda: 1)() is None
             if debug:
                 print('qr state', (stamp or '')[:8], (last_stamp or '')[:8], window_alive,
                       hashlib.sha1(login_url.encode('utf8')).hexdigest()[:8],
@@ -290,6 +371,8 @@ def qr_window_loop(client, *, seconds=0, interval=3, now=time.monotonic,
                 proc = _open_window(proc if window_alive else None, display_image, uin, popen)
                 last_stamp = stamp
                 shown += 1
+                if proc is not None:
+                    opened_once = True
                 try:
                     cache_dir = root / 'depends-data/napcat/cache'
                     stale = sorted(cache_dir.glob('qrcode-guard-*.png'),

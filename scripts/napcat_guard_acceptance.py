@@ -103,6 +103,7 @@ class Guard(unittest.TestCase):
             return _Proc()
 
         with patch.object(guard, '_latest_login_url', side_effect=lambda root: next(urls)), \
+             patch.object(guard, '_refresh_login_qr', return_value=''), \
              patch.object(guard, '_render_login_qr', side_effect=_render), \
              patch.object(guard, '_open_window', side_effect=_open), \
              patch.object(guard, '_close_window'), \
@@ -111,6 +112,89 @@ class Guard(unittest.TestCase):
                                  sleep=self._sleep, popen=lambda *a, **k: _Proc(),
                                  root=self.root, port=6099)
         self.assertEqual(opened, [b'u1', b'u2'])
+
+    def test_opening_window_requests_a_fresh_qr(self):
+        self.client.status.return_value = {'isLogin': False, 'loginPhase': 'waiting_qrcode'}
+        self.client.call.return_value = {}
+        opened = []
+
+        def _render(url, target):
+            target.write_bytes(url.encode())
+            return target
+
+        def _open(proc, image, uin, popen):
+            opened.append(image.read_bytes())
+            return _Proc()
+
+        values = iter(['old', 'fresh', 'fresh', 'fresh'])
+        with patch.object(guard, '_latest_login_url', side_effect=lambda root: next(values, 'fresh')), \
+             patch.object(guard, '_refresh_login_qr', return_value='fresh'), \
+             patch.object(guard, '_render_login_qr', side_effect=_render), \
+             patch.object(guard, '_open_window', side_effect=_open), \
+             patch.object(guard, '_close_window'), \
+             patch.object(guard, '_webui_alive', return_value=True):
+            guard.qr_window_loop(self.client, seconds=6, interval=3, now=self._now,
+                                 sleep=self._sleep, popen=lambda *a, **k: _Proc(),
+                                 root=self.root, port=6099)
+        self.assertEqual(opened, [b'fresh'])
+
+    def test_refresh_helper_calls_napcat_and_waits_for_new_url(self):
+        urls = iter(['old', 'old', 'fresh'])
+
+        def _call(path, payload=None):
+            return {}
+
+        self.client.call.side_effect = _call
+        with patch.object(guard, '_latest_login_url', side_effect=lambda root: next(urls)):
+            value = guard._refresh_login_qr(self.client, self.root, 'old', wait=4,
+                                            interval=1, now=self._now, sleep=self._sleep)
+        self.assertEqual(value, 'fresh')
+        self.client.call.assert_called_once_with('QQLogin/RefreshQRcode')
+
+    def test_reopening_window_restarts_client_for_new_qr(self):
+        self.client.status.return_value = {'isLogin': False, 'loginPhase': 'waiting_qrcode'}
+        self.client.call.return_value = {}
+        opened = []
+        restarts = []
+
+        class Ephemeral:
+            def __init__(self):
+                self.calls = 0
+
+            def poll(self):
+                self.calls += 1
+                return None if self.calls <= 1 else 1
+
+            def kill(self):
+                pass
+
+        def _render(url, target):
+            target.write_bytes(url.encode())
+            return target
+
+        def _open(proc, image, uin, popen):
+            opened.append(image.read_bytes())
+            return Ephemeral()
+
+        current = ['old']
+
+        def _restart(root, previous_url, **kwargs):
+            restarts.append(previous_url)
+            current[0] = 'fresh'
+            return 'fresh'
+
+        with patch.object(guard, '_latest_login_url', side_effect=lambda root: current[0]), \
+             patch.object(guard, '_refresh_login_qr', return_value=''), \
+             patch.object(guard, '_restart_client_for_qr', side_effect=_restart), \
+             patch.object(guard, '_render_login_qr', side_effect=_render), \
+             patch.object(guard, '_open_window', side_effect=_open), \
+             patch.object(guard, '_close_window'), \
+             patch.object(guard, '_webui_alive', return_value=True):
+            guard.qr_window_loop(self.client, seconds=12, interval=3, now=self._now,
+                                 sleep=self._sleep, popen=lambda *a, **k: _Proc(),
+                                 root=self.root, port=6099)
+        self.assertEqual(opened, [b'old', b'fresh'])
+        self.assertEqual(restarts, ['old'])
 
 
 if __name__ == '__main__':

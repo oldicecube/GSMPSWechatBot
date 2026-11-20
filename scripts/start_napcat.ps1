@@ -45,14 +45,6 @@ if (-not $PlanOnly) {
         exit 0
     }
 }
-$launcherMutex = $null
-if (-not $PlanOnly) {
-    $launcherMutex = New-Object System.Threading.Mutex($false, 'Global\GSMPSWechatBotNapCatLauncher')
-    if (-not $launcherMutex.WaitOne(0)) {
-        Write-Host 'Another NapCat launcher is already active. Refusing to start a second client.'
-        exit 0
-    }
-}
 $env:NAPCAT_PATCH_PACKAGE = Join-Path $napcatRoot 'qqnt.json'
 $env:NAPCAT_LOAD_PATH = Join-Path $napcatRoot 'loadNapCat.js'
 $env:NAPCAT_INJECT_PATH = Join-Path $napcatRoot 'NapCatWinBootHook.dll'
@@ -78,4 +70,4 @@ if ($Background) {
 Write-Host 'Starting NapCat for interactive QQ login. MaiBot and WeChat processes are unchanged.'
 Start-LoginWatch
 Push-Location -LiteralPath $napcatRoot
-try { & $launcherPath $qqPath $env:NAPCAT_INJECT_PATH @loginArgs } finally { Pop-Location; if ($launcherMutex) { try { $launcherMutex.ReleaseMutex() } catch {}; $launcherMutex.Dispose() } }
+try { & $launcherPath $qqPath $env:NAPCAT_INJECT_PATH @loginArgs } finally { Pop-Location }
